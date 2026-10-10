@@ -1,0 +1,13 @@
+[package]
+name = "tok-events"
+description = "tok 本地事件与跨节点事件组件"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+tok-core.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,16 @@
+[package]
+name = "tok-rpc"
+description = "tok 内部 gRPC 与 Tower 中间件接入"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+tok-core.workspace = true
+tok-proto.workspace = true
+tonic.workspace = true
+tower.workspace = true
+
+[lints]
+workspace = true

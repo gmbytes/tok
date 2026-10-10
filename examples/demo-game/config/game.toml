@@ -1,0 +1,12 @@
+node_id = "game"
+discovery = "kubernetes"
+
+[[roles]]
+kind = "player"
+instance_id = "player-1"
+address = "0.0.0.0:7001"
+
+[[roles]]
+kind = "global-instance"
+instance_id = "guild-1"
+address = "0.0.0.0:7002"

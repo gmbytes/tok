@@ -1,0 +1,15 @@
+[package]
+name = "tok-gateway"
+description = "tok 局内与局外网关扩展骨架"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+tok-core.workspace = true
+tok-events.workspace = true
+tok-rpc.workspace = true
+
+[lints]
+workspace = true

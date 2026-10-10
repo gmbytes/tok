@@ -1,0 +1,7 @@
+node_id = "gateway"
+discovery = "kubernetes"
+
+[[roles]]
+kind = "outside-gateway"
+instance_id = "gateway-1"
+address = "0.0.0.0:7000"

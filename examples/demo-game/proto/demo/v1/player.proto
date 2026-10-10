@@ -1,0 +1,12 @@
+syntax = "proto3";
+
+package demo.v1;
+
+// 业务协议只属于示例游戏，框架 crate 不依赖这些类型。
+message GetPlayerRequest {
+  uint64 player_id = 1;
+}
+
+message GetPlayerResponse {
+  uint64 player_id = 1;
+}

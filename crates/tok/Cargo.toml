@@ -1,0 +1,19 @@
+[package]
+name = "tok"
+description = "tok 游戏服务器框架入口与角色组装"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+tok-core.workspace = true
+tok-events.workspace = true
+tok-gateway.workspace = true
+tok-infra.workspace = true
+tok-rpc.workspace = true
+serde.workspace = true
+toml.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,17 @@
+node_id = "local"
+discovery = "memory"
+
+[[roles]]
+kind = "outside-gateway"
+instance_id = "local-gateway"
+address = "127.0.0.1:7000"
+
+[[roles]]
+kind = "player"
+instance_id = "local-player"
+address = "127.0.0.1:7001"
+
+[[roles]]
+kind = "global-instance"
+instance_id = "local-guild"
+address = "127.0.0.1:7002"

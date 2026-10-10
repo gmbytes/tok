@@ -1,0 +1,15 @@
+syntax = "proto3";
+
+package tok.internal.v1;
+
+// 内部调用传递的游戏消息，不包含任何具体游戏的 protobuf 类型。
+message Payload {
+  uint32 message_id = 1;
+  bytes body = 2;
+}
+
+// 内部错误描述，客户端错误码映射由游戏协议定义。
+message RpcError {
+  uint32 code = 1;
+  string message = 2;
+}

@@ -1,0 +1,17 @@
+[package]
+name = "tok-proto"
+description = "tok 框架内部 protobuf 协议"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+prost.workspace = true
+
+[build-dependencies]
+prost-build.workspace = true
+protoc-bin-vendored.workspace = true
+
+[lints]
+workspace = true

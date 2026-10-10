@@ -1,0 +1,23 @@
+[package]
+name = "demo-game"
+description = "tok 单二进制多角色游戏接入示例"
+publish = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+tok.workspace = true
+clap.workspace = true
+prost.workspace = true
+tonic.workspace = true
+tonic-prost.workspace = true
+
+[build-dependencies]
+prost-build.workspace = true
+protoc-bin-vendored.workspace = true
+tonic-prost-build.workspace = true
+
+[lints]
+workspace = true
