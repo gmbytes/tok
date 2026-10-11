@@ -5,7 +5,7 @@ use std::{
 
 use tok_core::{Error, Result, ServiceDescriptor, ServiceDirectory, ServiceKind};
 
-type Services = BTreeMap<(ServiceKind, String), ServiceDescriptor>;
+type Services = BTreeMap<(String, String), ServiceDescriptor>;
 
 /// 单进程多角色共享的服务目录，不访问外部注册后端。
 #[derive(Debug, Clone, Default)]
@@ -19,22 +19,27 @@ impl MemoryDirectory {
             .services
             .write()
             .map_err(|_| Error::DirectoryUnavailable)?;
-        let key = (service.kind, service.instance_id.clone());
+        let key = (service.node_id.clone(), service.service_name.clone());
         match services.entry(key) {
             Entry::Vacant(entry) => {
                 entry.insert(service);
                 Ok(())
             }
-            Entry::Occupied(_) => Err(Error::DuplicateService(service.instance_id)),
+            Entry::Occupied(_) => Err(Error::DuplicateService(format!(
+                "{}/{}",
+                service.node_id, service.service_name
+            ))),
         }
     }
 
-    pub fn unregister(&self, kind: ServiceKind, instance_id: &str) -> Result<bool> {
+    pub fn unregister(&self, node_id: &str, service_name: &str) -> Result<bool> {
         let mut services = self
             .services
             .write()
             .map_err(|_| Error::DirectoryUnavailable)?;
-        Ok(services.remove(&(kind, instance_id.to_owned())).is_some())
+        Ok(services
+            .remove(&(node_id.to_owned(), service_name.to_owned()))
+            .is_some())
     }
 }
 

@@ -1,7 +1,13 @@
 node_id = "gateway"
 discovery = "kubernetes"
 
+[observability]
+log_format = "json"
+log_filter = "info"
+# metrics_address = "0.0.0.0:9090"
+# otlp_endpoint = "http://otel-collector:4317"
+
 [[roles]]
 kind = "outside-gateway"
-instance_id = "gateway-1"
+service_name = "outside-gateway"
 address = "0.0.0.0:7000"

@@ -14,7 +14,7 @@ pub enum DiscoveryBackend {
 #[serde(deny_unknown_fields)]
 pub struct RoleConfig {
     pub kind: ServiceKind,
-    pub instance_id: String,
+    pub service_name: String,
     pub address: SocketAddr,
 }
 
@@ -24,6 +24,8 @@ pub struct AppConfig {
     pub node_id: String,
     pub discovery: DiscoveryBackend,
     pub roles: Vec<RoleConfig>,
+    #[serde(default)]
+    pub observability: tok_observability::Config,
 }
 
 impl AppConfig {
@@ -35,6 +37,9 @@ impl AppConfig {
     }
 
     pub fn validate(&self) -> Result<()> {
+        self.observability
+            .validate()
+            .map_err(|error| Error::InvalidConfig(error.to_string()))?;
         if self.node_id.trim().is_empty() {
             return Err(Error::InvalidConfig("node_id 不能为空".into()));
         }
@@ -43,13 +48,13 @@ impl AppConfig {
         }
         let mut identities = BTreeSet::new();
         for role in &self.roles {
-            if role.instance_id.trim().is_empty() || role.address.port() == 0 {
-                return Err(Error::InvalidConfig("角色需要实例 ID 和非零端口".into()));
+            if role.service_name.trim().is_empty() || role.address.port() == 0 {
+                return Err(Error::InvalidConfig("角色需要服务名和非零端口".into()));
             }
-            if !identities.insert((role.kind, &role.instance_id)) {
+            if !identities.insert(&role.service_name) {
                 return Err(Error::InvalidConfig(format!(
-                    "重复的服务实例：{}",
-                    role.instance_id
+                    "节点内重复的服务名：{}",
+                    role.service_name
                 )));
             }
         }
@@ -61,7 +66,8 @@ impl AppConfig {
         self.roles
             .iter()
             .map(|role| ServiceDescriptor {
-                instance_id: role.instance_id.clone(),
+                node_id: self.node_id.clone(),
+                service_name: role.service_name.clone(),
                 kind: role.kind,
                 address: role.address,
             })

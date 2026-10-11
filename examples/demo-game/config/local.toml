@@ -1,17 +1,29 @@
 node_id = "local"
 discovery = "memory"
 
+[observability]
+log_filter = "info"
+log_format = "text"
+# 按需启用；省略时不监听指标端口、不导出追踪。
+# metrics_address = "127.0.0.1:9090"
+# otlp_endpoint = "http://127.0.0.1:4317"
+# trace_filter = "info"
+# trace_sample_ratio = 1.0
+# [[observability.trace_force_rules]]
+# span = "client_request"
+# fields = { player_id = 123 }
+
 [[roles]]
 kind = "outside-gateway"
-instance_id = "local-gateway"
+service_name = "outside-gateway"
 address = "127.0.0.1:7000"
 
 [[roles]]
 kind = "player"
-instance_id = "local-player"
+service_name = "player"
 address = "127.0.0.1:7001"
 
 [[roles]]
 kind = "global-instance"
-instance_id = "local-guild"
+service_name = "guild"
 address = "127.0.0.1:7002"

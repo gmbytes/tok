@@ -3,7 +3,7 @@
 pub enum Error {
     #[error("配置错误：{0}")]
     InvalidConfig(String),
-    #[error("服务实例已注册：{0}")]
+    #[error("节点服务已注册：{0}")]
     DuplicateService(String),
     #[error("内存服务目录锁不可用")]
     DirectoryUnavailable,

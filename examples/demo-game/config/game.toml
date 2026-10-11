@@ -1,12 +1,18 @@
 node_id = "game"
 discovery = "kubernetes"
 
+[observability]
+log_format = "json"
+log_filter = "info"
+# metrics_address = "0.0.0.0:9090"
+# otlp_endpoint = "http://otel-collector:4317"
+
 [[roles]]
 kind = "player"
-instance_id = "player-1"
+service_name = "player"
 address = "0.0.0.0:7001"
 
 [[roles]]
 kind = "global-instance"
-instance_id = "guild-1"
+service_name = "guild"
 address = "0.0.0.0:7002"

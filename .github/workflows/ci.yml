@@ -22,7 +22,7 @@ jobs:
         run: just verify
       - name: 构建示例二进制
         run: just build
-      - name: 验证示例配置与目录
-        run: just run
+      - name: 验证示例角色启动与退出
+        run: just smoke
       - name: 验证生产角色配置
         run: just config-check examples/demo-game/config/game.toml
