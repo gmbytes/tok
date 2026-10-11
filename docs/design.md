@@ -24,7 +24,7 @@ player 无状态指处理能力不依赖某个常驻 player 实例或客户端�
 
 任何游戏业务都有具体的业务 ID，统称为 bid。业务可以使用自己的名称，例如 player id、guild id、scene id。业务的路由分类和抽象都以对应的 bid 为依据。
 
-局外网关通过计算 player id 的 hash，选择处理该玩家业务的游戏节点。玩家访问公会等实例服务时，使用目标实例的 bid 路由到对应服务。
+PlayerGateway通过计算 player id 的 hash，选择处理该玩家业务的游戏节点。玩家访问公会等实例服务时，使用目标实例的 bid 路由到对应服务。
 
 服务发现提供节点信息，路由组件结合 bid 的 hash 提供节点亲和性，提高读缓存命中率。亲和性是优化能力，并非所有服务的强制要求。
 
@@ -34,8 +34,8 @@ player 无状态指处理能力不依赖某个常驻 player 实例或客户端�
 | --- | --- | --- |
 | 全局管理服务 | 创建和管理业务实例，处理少量涉及多个实例的业务 | 公会管理器 |
 | 全局实例服务 | 处理具体 bid 对应的实例业务，通过请求级分布式锁避免竞态 | 公会实例 |
-| 局外网关 | 维护客户端连接和玩家 session，串行驱动局外 player 逻辑 | 玩家请求入口 |
-| 局内网关 | 维护局内流量，对接场景服务器，未来支持协调无缝场景切换 | 战斗或大世界入口 |
+| PlayerGateway | 维护客户端连接和玩家 session，串行驱动局外 player 逻辑 | 玩家请求入口 |
+| SceneGateway | 维护局内流量，对接场景服务器，未来支持协调无缝场景切换 | 战斗或大世界入口 |
 | 协调服务 | 协调业务流程与服务资源 | 场景匹配器 |
 | 场景服务 | 执行局内场景逻辑 | 战斗场景、MMO 世界场景 |
 
@@ -43,9 +43,9 @@ player 服务部署在游戏节点上，负责玩家的局外游戏逻辑。其�
 
 ## 客户端接入与网关
 
-### 局外网关
+### PlayerGateway（玩家网关）
 
-客户端通过可替换的接入协议访问局外网关，可以采用 TCP、HTTP、WebSocket 等。局外网关为玩家维护逻辑 session，并根据 player id 的 hash 选择游戏节点。
+客户端通过可替换的接入协议访问PlayerGateway，可以采用 TCP、HTTP、WebSocket 等。PlayerGateway为玩家维护逻辑 session，并根据 player id 的 hash 选择游戏节点。
 
 session 串行执行客户端请求，通过调用游戏节点上的 player 服务完成局外业务逻辑。
 
@@ -55,23 +55,23 @@ session 串行执行客户端请求，通过调用游戏节点上的 player 服�
 
 ```text
 客户端 request
-    → 局外网关 session
+    → PlayerGateway session
     → 按 player id 路由
     → 游戏节点 player 服务
     → response 返回客户端
 ```
 
-### 局内网关
+### SceneGateway（场景网关）
 
-局内网关维护局内流量，并连接到玩家所在的场景服务器，消息以异步方式处理。接入协议可替换，KCP 或 UDP 是可选实现。
+SceneGateway维护局内流量，并连接到玩家所在的场景服务器，消息以异步方式处理。接入协议可替换，KCP 或 UDP 是可选实现。
 
 局内与局外的分类依据业务职责和执行语义，不绑定具体网络协议。两类网关可以按配置组合适合的接入与安全组件。
 
-未来支持 MMO 无缝大世界时，局内网关还将负责协调场景切换。当前不设计无缝切换协议。
+未来支持 MMO 无缝大世界时，SceneGateway还将负责协调场景切换。当前不设计无缝切换协议。
 
 ```text
 客户端局内消息
-    → 局内网关
+    → SceneGateway
     → 对应场景服务器
 ```
 
@@ -81,7 +81,7 @@ player 服务采用无状态的执行模型，不要求 player 常驻或依赖�
 
 当前设计以全局唯一的局外 session 串行驱动作为 player 状态访问的基础。在这个约定下，player 对自身数据的变更不需要业务锁。
 
-所有驱动 player 执行的来源，包括客户端业务请求、timer 和转发事件，都进入同一个 session 执行序列。其他服务不能绕过局外网关直接调用 player。认证、重连和确认等网关控制消息由接入与会话组件处理。
+所有驱动 player 执行的来源，包括客户端业务请求、timer 和转发事件，都进入同一个 session 执行序列。其他服务不能绕过PlayerGateway直接调用 player。认证、重连和确认等网关控制消息由接入与会话组件处理。
 
 player 可以调用其他服务完成业务。由于 player 通常是较大的服务，可以通过本地事件解耦内部模块；本地事件也可以纳入统一的事件抽象，其处理不能绕过 session 驱动的串行边界并发修改 player 数据。
 
@@ -136,7 +136,7 @@ timer RPC 失败按系统级错误记录日志，不自动重试该次触发。�
 
 ## 服务通信与调用边界
 
-不同服务之间通过 gRPC 交互。局外业务中，只有局外网关可以调用 player，player 可以调用其他服务。
+不同服务之间通过 gRPC 交互。局外业务中，只有PlayerGateway可以调用 player，player 可以调用其他服务。
 
 内部 RPC 使用标准 gRPC 协议，Rust 实现采用 tonic，protobuf 消息类型和编解码采用 prost。通过配套代码生成工具从 `.proto` 生成消息类型、RPC 客户端和服务端接口。
 
@@ -144,7 +144,7 @@ RPC 基础设施使用 Tower 的 Service 与 Layer 抽象组织中间件，包�
 
 session 串行执行、timerSpec 调度和 bid 路由由框架组件负责。RPC 中间件不添加重试层，保持快速失败策略。
 
-其他服务需要通知 player 时，通过封装在 NATS 之上的转发事件进入局外网关，再由 session 驱动 player 处理。按事件类型选择 Core NATS 或 JetStream，见事件投递与重复处理。
+其他服务需要通知 player 时，通过封装在 NATS 之上的转发事件进入PlayerGateway，再由 session 驱动 player 处理。按事件类型选择 Core NATS 或 JetStream，见事件投递与重复处理。
 
 RPC 不重试，采用快速失败策略。客户端请求链路上的 RPC 失败转换为协议层 Response 的 ErrorCode，客户端展示错误提示；其他 RPC 调用向调用方返回失败。
 
@@ -199,14 +199,14 @@ player 或其他服务
 
 ### 转发事件
 
-转发事件用于通知 player，由局外网关接收并通过 session 转发到 player。
+转发事件用于通知 player，由PlayerGateway接收并通过 session 转发到 player。
 
 对离线 player 默认不拉起，业务可以选择允许拉起。登录时恢复相关业务状态是主要业务模式。
 
 ```text
 其他服务
     → 转发事件
-    → 局外网关 session
+    → PlayerGateway session
     → player 服务
 ```
 
@@ -239,7 +239,7 @@ Core NATS 是至多一次投递，JetStream 可提供至少一次消费并发生
 | --- | --- |
 | 客户端 request | 服务器必须给出对应 response，非预期错误通过 ErrorCode 表达 |
 | 服务端 dispatch 或 notify | 服务端主动向客户端推送 |
-| 其他服务通知 player | 使用转发事件，经局外网关和 session 处理 |
+| 其他服务通知 player | 使用转发事件，经PlayerGateway和 session 处理 |
 | player 或其他服务通知客户端 | 使用广播事件 |
 | 其他服务之间交互 | 使用 RPC，不重试、快速失败，并避免形成调用环 |
 | HTTP 等外部接口服务访问内部业务 | 使用 RPC 或事件 |
@@ -254,7 +254,7 @@ Response 始终作为请求的协议回应，非预期错误也通过 Response �
 
 逻辑消息包含 Request、Response 或 Notify 类型、消息 ID、请求序号，以及具体游戏定义的 protobuf 消息体。Response 通过请求序号关联 Request，并可以包含 ErrorCode。接入适配器负责映射这些语义：例如 TCP 实现可以使用长度字段分帧，HTTP 实现可以将路由、请求头和消息体映射成逻辑消息。具体字段布局后续确定。
 
-局外网关解析消息外层，根据 session 中的可信 player id 调用 player 的通用 gRPC 入口，传递消息 ID 和 payload。player 侧的注册适配层解码具体 Request、调用强类型业务处理函数，再编码 Response。timerSpec 属于内部返回信息，由 session 消费，不直接包含在客户端业务回应中。
+PlayerGateway解析消息外层，根据 session 中的可信 player id 调用 player 的通用 gRPC 入口，传递消息 ID 和 payload。player 侧的注册适配层解码具体 Request、调用强类型业务处理函数，再编码 Response。timerSpec 属于内部返回信息，由 session 消费，不直接包含在客户端业务回应中。
 
 框架提供强类型通知接口，由适配层负责消息 ID、编码及广播事件封装。游戏维护稳定的消息 ID 和 Request 与 Response 的配对关系；初期显式注册，后续可从协议定义生成服务端分发表与客户端映射。
 
@@ -338,7 +338,7 @@ player 可以使用读缓存。存储层后续单独设计，缓存失效、持�
 
 以 Pod 作为部署节点的基础，一个 Pod 中的游戏进程可按配置承载多个服务。node_id 可使用 Pod UID，通过 (node_id, service_name) 定位服务；Pod 内进程重启的启动代次单独标识，具体身份获取与注册校验在发现实现时补齐。
 
-部署组合由用户决定，例如局外网关独立部署、游戏节点组合 player 与公会等低频服务、场景节点独立部署。一个服务处理多个 bid，不为每个业务实体创建 Pod。组合在同一进程的服务共享进程资源与故障边界，并随同一个部署节点扩缩容；需要独立扩缩容或资源隔离时可以拆分部署。
+部署组合由用户决定，例如PlayerGateway独立部署、游戏节点组合 player 与公会等低频服务、场景节点独立部署。一个服务处理多个 bid，不为每个业务实体创建 Pod。组合在同一进程的服务共享进程资源与故障边界，并随同一个部署节点扩缩容；需要独立扩缩容或资源隔离时可以拆分部署。
 
 服务实例通过 Kubernetes 部署和 Service 配置暴露。发现组件采用 informer 或等价的监听与本地缓存机制，获取 Service 对应的 EndpointSlice，维护实例地址、端口和就绪状态。
 
@@ -430,7 +430,28 @@ tok/
 | tok-gateway | 局外 session、timer、下行补发与交接，以及局内场景接入、协议与安全适配 |
 | tok | 对外 API 入口、配置、运行时服务组装与生命周期监督 |
 
-tok-gateway 内部按 outside、inside、transport、security 和 codec 分模块。outside 包含 session、timer、outbound 和 resume；inside 包含场景网关。协议适配器初期作为模块，实际需要独立发布或隔离依赖时再拆 crate。
+tok-gateway 按 player、scene、transport、security 和 codec 分模块，网关名称统一为 PlayerGateway 和 SceneGateway，分别对接 player 服务与场景服务。两者均可维护 session，名称不依据是否有 session、玩法所在位置或传输协议划分；本文“局外／局内”仍用于描述默认业务分工。
+
+```text
+tok-gateway/src/
+├── lib.rs
+├── player/
+│   ├── mod.rs
+│   ├── gateway.rs
+│   ├── session.rs
+│   ├── timer.rs
+│   ├── outbound.rs
+│   └── resume.rs
+├── scene/
+│   ├── mod.rs
+│   ├── gateway.rs
+│   └── session.rs
+├── transport/
+├── security/
+└── codec/
+```
+
+player 模块包含玩家逻辑会话、串行执行、timer、下行缓存和重连交接；scene 模块包含场景接入和场景连接会话。transport、security 和 codec 供两类网关按需组合。两类 session 按各自业务语义设计，不自动套用相同的串行或所有权约定。当前目录仅提供扩展骨架，协议适配器初期作为模块，实际需要独立发布或隔离依赖时再拆 crate。
 
 依赖保持单向：游戏依赖 tok 组装入口及必要组件；tok 依赖组件 crate；组件依赖 tok-core 或 tok-proto，不反向依赖具体游戏或 tok 组装层。网关通过基础契约使用发现、路由与所有权实现，具体实现由组装层选择。RPC 与事件组件不依赖网关。
 
@@ -477,7 +498,7 @@ workspace 统一 edition、工具链、依赖版本、lint 和 release 配置，
 | 目标平台 | Windows amd64 和 Linux amd64，分别构建并验证 |
 | 服务发现 | 生产使用 Kubernetes，开发使用单进程内存目录，通过统一接口提供节点信息 |
 | 跨实体一致性 | 业务自行处理，例如按 ID 排序加锁，当前不设计通用框架方案 |
-| 无缝场景切换 | 保留局内网关的未来职责，当前不设计具体协议 |
+| 无缝场景切换 | 保留SceneGateway的未来职责，当前不设计具体协议 |
 | 存储细节 | 后续单独设计 |
 | 容量与运行指标 | 开发过程中补齐，不阻塞当前设计 |
 | 资源隔离 | 必须具备，具体实现随服务部署和运行模型细化 |

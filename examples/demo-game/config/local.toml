@@ -24,7 +24,7 @@ protocol = "grpc"
 address = "127.0.0.1:7001"
 
 [[services]]
-service_name = "outside-gateway"
+service_name = "player-gateway"
 endpoint = "client"
 
 [[services]]

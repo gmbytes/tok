@@ -1,6 +1,6 @@
 [package]
 name = "tok-gateway"
-description = "tok 局内与局外网关扩展骨架"
+description = "tok PlayerGateway 与 SceneGateway 扩展骨架"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

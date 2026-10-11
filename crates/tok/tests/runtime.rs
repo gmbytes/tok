@@ -83,7 +83,7 @@ fn register(
 }
 
 fn assert_empty(directory: &tok::infra::discovery::MemoryDirectory) {
-    for service_name in ["outside-gateway", "player", "guild"] {
+    for service_name in ["player-gateway", "player", "guild"] {
         assert!(directory.snapshot(service_name).unwrap().is_empty());
     }
 }
@@ -141,7 +141,7 @@ async fn services_are_registered_then_drained_on_shutdown() {
     let mut app = app();
     let directory = app.directory();
     let stopped = Arc::new(AtomicUsize::new(0));
-    for service_name in ["outside-gateway", "player", "guild"] {
+    for service_name in ["player-gateway", "player", "guild"] {
         register(&mut app, service_name, Behavior::Wait, &stopped);
     }
     let inspect = directory.clone();
@@ -153,7 +153,7 @@ async fn services_are_registered_then_drained_on_shutdown() {
         })
         .await
         .unwrap();
-        assert_eq!(inspect.snapshot("outside-gateway").unwrap().len(), 1);
+        assert_eq!(inspect.snapshot("player-gateway").unwrap().len(), 1);
         assert_eq!(inspect.snapshot("player").unwrap().len(), 1);
         Ok(())
     })
@@ -168,7 +168,7 @@ async fn startup_failure_rolls_back_started_services() {
     let mut app = app();
     let directory = app.directory();
     let stopped = Arc::new(AtomicUsize::new(0));
-    register(&mut app, "outside-gateway", Behavior::Wait, &stopped);
+    register(&mut app, "player-gateway", Behavior::Wait, &stopped);
     register(&mut app, "player", Behavior::FailStart, &stopped);
     register(&mut app, "guild", Behavior::Wait, &stopped);
     assert!(matches!(
@@ -185,7 +185,7 @@ async fn unexpected_exit_and_panic_stop_the_process() {
         let mut app = app();
         let directory = app.directory();
         let stopped = Arc::new(AtomicUsize::new(0));
-        register(&mut app, "outside-gateway", Behavior::Wait, &stopped);
+        register(&mut app, "player-gateway", Behavior::Wait, &stopped);
         register(&mut app, "player", behavior, &stopped);
         register(&mut app, "guild", Behavior::Wait, &stopped);
         let error = app.run_until(pending()).await.unwrap_err();
@@ -203,7 +203,7 @@ async fn shutdown_deadline_aborts_uncooperative_service() {
     let mut app = app();
     let directory = app.directory();
     let stopped = Arc::new(AtomicUsize::new(0));
-    register(&mut app, "outside-gateway", Behavior::Hang, &stopped);
+    register(&mut app, "player-gateway", Behavior::Hang, &stopped);
     register(&mut app, "player", Behavior::Wait, &stopped);
     register(&mut app, "guild", Behavior::Wait, &stopped);
     let inspect = directory.clone();
@@ -229,7 +229,7 @@ async fn startup_deadline_and_signal_cancel_pending_initialization() {
         let mut app = app();
         let directory = app.directory();
         let stopped = Arc::new(AtomicUsize::new(0));
-        register(&mut app, "outside-gateway", Behavior::Wait, &stopped);
+        register(&mut app, "player-gateway", Behavior::Wait, &stopped);
         register(&mut app, "player", Behavior::SlowStart, &stopped);
         register(&mut app, "guild", Behavior::Wait, &stopped);
         let inspect = directory.clone();
@@ -238,7 +238,7 @@ async fn startup_deadline_and_signal_cancel_pending_initialization() {
                 if !signal {
                     return pending().await;
                 }
-                while inspect.snapshot("outside-gateway").unwrap().is_empty() {
+                while inspect.snapshot("player-gateway").unwrap().is_empty() {
                     tokio::task::yield_now().await;
                 }
                 Ok(())
@@ -259,7 +259,7 @@ async fn missing_factory_is_rejected_before_any_service_starts() {
     let mut app = app();
     let directory = app.directory();
     let stopped = Arc::new(AtomicUsize::new(0));
-    register(&mut app, "outside-gateway", Behavior::Wait, &stopped);
+    register(&mut app, "player-gateway", Behavior::Wait, &stopped);
     assert!(matches!(
         app.run_until(pending()).await,
         Err(RuntimeError::MissingService(name)) if name == "player"
@@ -272,7 +272,7 @@ async fn dropping_run_future_removes_directory_entries() {
     let mut app = app();
     let directory = app.directory();
     let stopped = Arc::new(AtomicUsize::new(0));
-    for service_name in ["outside-gateway", "player", "guild"] {
+    for service_name in ["player-gateway", "player", "guild"] {
         register(&mut app, service_name, Behavior::Wait, &stopped);
     }
     let task = tokio::spawn(app.run_until(pending()));

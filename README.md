@@ -13,6 +13,8 @@
 
 当前已提供工程骨架、配置校验、内存目录、protobuf 构建流程、配置驱动的服务生命周期及可观测组件。运行示例会启动多个服务的生命周期任务并持续运行，按 Ctrl+C 优雅退出。游戏网络监听、session 执行器、Redis 所有权、Kubernetes 发现和 NATS 消费尚未实现。
 
+网关统一命名为 `PlayerGateway` 和 `SceneGateway`，分别对接 player 与场景服务。`tok-gateway` 中的 `player/` 放置玩家逻辑 session、timer、下行补发及重连交接，`scene/` 放置场景接入和场景连接 session；`transport/`、`security/`、`codec/` 提供按需组合的接入组件。示例玩家网关服务名为 `player-gateway`。
+
 ## 开发命令
 
 需要安装 rustup 和 just。仓库固定 Rust 1.99.0；protoc 由构建依赖提供，无需额外安装。
