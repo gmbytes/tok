@@ -8,6 +8,5 @@ log_filter = "info"
 # otlp_endpoint = "http://otel-collector:4317"
 
 [[roles]]
-kind = "outside-gateway"
 service_name = "outside-gateway"
 address = "0.0.0.0:7000"

@@ -14,16 +14,13 @@ log_format = "text"
 # fields = { player_id = 123 }
 
 [[roles]]
-kind = "outside-gateway"
 service_name = "outside-gateway"
 address = "127.0.0.1:7000"
 
 [[roles]]
-kind = "player"
 service_name = "player"
 address = "127.0.0.1:7001"
 
 [[roles]]
-kind = "global-instance"
 service_name = "guild"
 address = "127.0.0.1:7002"

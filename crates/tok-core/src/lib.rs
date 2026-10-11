@@ -6,4 +6,4 @@ pub mod service;
 
 pub use discovery::ServiceDirectory;
 pub use error::{Error, Result};
-pub use service::{ServiceDescriptor, ServiceKind};
+pub use service::ServiceDescriptor;

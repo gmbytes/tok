@@ -3,7 +3,7 @@ use std::{
     sync::{Arc, RwLock},
 };
 
-use tok_core::{Error, Result, ServiceDescriptor, ServiceDirectory, ServiceKind};
+use tok_core::{Error, Result, ServiceDescriptor, ServiceDirectory};
 
 type Services = BTreeMap<(String, String), ServiceDescriptor>;
 
@@ -44,14 +44,14 @@ impl MemoryDirectory {
 }
 
 impl ServiceDirectory for MemoryDirectory {
-    fn snapshot(&self, kind: ServiceKind) -> Result<Vec<ServiceDescriptor>> {
+    fn snapshot(&self, service_name: &str) -> Result<Vec<ServiceDescriptor>> {
         let services = self
             .services
             .read()
             .map_err(|_| Error::DirectoryUnavailable)?;
         Ok(services
             .values()
-            .filter(|service| service.kind == kind)
+            .filter(|service| service.service_name == service_name)
             .cloned()
             .collect())
     }

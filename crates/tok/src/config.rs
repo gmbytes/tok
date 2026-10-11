@@ -1,7 +1,7 @@
 use std::{collections::BTreeSet, net::SocketAddr};
 
 use serde::Deserialize;
-use tok_core::{Error, Result, ServiceDescriptor, ServiceKind};
+use tok_core::{Error, Result, ServiceDescriptor};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -13,7 +13,6 @@ pub enum DiscoveryBackend {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RoleConfig {
-    pub kind: ServiceKind,
     pub service_name: String,
     pub address: SocketAddr,
 }
@@ -68,7 +67,6 @@ impl AppConfig {
             .map(|role| ServiceDescriptor {
                 node_id: self.node_id.clone(),
                 service_name: role.service_name.clone(),
-                kind: role.kind,
                 address: role.address,
             })
             .collect()

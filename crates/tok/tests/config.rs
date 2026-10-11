@@ -40,12 +40,15 @@ fn invalid_or_misspelled_config_is_rejected() {
     assert!(AppConfig::from_toml(&local.replace("127.0.0.1:7000", "127.0.0.1:0")).is_err());
     assert!(AppConfig::from_toml(&local.replace("service_name", "instance_id")).is_err());
     assert!(
+        AppConfig::from_toml(&local.replace("[[roles]]", "[[roles]]\nkind = 'player'")).is_err()
+    );
+    assert!(
         AppConfig::from_toml(&local.replace("service_name = \"player\"", "service_name = \" \""))
             .is_err()
     );
     let duplicate = format!(
         "{local}\n{}",
-        "[[roles]]\nkind = 'scene'\nservice_name = 'player'\naddress = '127.0.0.1:9000'"
+        "[[roles]]\nservice_name = 'player'\naddress = '127.0.0.1:9000'"
     );
     assert!(AppConfig::from_toml(&duplicate).is_err());
 }

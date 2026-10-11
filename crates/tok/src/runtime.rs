@@ -2,7 +2,7 @@
 
 use std::{collections::BTreeMap, future::Future, pin::Pin, sync::Arc, time::Duration};
 
-use tok_core::{ServiceDescriptor, ServiceKind};
+use tok_core::ServiceDescriptor;
 use tok_infra::discovery::MemoryDirectory;
 use tokio::task::{JoinError, JoinSet};
 pub use tokio_util::sync::CancellationToken;
@@ -31,10 +31,10 @@ pub trait RoleFactory: Send + Sync {
 pub enum RuntimeError {
     #[error(transparent)]
     Core(#[from] tok_core::Error),
-    #[error("角色未注册：{0:?}")]
-    MissingRole(ServiceKind),
-    #[error("角色重复注册：{0:?}")]
-    DuplicateRole(ServiceKind),
+    #[error("服务未注册：{0}")]
+    MissingRole(String),
+    #[error("服务重复注册：{0}")]
+    DuplicateRole(String),
     #[error("角色 {service_name} 启动失败：{source}")]
     Start {
         service_name: String,
@@ -59,7 +59,7 @@ pub enum RuntimeError {
 
 pub struct Application {
     config: AppConfig,
-    factories: BTreeMap<ServiceKind, Arc<dyn RoleFactory>>,
+    factories: BTreeMap<String, Arc<dyn RoleFactory>>,
     directory: MemoryDirectory,
     startup_timeout: Duration,
     shutdown_timeout: Duration,
@@ -78,7 +78,7 @@ impl Drop for Registrations {
             let _ = self
                 .directory
                 .unregister(&service.node_id, &service.service_name);
-            metrics::gauge!("tok_roles_running", "role" => format!("{:?}", service.kind))
+            metrics::gauge!("tok_roles_running", "service_name" => service.service_name.clone())
                 .decrement(1.0);
         }
         self.shutdown.cancel();
@@ -102,13 +102,14 @@ impl Application {
 
     pub fn register(
         &mut self,
-        kind: ServiceKind,
+        service_name: impl Into<String>,
         factory: impl RoleFactory + 'static,
     ) -> Result<(), RuntimeError> {
-        if self.factories.contains_key(&kind) {
-            return Err(RuntimeError::DuplicateRole(kind));
+        let service_name = service_name.into();
+        if self.factories.contains_key(&service_name) {
+            return Err(RuntimeError::DuplicateRole(service_name));
         }
-        self.factories.insert(kind, Arc::new(factory));
+        self.factories.insert(service_name, Arc::new(factory));
         Ok(())
     }
 
@@ -129,8 +130,8 @@ impl Application {
         shutdown: impl Future<Output = std::io::Result<()>>,
     ) -> Result<(), RuntimeError> {
         for role in &self.config.roles {
-            if !self.factories.contains_key(&role.kind) {
-                return Err(RuntimeError::MissingRole(role.kind));
+            if !self.factories.contains_key(&role.service_name) {
+                return Err(RuntimeError::MissingRole(role.service_name.clone()));
             }
         }
         let token = CancellationToken::new();
@@ -148,11 +149,10 @@ impl Application {
                     directory: self.directory.clone(),
                     shutdown: token.child_token(),
                 };
-                let factory = self.factories[&service.kind].clone();
+                let factory = self.factories[&service.service_name].clone();
                 let mut starting = JoinSet::new();
-                let role = format!("{:?}", service.kind);
                 let started = std::time::Instant::now();
-                let span = tracing::info_span!("role_start", node_id = %self.config.node_id, role = %role, service_name = %service.service_name);
+                let span = tracing::info_span!("role_start", node_id = %self.config.node_id, service_name = %service.service_name);
                 starting.spawn(async move { factory.start(context).await }.instrument(span));
                 let task = tokio::select! {
                     biased;
@@ -166,9 +166,9 @@ impl Application {
                     }
                 };
                 self.directory.register(service.clone())?;
-                metrics::histogram!("tok_role_start_duration_seconds", "role" => role.clone()).record(started.elapsed().as_secs_f64());
-                metrics::counter!("tok_role_starts_total", "role" => role.clone()).increment(1);
-                metrics::gauge!("tok_roles_running", "role" => role).increment(1.0);
+                metrics::histogram!("tok_role_start_duration_seconds", "service_name" => service.service_name.clone()).record(started.elapsed().as_secs_f64());
+                metrics::counter!("tok_role_starts_total", "service_name" => service.service_name.clone()).increment(1);
+                metrics::gauge!("tok_roles_running", "service_name" => service.service_name.clone()).increment(1.0);
                 registered.services.push(service.clone());
                 tasks.spawn(async move { (service.service_name, task.await) });
             }
@@ -186,7 +186,7 @@ impl Application {
 
         let mut cleanup_error = None;
         for service in registered.services.drain(..).rev() {
-            metrics::gauge!("tok_roles_running", "role" => format!("{:?}", service.kind))
+            metrics::gauge!("tok_roles_running", "service_name" => service.service_name.clone())
                 .decrement(1.0);
             if let Err(error) = self
                 .directory

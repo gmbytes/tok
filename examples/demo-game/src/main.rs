@@ -26,10 +26,10 @@ struct LifecycleRole;
 impl RoleFactory for LifecycleRole {
     fn start(&self, context: RoleContext) -> StartTask {
         Box::pin(async move {
-            tracing::info!(role = ?context.service.kind, service_name = %context.service.service_name, "角色启动（生命周期示例，未监听网络）");
+            tracing::info!(service_name = %context.service.service_name, "角色启动（生命周期示例，未监听网络）");
             Ok(Box::pin(async move {
                 context.shutdown.cancelled().await;
-                tracing::info!(role = ?context.service.kind, service_name = %context.service.service_name, "角色退出");
+                tracing::info!(service_name = %context.service.service_name, "角色退出");
                 Ok(())
             }) as RoleTask)
         })
@@ -45,14 +45,18 @@ async fn main() -> Result<(), Error> {
         println!("配置验证通过");
         return Ok(());
     }
-    let kinds: std::collections::BTreeSet<_> = config.roles.iter().map(|role| role.kind).collect();
+    let service_names: Vec<_> = config
+        .roles
+        .iter()
+        .map(|role| role.service_name.clone())
+        .collect();
     let telemetry =
         Observability::init(&config.observability, "demo-game", &config.node_id).await?;
     tracing::info!(node_id = %config.node_id, discovery = ?config.discovery, roles = config.roles.len(), metrics_address = ?telemetry.metrics_address(), "进程启动");
     let result = async {
         let mut application = Application::new(config)?;
-        for kind in kinds {
-            application.register(kind, LifecycleRole)?;
+        for service_name in service_names {
+            application.register(service_name, LifecycleRole)?;
         }
         tracing::info!("运行角色生命周期，按 Ctrl+C 退出；尚未启动游戏网络服务");
         application

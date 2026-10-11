@@ -8,11 +8,9 @@ log_filter = "info"
 # otlp_endpoint = "http://otel-collector:4317"
 
 [[roles]]
-kind = "player"
 service_name = "player"
 address = "0.0.0.0:7001"
 
 [[roles]]
-kind = "global-instance"
 service_name = "guild"
 address = "0.0.0.0:7002"
