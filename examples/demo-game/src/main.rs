@@ -4,13 +4,15 @@ use clap::Parser;
 use tok::{
     AppConfig,
     observability::{Error, Observability, tracing},
-    runtime::{Application, RoleContext, RoleFactory, RoleTask, StartTask, shutdown_signal},
+    runtime::{
+        Application, ServiceContext, ServiceFactory, ServiceTask, StartTask, shutdown_signal,
+    },
 };
 
 #[derive(Parser)]
-#[command(about = "tok 单进程多角色生命周期示例")]
+#[command(about = "tok 单进程多服务生命周期示例")]
 struct Args {
-    /// 角色配置文件路径。
+    /// 服务配置文件路径。
     #[arg(long, default_value = "examples/demo-game/config/local.toml")]
     config: PathBuf,
     /// 只验证配置，不要求对应发现后端已实现。
@@ -21,17 +23,17 @@ struct Args {
     run_for: Option<u64>,
 }
 
-struct LifecycleRole;
+struct LifecycleService;
 
-impl RoleFactory for LifecycleRole {
-    fn start(&self, context: RoleContext) -> StartTask {
+impl ServiceFactory for LifecycleService {
+    fn start(&self, context: ServiceContext) -> StartTask {
         Box::pin(async move {
-            tracing::info!(service_name = %context.service.service_name, "角色启动（生命周期示例，未监听网络）");
+            tracing::info!(service_name = %context.service.service_name, "服务启动（生命周期示例，未监听网络）");
             Ok(Box::pin(async move {
                 context.shutdown.cancelled().await;
-                tracing::info!(service_name = %context.service.service_name, "角色退出");
+                tracing::info!(service_name = %context.service.service_name, "服务退出");
                 Ok(())
-            }) as RoleTask)
+            }) as ServiceTask)
         })
     }
 }
@@ -46,19 +48,19 @@ async fn main() -> Result<(), Error> {
         return Ok(());
     }
     let service_names: Vec<_> = config
-        .roles
+        .services
         .iter()
-        .map(|role| role.service_name.clone())
+        .map(|service| service.service_name.clone())
         .collect();
     let telemetry =
         Observability::init(&config.observability, "demo-game", &config.node_id).await?;
-    tracing::info!(node_id = %config.node_id, discovery = ?config.discovery, roles = config.roles.len(), metrics_address = ?telemetry.metrics_address(), "进程启动");
+    tracing::info!(node_id = %config.node_id, discovery = ?config.discovery, services = config.services.len(), metrics_address = ?telemetry.metrics_address(), "进程启动");
     let result = async {
         let mut application = Application::new(config)?;
         for service_name in service_names {
-            application.register(service_name, LifecycleRole)?;
+            application.register(service_name, LifecycleService)?;
         }
-        tracing::info!("运行角色生命周期，按 Ctrl+C 退出；尚未启动游戏网络服务");
+        tracing::info!("运行服务生命周期，按 Ctrl+C 退出；尚未启动游戏网络服务");
         application
             .run_until(async {
                 match args.run_for {
@@ -70,7 +72,7 @@ async fn main() -> Result<(), Error> {
                 }
             })
             .await?;
-        tracing::info!("所有角色已退出");
+        tracing::info!("所有服务已退出");
         Ok::<(), Error>(())
     }
     .await;

@@ -10,7 +10,7 @@ use std::{
 use tok::{
     AppConfig,
     core::ServiceDirectory,
-    runtime::{Application, RoleContext, RoleFactory, RoleTask, RuntimeError, StartTask},
+    runtime::{Application, RuntimeError, ServiceContext, ServiceFactory, ServiceTask, StartTask},
 };
 
 enum Behavior {
@@ -23,13 +23,13 @@ enum Behavior {
     PanicStart,
 }
 
-struct TestRole {
+struct TestService {
     behavior: Behavior,
     stopped: Arc<AtomicUsize>,
 }
 
-impl RoleFactory for TestRole {
-    fn start(&self, context: RoleContext) -> StartTask {
+impl ServiceFactory for TestService {
+    fn start(&self, context: ServiceContext) -> StartTask {
         let stopped = self.stopped.clone();
         match self.behavior {
             Behavior::FailStart => {
@@ -37,22 +37,22 @@ impl RoleFactory for TestRole {
             }
             Behavior::SlowStart => Box::pin(pending()),
             Behavior::PanicStart => panic!("测试初始化崩溃"),
-            Behavior::Exit => Box::pin(async { Ok(Box::pin(async { Ok(()) }) as RoleTask) }),
-            Behavior::Panic => Box::pin(async { Ok(Box::pin(panic_role()) as RoleTask) }),
-            Behavior::Hang => Box::pin(async { Ok(Box::pin(pending()) as RoleTask) }),
+            Behavior::Exit => Box::pin(async { Ok(Box::pin(async { Ok(()) }) as ServiceTask) }),
+            Behavior::Panic => Box::pin(async { Ok(Box::pin(panic_service()) as ServiceTask) }),
+            Behavior::Hang => Box::pin(async { Ok(Box::pin(pending()) as ServiceTask) }),
             Behavior::Wait => Box::pin(async move {
                 Ok(Box::pin(async move {
                     context.shutdown.cancelled().await;
                     stopped.fetch_add(1, Ordering::SeqCst);
                     Ok(())
-                }) as RoleTask)
+                }) as ServiceTask)
             }),
         }
     }
 }
 
-async fn panic_role() -> Result<(), tok::runtime::RoleError> {
-    panic!("测试角色崩溃")
+async fn panic_service() -> Result<(), tok::runtime::ServiceError> {
+    panic!("测试服务崩溃")
 }
 
 fn app() -> Application {
@@ -74,7 +74,7 @@ fn register(
 ) {
     app.register(
         service_name,
-        TestRole {
+        TestService {
             behavior,
             stopped: stopped.clone(),
         },
@@ -93,8 +93,8 @@ async fn custom_services_use_independent_factories_and_duplicate_names_are_rejec
     let config = AppConfig::from_toml(
         "node_id = 'local'\ndiscovery = 'memory'\n\
          [[endpoints]]\nname = 'internal-rpc'\nprotocol = 'grpc'\naddress = '127.0.0.1:7101'\n\
-         [[roles]]\nservice_name = 'guild'\nendpoint = 'internal-rpc'\n\
-         [[roles]]\nservice_name = 'mail'\nendpoint = 'internal-rpc'",
+         [[services]]\nservice_name = 'guild'\nendpoint = 'internal-rpc'\n\
+         [[services]]\nservice_name = 'mail'\nendpoint = 'internal-rpc'",
     )
     .unwrap();
     let mut app = Application::new(config).unwrap();
@@ -104,11 +104,11 @@ async fn custom_services_use_independent_factories_and_duplicate_names_are_rejec
     register(&mut app, "guild", Behavior::Wait, &guild_stopped);
     register(&mut app, "mail", Behavior::Wait, &mail_stopped);
     assert!(matches!(
-        app.register("mail", TestRole {
+        app.register("mail", TestService {
             behavior: Behavior::FailStart,
             stopped: mail_stopped.clone(),
         }),
-        Err(RuntimeError::DuplicateRole(name)) if name == "mail"
+        Err(RuntimeError::DuplicateService(name)) if name == "mail"
     ));
     let inspect = directory.clone();
     app.run_until(async move {
@@ -137,7 +137,7 @@ async fn custom_services_use_independent_factories_and_duplicate_names_are_rejec
 }
 
 #[tokio::test]
-async fn roles_are_registered_then_drained_on_shutdown() {
+async fn services_are_registered_then_drained_on_shutdown() {
     let mut app = app();
     let directory = app.directory();
     let stopped = Arc::new(AtomicUsize::new(0));
@@ -164,7 +164,7 @@ async fn roles_are_registered_then_drained_on_shutdown() {
 }
 
 #[tokio::test]
-async fn startup_failure_rolls_back_started_roles() {
+async fn startup_failure_rolls_back_started_services() {
     let mut app = app();
     let directory = app.directory();
     let stopped = Arc::new(AtomicUsize::new(0));
@@ -199,7 +199,7 @@ async fn unexpected_exit_and_panic_stop_the_process() {
 }
 
 #[tokio::test]
-async fn shutdown_deadline_aborts_uncooperative_role() {
+async fn shutdown_deadline_aborts_uncooperative_service() {
     let mut app = app();
     let directory = app.directory();
     let stopped = Arc::new(AtomicUsize::new(0));
@@ -255,14 +255,14 @@ async fn startup_deadline_and_signal_cancel_pending_initialization() {
 }
 
 #[tokio::test]
-async fn missing_factory_is_rejected_before_any_role_starts() {
+async fn missing_factory_is_rejected_before_any_service_starts() {
     let mut app = app();
     let directory = app.directory();
     let stopped = Arc::new(AtomicUsize::new(0));
     register(&mut app, "outside-gateway", Behavior::Wait, &stopped);
     assert!(matches!(
         app.run_until(pending()).await,
-        Err(RuntimeError::MissingRole(name)) if name == "player"
+        Err(RuntimeError::MissingService(name)) if name == "player"
     ));
     assert_empty(&directory);
 }

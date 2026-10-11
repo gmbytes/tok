@@ -23,14 +23,14 @@ name = "internal-rpc"
 protocol = "grpc"
 address = "127.0.0.1:7001"
 
-[[roles]]
+[[services]]
 service_name = "outside-gateway"
 endpoint = "client"
 
-[[roles]]
+[[services]]
 service_name = "player"
 endpoint = "internal-rpc"
 
-[[roles]]
+[[services]]
 service_name = "guild"
 endpoint = "internal-rpc"

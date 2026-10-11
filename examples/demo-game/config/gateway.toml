@@ -12,6 +12,6 @@ name = "client"
 protocol = "tcp"
 address = "0.0.0.0:7000"
 
-[[roles]]
+[[services]]
 service_name = "outside-gateway"
 endpoint = "client"

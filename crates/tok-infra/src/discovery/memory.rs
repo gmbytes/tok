@@ -7,7 +7,7 @@ use tok_core::{Error, Result, ServiceDescriptor, ServiceDirectory};
 
 type Services = BTreeMap<(String, String), ServiceDescriptor>;
 
-/// 单进程多角色共享的服务目录，不访问外部注册后端。
+/// 单进程多服务共享的服务目录，不访问外部注册后端。
 #[derive(Debug, Clone, Default)]
 pub struct MemoryDirectory {
     services: Arc<RwLock<Services>>,

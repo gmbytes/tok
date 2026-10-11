@@ -127,7 +127,7 @@ async fn metrics_are_scrapable_and_traces_survive_log_filter_changes() {
         let child = tracing::debug_span!("forced_downstream");
         assert!(child.context().span().span_context().is_sampled());
     }
-    metrics::counter!("test_requests_total", "role" => "player").increment(2);
+    metrics::counter!("test_requests_total", "service_name" => "player").increment(2);
     metrics::histogram!("test_latency_seconds").record(0.01);
     let address = telemetry.metrics_address().unwrap();
     let response = tokio::time::timeout(Duration::from_secs(5), async {
@@ -145,7 +145,7 @@ async fn metrics_are_scrapable_and_traces_survive_log_filter_changes() {
     assert!(response.starts_with("HTTP/1.1 200"));
     assert!(response.contains("test_requests_total{"));
     assert!(response.contains("service=\"test-game\""));
-    assert!(response.contains("role=\"player\""));
+    assert!(response.contains("service_name=\"player\""));
     assert!(response.contains("} 2"));
     assert!(response.contains("test_latency_seconds_bucket{"));
     tokio::time::timeout(Duration::from_secs(10), telemetry.shutdown())

@@ -1,6 +1,6 @@
 [package]
 name = "demo-game"
-description = "tok 单二进制多角色游戏接入示例"
+description = "tok 单二进制多服务游戏接入示例"
 publish = false
 version.workspace = true
 edition.workspace = true

@@ -1,7 +1,7 @@
 use tok::{AppConfig, DiscoveryBackend};
 
 #[test]
-fn example_configs_select_roles_in_the_same_binary() {
+fn example_configs_select_services_in_the_same_binary() {
     for (source, count) in [
         (
             include_str!("../../../examples/demo-game/config/local.toml"),
@@ -17,7 +17,7 @@ fn example_configs_select_roles_in_the_same_binary() {
         ),
     ] {
         let config = AppConfig::from_toml(source).unwrap();
-        assert_eq!(config.roles.len(), count);
+        assert_eq!(config.services.len(), count);
     }
     let local = AppConfig::from_toml(include_str!(
         "../../../examples/demo-game/config/local.toml"
@@ -75,10 +75,12 @@ fn endpoint_protocols_are_extensible_and_services_can_bind_separately() {
 fn invalid_or_misspelled_config_is_rejected() {
     let local = include_str!("../../../examples/demo-game/config/local.toml");
     assert!(AppConfig::from_toml(&local.replace("node_id", "node_name")).is_err());
+    assert!(AppConfig::from_toml(&local.replace("[[services]]", "[[roles]]")).is_err());
     assert!(AppConfig::from_toml(&local.replace("127.0.0.1:7000", "127.0.0.1:0")).is_err());
     assert!(AppConfig::from_toml(&local.replace("service_name", "instance_id")).is_err());
     assert!(
-        AppConfig::from_toml(&local.replace("[[roles]]", "[[roles]]\nkind = 'player'")).is_err()
+        AppConfig::from_toml(&local.replace("[[services]]", "[[services]]\nkind = 'player'"))
+            .is_err()
     );
     assert!(
         AppConfig::from_toml(&local.replace("service_name = \"player\"", "service_name = \" \""))
@@ -86,7 +88,7 @@ fn invalid_or_misspelled_config_is_rejected() {
     );
     let duplicate = format!(
         "{local}\n{}",
-        "[[roles]]\nservice_name = 'player'\nendpoint = 'internal-rpc'"
+        "[[services]]\nservice_name = 'player'\nendpoint = 'internal-rpc'"
     );
     assert!(AppConfig::from_toml(&duplicate).is_err());
 }

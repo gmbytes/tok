@@ -29,7 +29,7 @@ clippy:
 build:
     cargo build --release -p demo-game --locked
 
-# 持续运行角色生命周期示例，Ctrl+C 优雅退出；当前不启动游戏网络服务
+# 持续运行服务生命周期示例，Ctrl+C 优雅退出；当前不启动游戏网络服务
 run config="examples/demo-game/config/local.toml":
     cargo run -p demo-game --locked -- --config "{{config}}"
 
@@ -37,7 +37,7 @@ run config="examples/demo-game/config/local.toml":
 smoke:
     cargo run -p demo-game --locked -- --config examples/demo-game/config/local.toml --run-for 1
 
-# 验证指定角色配置
+# 验证指定服务配置
 config-check config="examples/demo-game/config/local.toml":
     cargo run -p demo-game --locked -- --config "{{config}}" --check-config
 

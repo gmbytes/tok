@@ -1,6 +1,6 @@
 [package]
 name = "tok"
-description = "tok 游戏服务器框架入口与角色组装"
+description = "tok 游戏服务器框架入口与服务组装"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

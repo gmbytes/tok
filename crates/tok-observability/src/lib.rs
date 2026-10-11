@@ -1,4 +1,4 @@
-//! 进程级可观测初始化。库只埋点，游戏入口初始化一次并在角色退出后关闭。
+//! 进程级可观测初始化。库只埋点，游戏入口初始化一次并在服务退出后关闭。
 
 mod json;
 mod sampling;
@@ -255,7 +255,7 @@ impl Observability {
         self.metrics_address
     }
 
-    /// 角色结束后调用；OTLP flush 在阻塞线程执行，避免阻塞异步调度。
+    /// 服务结束后调用；OTLP flush 在阻塞线程执行，避免阻塞异步调度。
     pub async fn shutdown(mut self) -> Result<(), Error> {
         self.shutdown.cancel();
         let mut error: Option<Error> = None;
