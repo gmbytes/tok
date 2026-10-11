@@ -5,6 +5,7 @@ fn player(node_id: &str) -> ServiceDescriptor {
     ServiceDescriptor {
         node_id: node_id.into(),
         service_name: "player".into(),
+        protocol: "grpc".into(),
         address: "127.0.0.1:7001".parse().unwrap(),
     }
 }

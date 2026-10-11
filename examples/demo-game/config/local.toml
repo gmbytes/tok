@@ -13,14 +13,24 @@ log_format = "text"
 # span = "client_request"
 # fields = { player_id = 123 }
 
-[[roles]]
-service_name = "outside-gateway"
+[[endpoints]]
+name = "client"
+protocol = "tcp"
 address = "127.0.0.1:7000"
 
-[[roles]]
-service_name = "player"
+[[endpoints]]
+name = "internal-rpc"
+protocol = "grpc"
 address = "127.0.0.1:7001"
 
 [[roles]]
+service_name = "outside-gateway"
+endpoint = "client"
+
+[[roles]]
+service_name = "player"
+endpoint = "internal-rpc"
+
+[[roles]]
 service_name = "guild"
-address = "127.0.0.1:7002"
+endpoint = "internal-rpc"

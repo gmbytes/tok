@@ -7,6 +7,11 @@ log_filter = "info"
 # metrics_address = "0.0.0.0:9090"
 # otlp_endpoint = "http://otel-collector:4317"
 
+[[endpoints]]
+name = "client"
+protocol = "tcp"
+address = "0.0.0.0:7000"
+
 [[roles]]
 service_name = "outside-gateway"
-address = "0.0.0.0:7000"
+endpoint = "client"

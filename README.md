@@ -34,7 +34,24 @@ just build
 
 游戏通过 `RoleFactory` 注册各类角色。初始化完成后才加入服务目录；角色启动失败、超时、崩溃或提前结束会触发全进程清理，撤销目录并通知已启动角色退出。角色在取消后负责清理自己的资源，超出退出期限会中止任务。示例角色目前仅演示生命周期，配置地址尚未用于网络监听。
 
-进程配置 `node_id`，每个服务配置 `service_name` 和 `address`。服务通过 `(node_id, service_name)` 定位，服务名在节点内唯一，不同节点可使用相同服务名。游戏通过 `Application::register("guild", factory)` 按服务名注册实现，目录通过 `snapshot("guild")` 查询该服务的节点。业务实体仍通过 bid 路由和互斥。
+进程配置 `node_id` 和 `endpoints`，每个端点配置 `name`、`protocol` 和 `address`；各服务通过 `endpoint` 引用端点。多个服务可共享一个内部 gRPC 端点，客户端接入使用另外的端点。协议名由传输实现解释，可扩展；传输参数与加密组件在接入实现时补齐。当前端点配置用于校验和发现描述，尚未启动实际监听。
+
+服务通过 `(node_id, service_name)` 定位，服务名在节点内唯一，不同节点可使用相同服务名。游戏通过 `Application::register("guild", factory)` 按服务名注册实现，目录通过 `snapshot("guild")` 查询该服务的节点及绑定端点的协议、地址。业务实体仍通过 bid 路由和互斥。
+
+```toml
+[[endpoints]]
+name = "internal-rpc"
+protocol = "grpc"
+address = "127.0.0.1:7001"
+
+[[roles]]
+service_name = "player"
+endpoint = "internal-rpc"
+
+[[roles]]
+service_name = "guild"
+endpoint = "internal-rpc"
+```
 
 服务配置还将包含业务服务及其 RPC 中间件链，选择、顺序、参数和作用范围由用户控制。框架通过 Tower 提供常用 Layer 和便捷组装能力；例如公会实例每次 RPC 按 guild id 获取分布式锁，由游戏为该服务配置，锁后端可注入和替换。目前中间件配置与 RPC 调度尚未实现，后续遵循这一组装边界，详见设计文档。
 

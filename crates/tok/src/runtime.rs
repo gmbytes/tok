@@ -143,7 +143,7 @@ impl Application {
         };
         tokio::pin!(shutdown);
         let outcome = async {
-            for service in self.config.service_descriptors() {
+            for service in self.config.service_descriptors()? {
                 let context = RoleContext {
                     service: service.clone(),
                     directory: self.directory.clone(),

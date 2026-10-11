@@ -14,6 +14,15 @@ pub enum DiscoveryBackend {
 #[serde(deny_unknown_fields)]
 pub struct RoleConfig {
     pub service_name: String,
+    pub endpoint: String,
+}
+
+/// 节点内可共享的监听端点；协议名由传输实现解释。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EndpointConfig {
+    pub name: String,
+    pub protocol: String,
     pub address: SocketAddr,
 }
 
@@ -22,6 +31,7 @@ pub struct RoleConfig {
 pub struct AppConfig {
     pub node_id: String,
     pub discovery: DiscoveryBackend,
+    pub endpoints: Vec<EndpointConfig>,
     pub roles: Vec<RoleConfig>,
     #[serde(default)]
     pub observability: tok_observability::Config,
@@ -45,10 +55,31 @@ impl AppConfig {
         if self.roles.is_empty() {
             return Err(Error::InvalidConfig("至少需要配置一个角色".into()));
         }
+        let mut endpoint_names = BTreeSet::new();
+        for endpoint in &self.endpoints {
+            if endpoint.name.trim().is_empty()
+                || endpoint.protocol.trim().is_empty()
+                || endpoint.address.port() == 0
+            {
+                return Err(Error::InvalidConfig("端点需要名称、协议和非零端口".into()));
+            }
+            if !endpoint_names.insert(&endpoint.name) {
+                return Err(Error::InvalidConfig(format!(
+                    "重复的端点名称：{}",
+                    endpoint.name
+                )));
+            }
+        }
         let mut identities = BTreeSet::new();
         for role in &self.roles {
-            if role.service_name.trim().is_empty() || role.address.port() == 0 {
-                return Err(Error::InvalidConfig("角色需要服务名和非零端口".into()));
+            if role.service_name.trim().is_empty() {
+                return Err(Error::InvalidConfig("服务名不能为空".into()));
+            }
+            if !endpoint_names.contains(&role.endpoint) {
+                return Err(Error::InvalidConfig(format!(
+                    "服务 {} 引用了不存在的端点：{}",
+                    role.service_name, role.endpoint
+                )));
             }
             if !identities.insert(&role.service_name) {
                 return Err(Error::InvalidConfig(format!(
@@ -61,13 +92,23 @@ impl AppConfig {
     }
 
     /// 返回配置描述，不表示角色已经启动或就绪。
-    pub fn service_descriptors(&self) -> Vec<ServiceDescriptor> {
+    pub fn service_descriptors(&self) -> Result<Vec<ServiceDescriptor>> {
         self.roles
             .iter()
-            .map(|role| ServiceDescriptor {
-                node_id: self.node_id.clone(),
-                service_name: role.service_name.clone(),
-                address: role.address,
+            .map(|role| {
+                let endpoint = self
+                    .endpoints
+                    .iter()
+                    .find(|endpoint| endpoint.name == role.endpoint)
+                    .ok_or_else(|| {
+                        Error::InvalidConfig(format!("端点不存在：{}", role.endpoint))
+                    })?;
+                Ok(ServiceDescriptor {
+                    node_id: self.node_id.clone(),
+                    service_name: role.service_name.clone(),
+                    protocol: endpoint.protocol.clone(),
+                    address: endpoint.address,
+                })
             })
             .collect()
     }

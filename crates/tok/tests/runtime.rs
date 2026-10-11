@@ -92,8 +92,9 @@ fn assert_empty(directory: &tok::infra::discovery::MemoryDirectory) {
 async fn custom_services_use_independent_factories_and_duplicate_names_are_rejected() {
     let config = AppConfig::from_toml(
         "node_id = 'local'\ndiscovery = 'memory'\n\
-         [[roles]]\nservice_name = 'guild'\naddress = '127.0.0.1:7101'\n\
-         [[roles]]\nservice_name = 'mail'\naddress = '127.0.0.1:7102'",
+         [[endpoints]]\nname = 'internal-rpc'\nprotocol = 'grpc'\naddress = '127.0.0.1:7101'\n\
+         [[roles]]\nservice_name = 'guild'\nendpoint = 'internal-rpc'\n\
+         [[roles]]\nservice_name = 'mail'\nendpoint = 'internal-rpc'",
     )
     .unwrap();
     let mut app = Application::new(config).unwrap();
@@ -122,6 +123,8 @@ async fn custom_services_use_independent_factories_and_duplicate_names_are_rejec
             let services = inspect.snapshot(service_name).unwrap();
             assert_eq!(services.len(), 1);
             assert_eq!(services[0].service_name, service_name);
+            assert_eq!(services[0].address, "127.0.0.1:7101".parse().unwrap());
+            assert_eq!(services[0].protocol, "grpc");
         }
         Ok(())
     })

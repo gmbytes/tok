@@ -24,13 +24,51 @@ fn example_configs_select_roles_in_the_same_binary() {
     ))
     .unwrap();
     assert_eq!(local.discovery, DiscoveryBackend::Memory);
-    let descriptors = local.service_descriptors();
+    let descriptors = local.service_descriptors().unwrap();
     assert!(
         descriptors
             .iter()
             .all(|service| service.node_id == local.node_id)
     );
     assert_eq!(descriptors[1].service_name, "player");
+    assert_eq!(descriptors[1].address, descriptors[2].address);
+    assert_eq!(descriptors[1].protocol, "grpc");
+    assert_eq!(descriptors[0].protocol, "tcp");
+    assert_ne!(descriptors[0].address, descriptors[1].address);
+}
+
+#[test]
+fn invalid_endpoint_bindings_are_rejected() {
+    let local = include_str!("../../../examples/demo-game/config/local.toml");
+    for source in [
+        local.replace("endpoint = \"internal-rpc\"", "endpoint = \"missing\""),
+        local.replace("name = \"internal-rpc\"", "name = \"client\""),
+        local.replace("name = \"client\"", "name = \" \""),
+        local.replace("protocol = \"grpc\"", "protocol = \" \""),
+        local.replace("endpoint = \"client\"", "address = \"127.0.0.1:7000\""),
+    ] {
+        assert!(AppConfig::from_toml(&source).is_err());
+    }
+    let mut config = AppConfig::from_toml(local).unwrap();
+    config.endpoints.clear();
+    assert!(config.validate().is_err());
+    assert!(config.service_descriptors().is_err());
+}
+
+#[test]
+fn endpoint_protocols_are_extensible_and_services_can_bind_separately() {
+    let local = include_str!("../../../examples/demo-game/config/local.toml").replace("\r\n", "\n");
+    let source = format!(
+        "{}\n[[endpoints]]\nname = 'guild-rpc'\nprotocol = 'custom-rpc'\naddress = '127.0.0.1:7002'",
+        local.replace(
+            "service_name = \"guild\"\nendpoint = \"internal-rpc\"",
+            "service_name = \"guild\"\nendpoint = \"guild-rpc\""
+        )
+    );
+    let config = AppConfig::from_toml(&source).unwrap();
+    let descriptors = config.service_descriptors().unwrap();
+    assert_ne!(descriptors[1].address, descriptors[2].address);
+    assert_eq!(descriptors[2].protocol, "custom-rpc");
 }
 
 #[test]
@@ -48,7 +86,7 @@ fn invalid_or_misspelled_config_is_rejected() {
     );
     let duplicate = format!(
         "{local}\n{}",
-        "[[roles]]\nservice_name = 'player'\naddress = '127.0.0.1:9000'"
+        "[[roles]]\nservice_name = 'player'\nendpoint = 'internal-rpc'"
     );
     assert!(AppConfig::from_toml(&duplicate).is_err());
 }

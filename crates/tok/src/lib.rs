@@ -3,7 +3,7 @@
 pub mod config;
 pub mod runtime;
 
-pub use config::{AppConfig, DiscoveryBackend, RoleConfig};
+pub use config::{AppConfig, DiscoveryBackend, EndpointConfig, RoleConfig};
 pub use tok_core as core;
 pub use tok_events as events;
 pub use tok_gateway as gateway;

@@ -7,10 +7,15 @@ log_filter = "info"
 # metrics_address = "0.0.0.0:9090"
 # otlp_endpoint = "http://otel-collector:4317"
 
-[[roles]]
-service_name = "player"
+[[endpoints]]
+name = "internal-rpc"
+protocol = "grpc"
 address = "0.0.0.0:7001"
 
 [[roles]]
+service_name = "player"
+endpoint = "internal-rpc"
+
+[[roles]]
 service_name = "guild"
-address = "0.0.0.0:7002"
+endpoint = "internal-rpc"
