@@ -5,6 +5,8 @@
 
 设计约定与后续设计范围见 [设计文档](docs/design.md)。
 
+现状分析、分阶段任务及验收条件见 [实施大纲](docs/implementation-plan.md)。
+
 项目命令使用 [just](https://just.systems/)，在仓库根目录执行 `just` 查看可用任务。
 
 ## 工程结构
