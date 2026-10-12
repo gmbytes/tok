@@ -15,7 +15,10 @@ pub enum DeliveryPolicy {
 /// player ID 类型由具体游戏决定。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EventTarget<Id> {
+    /// 当前投递范围内的所有目标玩家。
     All,
+    /// 已加入指定频道的玩家，携带频道 ID。
     Channel(String),
+    /// 显式指定的玩家业务 ID 集合。
     Players(Vec<Id>),
 }

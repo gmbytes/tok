@@ -1,5 +1,24 @@
+//! 内存目录共享、注册冲突和变更通知的集成测试。
+
 use tok_core::{ServiceDescriptor, ServiceDirectory};
 use tok_infra::discovery::MemoryDirectory;
+
+#[tokio::test]
+async fn notifications_follow_registration_and_removal_and_close_with_directory() {
+    let directory = MemoryDirectory::default();
+    let mut changes = directory.subscribe().unwrap();
+    assert!(directory.snapshot("player").unwrap().is_empty());
+    directory.register(player("a")).unwrap();
+    directory.register(player("b")).unwrap();
+    // 多次变更可以合并为一次通知，读取快照获取完整现状。
+    changes.changed().await.unwrap();
+    assert_eq!(directory.snapshot("player").unwrap().len(), 2);
+    directory.unregister("a", "player").unwrap();
+    changes.changed().await.unwrap();
+    assert_eq!(directory.snapshot("player").unwrap(), vec![player("b")]);
+    drop(directory);
+    assert!(changes.changed().await.is_err());
+}
 
 fn player(node_id: &str) -> ServiceDescriptor {
     ServiceDescriptor {

@@ -1,3 +1,5 @@
+//! 配置解析、端点绑定和可观测参数校验的集成测试。
+
 use tok::{AppConfig, DiscoveryBackend};
 
 #[test]

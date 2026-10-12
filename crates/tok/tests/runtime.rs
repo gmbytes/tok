@@ -1,3 +1,5 @@
+//! 服务工厂、启动监督和退出清理的集成测试。
+
 use std::{
     future::pending,
     sync::{

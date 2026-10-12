@@ -29,13 +29,17 @@ clippy:
 build:
     cargo build --release -p demo-game --locked
 
-# 持续运行服务生命周期示例，Ctrl+C 优雅退出；当前不启动游戏网络服务
+# 持续运行服务和内部 RPC，Ctrl+C 优雅退出；客户端网关尚未监听
 run config="examples/demo-game/config/local.toml":
     cargo run -p demo-game --locked -- --config "{{config}}"
 
 # 运行一秒后优雅退出，供 CI 验证进程生命周期
 smoke:
     cargo run -p demo-game --locked -- --config examples/demo-game/config/local.toml --run-for 1
+
+# 验证共享 gRPC 端点上的 player 和 guild 调用，再优雅退出
+rpc-smoke:
+    cargo run -p demo-game --locked -- --config examples/demo-game/config/local.toml --rpc-smoke
 
 # 验证指定服务配置
 config-check config="examples/demo-game/config/local.toml":
@@ -44,6 +48,10 @@ config-check config="examples/demo-game/config/local.toml":
 # 检查并在输入变化时生成框架和示例游戏协议
 proto:
     cargo check -p tok-proto -p demo-game --locked
+
+# 生成框架用户指南和 workspace API 文档，入口 target/doc/tok/index.html
+docs:
+    cargo doc --workspace --no-deps --locked
 
 # 完成常规开发检查
 verify: fmt-check clippy test

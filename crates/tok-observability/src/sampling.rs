@@ -21,16 +21,23 @@ use crate::Error;
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ForceTraceRule {
+    /// 需要精确匹配的 span 名称；None 不限制名称。
     pub span: Option<String>,
+    /// 需要精确匹配的 tracing target；None 不限制模块。
     pub target: Option<String>,
+    /// 创建 span 时提供的标量字段，全部匹配才命中此规则。
     pub fields: BTreeMap<String, serde_json::Value>,
 }
 
+/// 普通根 span 的过滤与比例采样，以及优先命中的强追踪规则。
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct SamplingConfig {
+    /// 普通根 span 的级别和模块过滤规则。
     pub filter: String,
+    /// 普通根 span 的采样率，必须为 0 到 1 的有限值。
     pub ratio: f64,
+    /// 强制采样规则，优先于父级决定和普通过滤。
     pub force_rules: Vec<ForceTraceRule>,
 }
 
@@ -45,6 +52,7 @@ impl Default for SamplingConfig {
 }
 
 impl SamplingConfig {
+    /// 验证过滤语法、比例范围及强规则的名称和字段条件。
     pub fn validate(&self) -> Result<(), Error> {
         State::new(self.clone()).map(|_| ())
     }
@@ -100,12 +108,14 @@ pub struct TraceControl {
 }
 
 impl TraceControl {
+    /// 验证初始配置并创建可克隆的共享控制句柄。
     pub fn new(config: SamplingConfig) -> Result<Self, Error> {
         Ok(Self {
             state: Arc::new(RwLock::new(Arc::new(State::new(config)?))),
         })
     }
 
+    /// 读取当前采样配置的独立快照。
     pub fn config(&self) -> Result<SamplingConfig, Error> {
         Ok(self
             .state
@@ -125,6 +135,7 @@ impl TraceControl {
         Ok(())
     }
 
+    /// 原子替换强规则列表，空列表清空；校验失败保留旧配置。
     pub fn set_force_rules(&self, rules: Vec<ForceTraceRule>) -> Result<(), Error> {
         let mut current = self
             .state

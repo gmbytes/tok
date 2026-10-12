@@ -10,3 +10,11 @@ message GetPlayerRequest {
 message GetPlayerResponse {
   uint64 player_id = 1;
 }
+
+message GetGuildRequest {
+  uint64 guild_id = 1;
+}
+
+message GetGuildResponse {
+  uint64 guild_id = 1;
+}

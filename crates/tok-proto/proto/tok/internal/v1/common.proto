@@ -13,3 +13,61 @@ message RpcError {
   uint32 code = 1;
   string message = 2;
 }
+
+// 服务名与 protobuf 服务由组装层绑定，不从客户端正文信任玩家身份。
+message SessionIdentity {
+  string player_id = 1;
+  string session_id = 2;
+  uint64 epoch = 3;
+}
+
+message CallContext {
+  string node_id = 1;
+  string service_name = 2;
+  optional string bid = 3;
+  uint64 request_id = 4;
+  SessionIdentity session = 5;
+}
+
+message CallRequest {
+  CallContext context = 1;
+  Payload payload = 2;
+}
+
+message TimerSpec {
+  string timer_id = 1;
+  uint32 message_id = 2;
+  bytes body = 3;
+  int64 due_at_ms = 4;
+  optional uint64 interval_ms = 5;
+}
+
+message TimerSet { repeated TimerSpec timers = 1; }
+message TimerPatch {
+  repeated TimerSpec upsert = 1;
+  repeated string cancel = 2;
+}
+message TimerUpdate {
+  oneof update {
+    TimerSet replace_all = 1;
+    TimerPatch patch = 2;
+  }
+}
+
+message CallResponse {
+  uint64 request_id = 1;
+  Payload payload = 2;
+  RpcError error = 3;
+  // 内部计时需求，不直接发给客户端。
+  TimerUpdate timers = 4;
+}
+
+// 只允许会话驱动的 player 入口。身份可信性由部署和认证组件保证。
+service PlayerRpc {
+  rpc Call(CallRequest) returns (CallResponse);
+}
+
+// 可配置的业务入口，不根据名称自动加锁或固定中间件链。
+service BusinessRpc {
+  rpc Call(CallRequest) returns (CallResponse);
+}

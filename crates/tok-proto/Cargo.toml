@@ -8,10 +8,13 @@ license.workspace = true
 
 [dependencies]
 prost.workspace = true
+tonic.workspace = true
+tonic-prost.workspace = true
 
 [build-dependencies]
 prost-build.workspace = true
 protoc-bin-vendored.workspace = true
+tonic-prost-build.workspace = true
 
 [lints]
 workspace = true

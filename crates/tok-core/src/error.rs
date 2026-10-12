@@ -1,14 +1,33 @@
+//! 框架组件共享的错误类型与结果别名。
+
 /// 框架内部错误；客户端 ErrorCode 映射由网关协议层提供。
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    /// 调用参数不符合组件契约，附带原因。
+    #[error("调用参数无效：{0}")]
+    InvalidInput(String),
+    /// 目标业务服务没有可用节点，附带服务名。
+    #[error("没有可用的服务节点：{0}")]
+    NoAvailableService(String),
+    /// 所有权已过期或与当前 epoch、会话、所有者不匹配。
+    #[error("session 所有权已变化或过期")]
+    OwnershipConflict,
+    /// 协调后端无法完成操作，附带原因。
+    #[error("协调后端不可用：{0}")]
+    CoordinationUnavailable(String),
+    /// 配置校验失败，附带原因。
     #[error("配置错误：{0}")]
     InvalidConfig(String),
+    /// 同一节点服务重复注册，附带服务身份。
     #[error("节点服务已注册：{0}")]
     DuplicateService(String),
+    /// 内存服务目录的同步锁不可用。
     #[error("内存服务目录锁不可用")]
     DirectoryUnavailable,
+    /// 请求的组件能力尚未实现，附带能力名称。
     #[error("当前工程骨架尚未实现：{0}")]
     NotImplemented(&'static str),
 }
 
+/// 使用框架共享错误类型的操作结果。
 pub type Result<T> = std::result::Result<T, Error>;

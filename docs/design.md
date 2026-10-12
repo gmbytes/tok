@@ -169,7 +169,7 @@ gRPC 接入 → 解码与服务分发 → 业务调用上下文
 
 中间件选择、顺序、作用范围和参数由用户控制，可以通过 Rust 代码组装，也可以由配置选择用户已注册的组件与参数；具体配置表达与 API 在实现 RPC 调度时确定。框架负责统一契约、生命周期和易用的适配，不把某条固定中间件链作为所有服务的强制实现。当前游戏配置仍采用既定的无自动重试、快速失败策略。
 
-锁契约放在基础接口层，具体分布式锁后端属于 tok-infra，服务端 Layer 适配属于 tok-rpc，游戏通过 tok 组装。RPC Layer 依赖锁抽象，由用户注入实现，不直接绑定 Redis。当前 ServiceConfig 只有服务名和端点引用，RPC 调度与中间件配置尚未实现；后续实现需遵守上述边界。
+锁契约放在基础接口层，具体分布式锁后端属于 tok-infra，服务端 Layer 适配属于 tok-rpc，游戏通过 tok 组装。RPC Layer 依赖锁抽象，由用户注入实现，不直接绑定 Redis。当前 ServiceConfig 只有服务名和端点引用；RPC 强类型分发、连接复用和 TowerHandler 代码组装已实现，中间件配置表达、锁后端与锁 Layer 后续实现。
 
 ### 多业务实体的隔离
 
@@ -346,7 +346,7 @@ player 可以使用读缓存。存储层后续单独设计，缓存失效、持�
 
 监听端点与业务服务独立配置。节点通过 endpoints 声明端点名称、协议和监听地址，业务服务通过 endpoint 引用端点；多个服务可以绑定同一端点，也可以按需分别绑定。通常 player、guild、mail 等内部服务共享一个 gRPC 端点，网关客户端接入使用另外的端点。协议名由传输实现解释，可扩展，传输参数及加密组件在接入实现时设计。
 
-共享端点由节点的传输组件统一创建和管理，每个端点只启动一次监听；业务服务注册到对应端点，gRPC 按协议中的服务名和方法分发。业务 service_name 与 protobuf 服务的绑定由组装层明确，不能假定二者字符串天然一致。每个服务仍独立配置中间件、锁和并发限制。当前仅实现端点配置、引用校验及发现描述解析，实际端点监听与 RPC 组装尚未实现。生产发现发布可访问的节点地址，监听配置中的通配地址不能直接作为远程连接目标，地址转换随 Kubernetes 发现实现补齐。
+共享端点由节点的传输组件统一创建和管理，每个端点只启动一次监听；业务服务注册到对应端点，gRPC 按协议中的服务名和方法分发。业务 service_name 与 protobuf 服务的绑定由组装层明确，不能假定二者字符串天然一致。每个服务仍独立配置中间件、锁和并发限制。当前 RpcEndpoint 已支持显式绑定不同 protobuf 服务，Application 统一监听和监督，业务初始化后才开启对应就绪入口；同一端点拒绝重复 protobuf 服务名。普通业务通用入口 BusinessRpc 在一个端点只能绑定一次，多个普通业务服务可使用各自的 protobuf 服务；多业务注册到同一通用入口的调度另行扩展。生产发现发布可访问的节点地址，监听配置中的通配地址不能直接作为远程连接目标，地址转换随 Kubernetes 发现实现补齐。
 
 需要 bid 亲和的 RPC 由路由组件选择实例，使用选中的实例地址建立连接。
 
@@ -372,13 +372,13 @@ bid 路由独立于发现后端，由路由组件根据节点列表选择目标�
 
 依赖选型、文件路径处理、进程退出和开发命令都需要兼容这两个平台。Linux 的 GNU 或 musl 工具链及最低系统版本在构建方案中另行确定。Rust 工程建立后，构建与测试覆盖两个目标平台。
 
-项目命令统一通过 just 组织，仓库根目录的 `justfile` 作为开发入口。提供 check、test、fmt、fmt-check、clippy、proto、build、run、config-check 和 verify；底层 Rust 构建工具使用 Cargo，CI 也通过 just 执行常规检查。
+项目命令统一通过 just 1.58.0 组织，仓库根目录的 `justfile` 作为开发入口。提供 check、test、fmt、fmt-check、clippy、proto、docs、build、run、smoke、rpc-smoke、config-check 和 verify；底层 Rust 构建工具使用 Cargo，CI 也通过 just 执行常规检查。用户指南作为 tok crate 的 rustdoc 首页，API 文档由 Rust 注释生成，示例通过文档测试验证；CI 构建并保存 HTML 文档。
 
 服务在逻辑上分离，使用同一个二进制并不要求所有服务运行在同一个进程中。初始配置采用 TOML，支持声明节点、发现后端和多个服务，并在启动前校验。组装层通过 ServiceFactory 按 service_name 注册实现，Application 管理初始化、运行监督及退出。本文服务分类描述业务职责，不对应框架内置枚举，也不决定锁、中间件或执行方式；这些由用户配置。
 
 开发环境按配置顺序初始化服务，初始化成功后才注册到内存服务目录；默认单服务初始化期限为 30 秒。初始化必须可取消，资源通过 RAII 释放，服务不得遗留脱管任务。运行任务持续执行，收到取消通知后停止接收工作并清理资源。初始化失败或超时、服务运行失败、提前结束或崩溃均触发进程退出，撤销已注册服务并通知所有已启动服务清理。默认整体协作退出期限为 10 秒，超时中止剩余任务并返回错误；游戏可调整期限。
 
-Windows 使用 Ctrl+C，Linux 使用 Ctrl+C 或 SIGTERM。示例提供 --run-for 用于自动化退出验证，CI 通过 just smoke 执行。当前示例只运行生命周期任务，尚未监听配置地址；真实服务实现需要在初始化完成前准备对应监听或依赖。服务间的调用和就绪依赖规则在接入真实服务时补齐。
+Windows 使用 Ctrl+C，Linux 使用 Ctrl+C 或 SIGTERM。示例提供 --run-for 用于自动化退出验证，CI 通过 just smoke 执行，just rpc-smoke 额外验证 player 和 guild 的内部调用。当前示例监听共享内部 gRPC 端点，客户端网关仍仅运行生命周期。应用先准备监听，工厂初始化后发布服务并开启对应 RPC 入口；工厂不能在初始化中等待尚未启动的其他服务，就绪后的依赖调用在运行阶段发起。
 
 资源隔离是必要要求。容量控制、运行指标和可观测能力在开发过程中补齐，不作为当前设计推进的阻塞项。
 
@@ -421,10 +421,10 @@ tok/
 
 | crate | 职责 |
 | --- | --- |
-| tok-core | 共享基础类型、服务描述、错误及组件契约，后续增加逻辑消息和 timerSpec 等类型 |
+| tok-core | 共享基础类型、服务描述、调用上下文、逻辑消息、timerSpec、所有权与锁契约 |
 | tok-observability | tracing 日志与动态过滤、Prometheus 指标端口、OpenTelemetry OTLP 追踪及退出刷新 |
 | tok-proto | 框架内部 protobuf 与构建期生成代码，不包含具体游戏消息 |
-| tok-rpc | tonic 与 Tower 接入，后续实现连接复用、超时和中间件 |
+| tok-rpc | tonic 与 Tower 接入、共享端点、强类型分发、连接复用、超时和追踪传播 |
 | tok-events | 同步本地事件、跨节点事件、投递策略与去重辅助 |
 | tok-infra | 内存和 Kubernetes 发现、bid 路由、Redis 请求级锁及 session 所有权 |
 | tok-gateway | 局外 session、timer、下行补发与交接，以及局内场景接入、协议与安全适配 |
@@ -459,7 +459,7 @@ player 模块包含玩家逻辑会话、串行执行、timer、下行缓存和�
 
 workspace 统一 edition、工具链、依赖版本、lint 和 release 配置，共享 Cargo.lock。单元测试靠近实现，集成测试放对应 crate 的 tests 目录。Windows amd64 和 Linux amd64 通过 CI 分别验证；本地检查仅证明当前主机平台。
 
-当前实现包括八个框架 crate、示例游戏、TOML 配置验证、单进程内存目录、服务生命周期、可观测组件、protobuf 生成流程、just 命令和 CI。示例持续运行多个服务生命周期任务，不启动游戏网络服务；按需启用指标 HTTP 端口和 OTLP 导出。Kubernetes 配置可验证，但运行该后端会报尚未实现。其余业务服务执行、协议和安全适配、Redis、NATS 等组件保留模块边界，后续逐步实现。部署目录暂不提供可运行的 Kubernetes 清单。
+当前实现包括八个框架 crate、示例游戏、TOML 配置验证、内存目录与合并变更通知、bid 亲和路由、单进程内存所有权、服务生命周期、可观测组件、protobuf 生成、共享内部 RPC、rustdoc 用户与 API 文档、just 命令和 CI。示例 player 和 guild 通过不同 protobuf 服务共享内部端点，客户端网关尚未监听。ServiceContext 可注入发现查询后端，生产 Kubernetes 配置可验证但后端运行仍报尚未实现。Redis、NATS、session 调度、补发及安全适配后续实现；内存所有权不提供跨进程唯一性，内部上下文字段校验不代替调用身份认证。部署目录暂不提供可运行的 Kubernetes 清单。
 
 ## 可观测约定
 
@@ -475,7 +475,7 @@ workspace 统一 edition、工具链、依赖版本、lint 和 release 配置，
 
 强规则尽量在请求入口根 span 判断，采样字段必须在决定前提供；采样后补录字段不能改变决定，下游强制开启无法恢复此前被丢弃的上游 span。强制采样解决采集选择，不提供故障时的数据送达保证。
 
-每次请求、事件或 timer 执行建立独立 span，不以整个 session 生命周期作为长期 trace。gRPC metadata 和 NATS headers 传播 W3C TraceContext，异步事件可使用 span link；传播逻辑随实际通信组件实现。token 和协议正文默认不记录，bid 可作为日志或 span 字段。
+每次请求、事件或 timer 执行建立独立 span，不以整个 session 生命周期作为长期 trace。gRPC metadata 已传播 W3C TraceContext，NATS headers 随事件组件实现，异步事件可使用 span link。token 和协议正文默认不记录，bid 可作为日志或 span 字段。
 
 可观测组件由游戏入口初始化一次，默认仅开启日志，指标监听与追踪导出按配置启用。服务退出后关闭指标监听并刷新追踪，刷新有超时限制，不阻塞异步调度线程。现阶段不部署日志采集器、Prometheus 或 Collector；集成测试通过临时指标端口及模拟 OTLP Collector 验证导出。
 

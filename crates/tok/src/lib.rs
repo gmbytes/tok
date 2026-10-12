@@ -1,4 +1,4 @@
-//! 游戏通过此入口组合框架组件，最终二进制由游戏项目提供。
+#![doc = include_str!("../docs/guide.md")]
 
 pub mod config;
 pub mod runtime;

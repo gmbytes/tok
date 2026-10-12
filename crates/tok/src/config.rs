@@ -1,19 +1,27 @@
+//! TOML 配置解析与校验。端点描述不自动创建监听。
+
 use std::{collections::BTreeSet, net::SocketAddr};
 
 use serde::Deserialize;
 use tok_core::{Error, Result, ServiceDescriptor};
 
+/// 配置选定的服务发现后端。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum DiscoveryBackend {
+    /// 单进程内存目录。
     Memory,
+    /// 配置可校验，运行后端尚未实现。
     Kubernetes,
 }
 
+/// 业务服务身份及其端点引用，不决定业务执行或加锁策略。
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ServiceConfig {
+    /// 节点内唯一的业务服务名，由游戏定义。
     pub service_name: String,
+    /// 引用 endpoints 中的端点名称。
     pub endpoint: String,
 }
 
@@ -21,23 +29,33 @@ pub struct ServiceConfig {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EndpointConfig {
+    /// 节点内唯一的端点名称。
     pub name: String,
+    /// 由传输实现解释，例如 grpc 或 tcp。
     pub protocol: String,
+    /// 监听地址；发现后端应提供远端可连接地址。
     pub address: SocketAddr,
 }
 
+/// 一个游戏进程的配置；未知字段、重复名称与无效引用均被拒绝。
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AppConfig {
+    /// 部署节点身份，节点内的所有业务服务共享此 ID。
     pub node_id: String,
+    /// 服务发现后端选择。
     pub discovery: DiscoveryBackend,
+    /// 节点声明的端点列表，实际监听需显式组装。
     pub endpoints: Vec<EndpointConfig>,
+    /// 本进程启用的业务服务与端点绑定。
     pub services: Vec<ServiceConfig>,
+    /// 进程级日志、指标和追踪配置。
     #[serde(default)]
     pub observability: tok_observability::Config,
 }
 
 impl AppConfig {
+    /// 解析并立即验证 TOML，包括可观测参数。
     pub fn from_toml(source: &str) -> Result<Self> {
         let config: Self =
             toml::from_str(source).map_err(|error| Error::InvalidConfig(error.to_string()))?;
@@ -45,6 +63,7 @@ impl AppConfig {
         Ok(config)
     }
 
+    /// 验证身份、端点和服务绑定，不连接外部依赖。
     pub fn validate(&self) -> Result<()> {
         self.observability
             .validate()

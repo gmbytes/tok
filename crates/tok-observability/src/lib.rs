@@ -24,27 +24,37 @@ pub use opentelemetry;
 pub use tracing;
 pub use tracing_opentelemetry::OpenTelemetrySpanExt;
 
+/// 可观测初始化、配置更新与退出操作返回的错误。
 pub type Error = Box<dyn std::error::Error + Send + Sync>;
 
+/// 日志输出格式。
 #[derive(Debug, Clone, Copy, Default, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum LogFormat {
+    /// 面向开发终端的文本输出。
     #[default]
     Text,
+    /// 面向日志采集器的 JSON 输出。
     Json,
 }
 
+/// 进程级日志、Prometheus 和 OTLP 配置，省略字段时使用默认值。
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
+    /// 初始日志过滤规则，可由 RUST_LOG 覆盖。
     pub log_filter: String,
+    /// 日志输出格式，默认文本。
     pub log_format: LogFormat,
     /// None 禁用指标端口，Some 时仅提供 /metrics。
     pub metrics_address: Option<SocketAddr>,
     /// None 禁用导出；Some 为 OTLP gRPC Collector 地址。
     pub otlp_endpoint: Option<String>,
+    /// 普通根 span 的级别和模块过滤规则。
     pub trace_filter: String,
+    /// 通过普通过滤的根 span 采样比例，范围为 0 到 1。
     pub trace_sample_ratio: f64,
+    /// 命中后优先强制采样的精确匹配规则。
     pub trace_force_rules: Vec<ForceTraceRule>,
 }
 
@@ -63,6 +73,7 @@ impl Default for Config {
 }
 
 impl Config {
+    /// 验证过滤语法、采样规则和 OTLP 地址，不连接采集后端。
     pub fn validate(&self) -> Result<(), Error> {
         parse_filter(&self.log_filter)?;
         self.sampling_config().validate()?;
@@ -75,6 +86,7 @@ impl Config {
         Ok(())
     }
 
+    /// 提取可以动态更新的追踪采样配置。
     pub fn sampling_config(&self) -> SamplingConfig {
         SamplingConfig {
             filter: self.trace_filter.clone(),
@@ -101,6 +113,7 @@ pub struct LogControl {
 }
 
 impl LogControl {
+    /// 读取当前日志过滤规则。
     pub fn filter(&self) -> Result<String, Error> {
         Ok(self
             .current
@@ -109,6 +122,7 @@ impl LogControl {
             .clone())
     }
 
+    /// 动态替换过滤规则，校验或更新失败时保留原规则。
     pub fn set_filter(&self, directive: &str) -> Result<(), Error> {
         let filter = parse_filter(directive)?;
         let mut current = self
@@ -121,8 +135,11 @@ impl LogControl {
     }
 }
 
+/// 进程级可观测资源与动态控制句柄，服务结束后应显式调用 shutdown。
 pub struct Observability {
+    /// 日志过滤规则的读写入口。
     pub logs: LogControl,
+    /// 追踪过滤、采样率与强规则的读写入口。
     pub traces: TraceControl,
     metrics_address: Option<SocketAddr>,
     shutdown: CancellationToken,
@@ -251,6 +268,7 @@ impl Observability {
         Ok(result)
     }
 
+    /// 返回已绑定的指标地址；未启用指标端口时返回 None。
     pub fn metrics_address(&self) -> Option<SocketAddr> {
         self.metrics_address
     }

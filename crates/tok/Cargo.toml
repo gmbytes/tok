@@ -21,5 +21,8 @@ tokio.workspace = true
 tokio-util.workspace = true
 thiserror.workspace = true
 
+[dev-dependencies]
+prost.workspace = true
+
 [lints]
 workspace = true

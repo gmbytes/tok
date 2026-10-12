@@ -2,7 +2,7 @@
 
 ## 实施目标与范围
 
-当前项目已具备配置、服务生命周期和可观测基础，业务执行链路尚未接通。下一步应先完成单进程局外请求闭环，再实现多网关所有权和恢复、跨节点事件及 Kubernetes 部署，最后推进场景接入。
+当前项目已具备配置、服务生命周期、可观测和内部 RPC 基础，客户端局外请求链路尚未接通。下一步应完成单进程局外请求闭环，再实现多网关所有权和恢复、跨节点事件及 Kubernetes 部署，最后推进场景接入。
 
 本大纲以 2026-10-12 的代码为基线，遵循 [设计文档](design.md)。各阶段的技术选择属于实施建议；已经确定的执行语义继续以设计文档为准。阶段完成以可运行示例和验收结果为依据，不以模块或接口存在为依据。
 
@@ -12,20 +12,20 @@
 
 | 能力 | 实现现状与代码依据 | 主要缺口 |
 | --- | --- | --- |
-| 工程与构建 | Cargo workspace 包含八个框架 crate 和 demo-game；just 与双平台 CI 已配置 | 真实网络与外部依赖的集成验证 |
+| 工程与构建 | Cargo workspace 包含八个框架 crate 和 demo-game；just、rustdoc 用户与 API 文档及双平台 CI 已配置 | 外部依赖和生产环境的集成验证 |
 | 配置 | [config.rs](../crates/tok/src/config.rs) 校验节点、端点、服务引用及可观测参数 | 中间件、接入安全、容量及外部依赖配置 |
-| 服务生命周期 | [runtime.rs](../crates/tok/src/runtime.rs) 提供工厂注册、初始化期限、失败清理和协作退出 | 共享监听端点管理、服务就绪依赖及发现后端注入 |
-| 发现 | [MemoryDirectory](../crates/tok-infra/src/discovery/memory.rs) 支持注册、注销和按服务查询 | ServiceDirectory 只有 snapshot；变更通知、Kubernetes 本地缓存尚未实现；运行时直接持有 MemoryDirectory |
-| 协议与 RPC | protobuf 构建流程已存在；[tok-rpc](../crates/tok-rpc/src/lib.rs) 仅重导出 tonic、Tower 和内部协议 | 当前 proto 没有 service 定义；客户端、服务端、连接复用、调用上下文及 Layer 尚未实现 |
+| 服务生命周期 | [runtime.rs](../crates/tok/src/runtime.rs) 提供工厂注册、共享端点、就绪入口、初始化期限及失败清理 | 生产依赖就绪策略与发现后端 |
+| 发现 | [MemoryDirectory](../crates/tok-infra/src/discovery/memory.rs) 支持注册、注销、快照与合并变更通知；服务上下文可注入查询后端 | Kubernetes 本地缓存与资源映射 |
+| 协议与 RPC | [tok-rpc](../crates/tok-rpc/src/lib.rs) 提供 PlayerRpc、BusinessRpc、强类型分发、连接复用、超时、追踪传播和 TowerHandler | 配置式中间件、锁 Layer 及生产调用身份认证 |
 | 网关 | player、scene、transport、security、codec 模块边界已建立，具有 TransportCapabilities 类型 | 接入监听、身份认证、session 执行、timer、下行缓存与恢复 |
-| 路由与 Redis | routing、ownership、locks 文件仅保留扩展注释 | bid 选点、所有权契约、原子 epoch 操作、租约与请求级锁 |
+| 路由与 Redis | bid rendezvous 路由、所有权与锁契约、有界内存所有权已实现 | Redis 跨进程所有权、租约故障处理与请求级锁后端 |
 | 事件 | [tok-events](../crates/tok-events/src/lib.rs) 已有 DeliveryPolicy 和 EventTarget | 同步本地分发、NATS 后端、订阅、去重及交接处理 |
-| 可观测 | 日志动态过滤、Prometheus 端口、OTLP 导出、强追踪规则及退出刷新已实现 | RPC metadata 和事件 headers 的上下文传播；session、timer 和事件指标 |
-| 示例与部署 | [main.rs](../examples/demo-game/src/main.rs) 为所有配置服务注册 LifecycleService；部署目录只有说明 | 示例业务、客户端驱动、容器构建和可部署清单 |
+| 可观测 | 日志动态过滤、Prometheus、OTLP、强追踪规则、RPC metadata 传播及调用指标已实现 | 事件 headers 传播及 session、timer 指标 |
+| 示例与部署 | 示例 player 与 guild 共享内部 gRPC 监听；`just rpc-smoke` 验证真实调用 | 客户端驱动、容器构建和可部署清单 |
 
-现有测试覆盖配置、内存目录、生命周期异常及可观测导出。`just smoke` 当前只证明进程可以启动和退出，不能证明游戏网络或业务链路可用。生产 TOML 可通过配置校验，但 Application 会拒绝尚未实现的 Kubernetes 后端。
+现有测试覆盖配置、目录变更、路由、内存所有权、共享端点、RPC 分发、连接复用、超时不重试、追踪及生命周期异常。`just smoke` 验证进程启动退出，`just rpc-smoke` 验证内部请求回应；客户端接入尚未实现。生产 TOML 可通过配置校验，但 Application 会拒绝尚未实现的 Kubernetes 后端。
 
-本次 Windows 基线验证使用 Rust 1.99.0 与 just 1.58.0：`just verify`、`just smoke` 和 `just config-check examples/demo-game/config/game.toml` 均通过，包含格式检查、clippy 和 23 项测试。当前代理会话的 RUSTUP_TOOLCHAIN 仍指向 1.95.0，验证时仅在命令进程中设为 1.99.0。双平台 CI 已配置，Linux 运行结果仍需由对应环境验证。
+第一批 Windows 验证使用 Rust 1.99.0 与 just 1.58.0：格式检查、clippy、37 项测试、2 项文档测试、rustdoc 生成、生命周期 smoke、内部 RPC smoke、两份生产配置校验及 release 构建均通过。工具链覆盖仅在验证命令进程中调整为 1.99.0。双平台 CI 已配置，Linux 运行结果仍需由对应环境验证。
 
 ## 设计约束与实施依赖
 
@@ -71,7 +71,7 @@
 - 在 tok-rpc 实现客户端连接复用、超时、调用元数据、W3C TraceContext 传播及可组合的并发和过载控制。
 - 初期由 Rust 代码组装 Layer；若需要配置组装，只允许选择已注册组件，校验参数、顺序和作用范围。
 
-当前 local.toml 将 player-gateway 放在 player 之前。接入真实服务时应确定“初始化不依赖其他服务”或显式就绪依赖规则，避免按现有顺序启动时网关等待尚未初始化的 player。
+当前 local.toml 将 player-gateway 放在 player 之前。共享监听先绑定，业务完成初始化才开启自身 RPC 入口；工厂初始化不能等待尚未启动的其他服务，依赖调用应在运行阶段确认目标就绪后发起。
 
 **验收：** 一个 gRPC 监听同时提供两个业务服务；服务绑定失败触发整体清理；超时和过载快速失败且不重试；跨 RPC 能关联 trace；连接与监听在退出时释放。
 
@@ -168,6 +168,8 @@
 队列、包长、缓存和期限必须可配置并具有有限默认值；具体数值通过实际负载验证确定，不在当前大纲中预设吞吐承诺。
 
 ## 交付与推进方式
+
+第一批已接通基础类型与协调契约、内存开发后端、RPC service、共享监听、连接复用与调用验证，同时加入 Rust 原生用户文档生成。客户端认证和串行 session 属于下一批；Redis、锁 Layer、NATS、生产安全和 Kubernetes 仍按后续阶段推进。
 
 每个阶段按“契约与协议 → 组件实现 → 示例接通 → 故障与边界验证 → 文档更新”拆分变更。优先开始阶段零至三，得到可运行的局外链路后，再推进恢复与集群能力。
 

@@ -1374,6 +1374,7 @@ name = "tok"
 version = "0.1.0"
 dependencies = [
  "metrics",
+ "prost",
  "serde",
  "thiserror",
  "tok-core",
@@ -1417,6 +1418,7 @@ name = "tok-infra"
 version = "0.1.0"
 dependencies = [
  "tok-core",
+ "tokio",
 ]
 
 [[package]]
@@ -1448,16 +1450,30 @@ dependencies = [
  "prost",
  "prost-build",
  "protoc-bin-vendored",
+ "tonic",
+ "tonic-prost",
+ "tonic-prost-build",
 ]
 
 [[package]]
 name = "tok-rpc"
 version = "0.1.0"
 dependencies = [
+ "metrics",
+ "opentelemetry",
+ "opentelemetry_sdk",
+ "prost",
+ "thiserror",
  "tok-core",
  "tok-proto",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
  "tonic",
  "tower",
+ "tracing",
+ "tracing-opentelemetry",
+ "tracing-subscriber",
 ]
 
 [[package]]

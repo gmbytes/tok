@@ -11,6 +11,19 @@ tok-core.workspace = true
 tok-proto.workspace = true
 tonic.workspace = true
 tower.workspace = true
+prost.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tokio-stream.workspace = true
+tracing.workspace = true
+tracing-opentelemetry.workspace = true
+opentelemetry.workspace = true
+metrics.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+opentelemetry_sdk.workspace = true
+tracing-subscriber.workspace = true
 
 [lints]
 workspace = true

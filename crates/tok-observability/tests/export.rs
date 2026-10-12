@@ -1,3 +1,5 @@
+//! Prometheus 抓取、OTLP 导出和动态日志过滤的集成测试。
+
 use std::time::Duration;
 
 use opentelemetry_proto::tonic::collector::trace::v1::{

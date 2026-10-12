@@ -1,1 +1,38 @@
-//! 基于节点快照和 bid 的路由组件的后续实现位置。
+//! 与发现后端独立的业务 ID 路由。
+
+use tok_core::{Error, Result, ServiceDescriptor, ServiceDirectory};
+
+/// 使用稳定的 rendezvous hash 选择目标，输入快照顺序不影响结果。
+///
+/// FNV-1a 64 位用于亲和性计算，不用于安全目的。节点身份使用长度前缀编码；
+/// 节点删除时仅原本选中该节点的 bid 迁移。路由不自动重试业务调用。
+pub fn route(
+    directory: &dyn ServiceDirectory,
+    service_name: &str,
+    bid: &str,
+) -> Result<ServiceDescriptor> {
+    if service_name.trim().is_empty() || bid.trim().is_empty() {
+        return Err(Error::InvalidInput("路由需要服务名与业务 ID".into()));
+    }
+    directory
+        .snapshot(service_name)?
+        .into_iter()
+        .filter(|service| service.service_name == service_name)
+        .max_by_key(|service| (score(service, bid), service.node_id.clone()))
+        .ok_or_else(|| Error::NoAvailableService(service_name.into()))
+}
+
+fn score(service: &ServiceDescriptor, bid: &str) -> u64 {
+    let mut hash = 0xcbf29ce484222325u64;
+    for part in [
+        service.service_name.as_bytes(),
+        bid.as_bytes(),
+        service.node_id.as_bytes(),
+    ] {
+        for byte in (part.len() as u64).to_le_bytes().iter().chain(part) {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
+    }
+    hash
+}

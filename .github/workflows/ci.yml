@@ -20,9 +20,18 @@ jobs:
         run: cargo install just --version 1.58.0 --locked
       - name: 格式 lint 与测试
         run: just verify
+      - name: 生成 Rust 用户与 API 文档
+        run: just docs
+      - name: 保存 Rust 文档
+        uses: actions/upload-artifact@v4
+        with:
+          name: rustdoc-${{ runner.os }}
+          path: target/doc/
       - name: 构建示例二进制
         run: just build
       - name: 验证示例服务启动与退出
         run: just smoke
+      - name: 验证共享端点内部 RPC
+        run: just rpc-smoke
       - name: 验证生产服务配置
         run: just config-check examples/demo-game/config/game.toml
