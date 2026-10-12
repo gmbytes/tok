@@ -10,6 +10,7 @@ tok 是实验性的 Rust 游戏服务器框架。游戏通过本 crate 组装组
 Rust 示例随 `cargo test --workspace --locked` 执行文档测试，API 链接由 rustdoc 校验。
 公开 API 通过 `missing_docs = "deny"` 强制维护文档注释，缺失时编译失败。
 仅 protobuf 自动生成模块豁免；手写模块、类型、字段、枚举变体及方法都需要文档。
+框架自己的 API 使用中文说明；第三方重导出补充中文介绍，完整 API 说明保留上游原文。
 
 ## 配置一个服务
 

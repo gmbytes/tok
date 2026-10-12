@@ -19,9 +19,17 @@ use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing_subscriber::{EnvFilter, Layer, layer::SubscriberExt, util::SubscriberInitExt};
 
+/// 指标埋点库，提供计数、Gauge 和 Histogram 宏；详细 API 见上游文档。
 pub use metrics;
+/// OpenTelemetry 上下文与追踪类型；详细 API 见上游文档。
 pub use opentelemetry;
+/// 日志事件与 span 埋点库；详细 API 见上游文档。
 pub use tracing;
+/// 为 tracing Span 提供设置和读取 OpenTelemetry Context 的扩展方法。
+///
+/// `set_parent` 接入上游追踪上下文，`context` 获取当前 span 的上下文用于传播。
+/// 此处重导出上游 trait，完整方法说明保留上游文档。
+#[doc(inline)]
 pub use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 /// 可观测初始化、配置更新与退出操作返回的错误。

@@ -14,7 +14,9 @@ pub use endpoint::{RpcEndpoint, RpcReadiness, RpcServerTask};
 pub use handler::{CallHandler, CallTask, HandlerRegistry, RpcService, TowerHandler};
 
 pub use tok_proto as protocol;
+/// gRPC 客户端、服务端和状态类型；详细 API 见 tonic 上游文档。
 pub use tonic;
+/// Service、Layer 与中间件组装工具；详细 API 见 Tower 上游文档。
 pub use tower;
 
 /// 编码游戏通知；下行序号由网关 session 分配。

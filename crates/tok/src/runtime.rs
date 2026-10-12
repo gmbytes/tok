@@ -6,6 +6,7 @@ use tok_core::{ServiceDescriptor, ServiceDirectory};
 use tok_infra::discovery::MemoryDirectory;
 use tok_rpc::{RpcEndpoint, RpcReadiness};
 use tokio::task::{JoinError, JoinSet};
+/// 服务协作退出的取消令牌；详细 API 见 tokio-util 上游文档。
 pub use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 
