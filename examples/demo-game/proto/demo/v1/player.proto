@@ -9,7 +9,16 @@ message GetPlayerRequest {
 
 message GetPlayerResponse {
   uint64 player_id = 1;
+  int64 value = 2;
 }
+
+message SetPlayerRequest { int64 value = 1; }
+message SetPlayerResponse {
+  uint64 player_id = 1;
+  int64 value = 2;
+}
+message QueryGuildRequest { uint64 guild_id = 1; }
+message QueryGuildResponse { uint64 guild_id = 1; }
 
 message GetGuildRequest {
   uint64 guild_id = 1;

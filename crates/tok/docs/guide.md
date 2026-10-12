@@ -179,7 +179,7 @@ Channel 缓存有界，节点和地址相同的服务复用连接；节点变更
 [`rpc::notification`] 编码强类型通知，真正下行序号和补发由后续网关 session 分配。
 
 运行 `just rpc-smoke` 可以验证示例 player 与 guild 的内部调用并退出。
-此检查使用构造的内部会话上下文，不代表登录认证或客户端 session 已实现。
+此检查使用构造的内部会话上下文；登录认证和客户端 session 由 `just client-smoke` 单独验证。
 
 ## 服务发现与内存所有权
 
@@ -192,6 +192,94 @@ Channel 缓存有界，节点和地址相同的服务复用连接；节点变更
 [`core::coordination::OwnershipStore`] 的条件获取、续租与释放。
 接管必须匹配旧 epoch，旧持有者不能续租或释放新所有权。
 其 epoch 仅在后端存活期间有效，不能用于跨进程或进程重启后的协调；生产 Redis 实现仍待后续实现。
+
+## 客户端 TCP 与玩家 session
+
+运行 `just client-smoke` 会启动示例，完成真实 TCP 登录、状态读取、写入、再次读取及 player 调用 guild，然后退出并清理监听。
+运行 `just run` 可持续监听本地客户端端口 `127.0.0.1:7000`。
+示例凭据为 `demo:<正整数玩家 ID>`，如 `demo:42`；该认证器仅供本地开发，状态保存在有界内存中。
+
+客户端使用四字节大端长度前缀与 protobuf [`gateway::protocol::Frame`]，版本为 1。
+登录和业务请求的 `request_id` 必须非零，并在同一连接上严格递增。
+下面示例登录后读取玩家状态；示例游戏的读取消息 ID 为 1，空正文是合法的默认 protobuf 请求。
+
+```rust,no_run
+use std::time::Duration;
+use tok::gateway::{codec::{FrameCodec, VERSION},
+    protocol::{Frame, LoginRequest, BusinessRequest, frame::Content}};
+use tokio::net::TcpStream;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let mut connection = TcpStream::connect("127.0.0.1:7000").await?;
+    let codec = FrameCodec::new(1_048_576, Duration::from_secs(15))?;
+    codec.write(&mut connection, &Frame {
+        version: VERSION,
+        content: Some(Content::Login(LoginRequest {
+            request_id: 1,
+            credential: "demo:42".into(),
+        })),
+    }).await?;
+    let login = codec.read(&mut connection).await?.ok_or("连接已关闭")?;
+    match login.content {
+        Some(Content::LoggedIn(response)) if response.error_code == 0 => {},
+        _ => return Err("登录失败".into()),
+    }
+    codec.write(&mut connection, &Frame {
+        version: VERSION,
+        content: Some(Content::Request(BusinessRequest {
+            request_id: 2,
+            message_id: 1,
+            body: Vec::new(),
+        })),
+    }).await?;
+    let reply = codec.read(&mut connection).await?.ok_or("连接已关闭")?;
+    match reply.content {
+        Some(Content::Response(response)) => {
+            assert_eq!(response.request_id, 2);
+            assert_eq!(response.error_code, 0);
+            // 游戏使用自己的 protobuf 响应类型解码 response.body。
+        },
+        _ => return Err("响应类型错误".into()),
+    }
+    Ok(())
+}
+```
+
+游戏通过 [`gateway::player::Authenticator`] 返回规范化的可信玩家 ID，同一玩家的凭据别名必须归一到相同 ID。
+[`gateway::player::PlayerGateway::new`] 注入认证器、[`core::coordination::OwnershipStore`] 和
+[`gateway::player::PlayerExecutor`]；[`gateway::player::RpcPlayerExecutor`] 可组合
+[`infra::routing::RendezvousRouter`] 与 [`rpc::RpcClients`] 调用 player 服务。
+网关工厂先绑定 TCP 监听，再把监听及服务退出 token 交给 `serve` 的受监督任务。
+客户端正文不提供 session 身份；示例 player 从可信的调用上下文读取玩家 ID。
+
+[`gateway::player::GatewayConfig`] 对连接数、会话数、请求队列、下行队列、包长及期限提供有界默认值。
+TOML 的可选 `[player_gateway]` 节可覆盖参数，未知字段和非法容量会使配置校验失败：
+
+```toml
+[player_gateway]
+max_connections = 128
+max_sessions = 1024
+queue_capacity = 64
+outbound_capacity = 64
+max_frame_size = 1048576
+io_timeout_ms = 15000
+auth_timeout_ms = 5000
+rpc_timeout_ms = 5000
+ownership_ttl_ms = 30000
+renew_interval_ms = 10000
+```
+
+同一玩家的业务请求顺序执行，不同玩家可以并发。队列满立即返回错误，RPC 超时不重试。
+通过 `gateway.sessions()` 获取 [`gateway::player::SessionManager`]，可查询当前
+[`gateway::player::SessionHandle`]；`notify` 与响应共用有界下行队列，不调用 player。
+下行队列满会关闭连接，避免慢客户端无限积压。框架错误见 [`gateway::ErrorCode`]，业务响应的非零错误码保留原值，
+游戏可通过 [`gateway::player::RpcErrorMapper`] 自定义 tonic 状态映射。
+
+重复登录使用新连接：先关闭旧入口，等待当前执行结束或达到执行期限，再条件释放所有权并建立新的 session_id 和 epoch。
+旧队列不再执行，外部网关持有的所有权直接拒绝。连接断开即关闭 session；退出时等待在途执行并条件释放所有权。
+当前没有心跳，完整帧读取期限包含等待首字节的空闲时间，默认空闲 15 秒会断开。
+本批尚不调度 RPC 返回的 timer 信息，也不提供断线宽限期、ack、补发或恢复，这些按下一批实现。
 
 ## 组件入口与当前边界
 
@@ -206,6 +294,8 @@ Channel 缓存有界，节点和地址相同的服务复用连接；节点变更
 | [`events`] | 本地及跨节点事件 |
 | [`observability`] | 日志、指标与追踪 |
 
-目前示例监听共享内部 gRPC 端点，客户端网络监听、session、timer 调度、Redis 和 NATS 尚未接通。
-配置端点地址本身不启动监听，需显式注册 RpcEndpoint。Kubernetes 配置可校验，运行该发现后端仍会明确报错。
+目前示例监听共享内部 gRPC 和客户端 TCP 端点，已接通注入认证、有界串行 session、状态读写及服务组合。
+timer 调度、恢复、Redis 和 NATS 尚未接通。
+配置端点地址本身不启动监听，内部端点需显式注册 RpcEndpoint，TCP 由网关工厂绑定。
+Kubernetes 配置可校验，运行该发现后端仍会明确报错。
 游戏业务协议和 handler 由游戏定义，框架组件不反向依赖具体游戏。

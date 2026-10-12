@@ -15,6 +15,9 @@ prost.workspace = true
 tonic.workspace = true
 tonic-prost.workspace = true
 
+[dev-dependencies]
+tokio-util.workspace = true
+
 [build-dependencies]
 prost-build.workspace = true
 protoc-bin-vendored.workspace = true

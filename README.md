@@ -17,7 +17,7 @@ workspace 启用 `missing_docs = "deny"`，对外公开的模块、类型、字�
 
 框架采用 Cargo workspace，库位于 `crates/`，具体游戏组装最终二进制。`examples/demo-game` 展示游戏协议、服务配置和内存服务目录。
 
-当前已提供配置校验、内存目录与变更订阅、bid 路由、单进程内存所有权、protobuf 生成、服务生命周期、可观测组件及共享内部 gRPC 端点。示例 player 和 guild 提供强类型请求处理，复用端点与客户端连接；按 Ctrl+C 优雅退出。客户端网关监听、session 执行器、timer 调度、Redis、Kubernetes 发现和 NATS 消费尚未实现。
+当前已提供配置校验、内存目录与变更订阅、bid 路由、单进程内存所有权、protobuf 生成、服务生命周期、可观测组件及共享内部 gRPC 端点。PlayerGateway 提供 TCP 登录、认证扩展点、有界串行 session 和通知入口。示例支持玩家状态读写及 player 调用 guild；按 Ctrl+C 优雅退出。timer、断线恢复、Redis、Kubernetes 发现和 NATS 消费按后续批次推进。
 
 网关统一命名为 `PlayerGateway` 和 `SceneGateway`，分别对接 player 与场景服务。`tok-gateway` 中的 `player/` 放置玩家逻辑 session、timer、下行补发及重连交接，`scene/` 放置场景接入和场景连接 session；`transport/`、`security/`、`codec/` 提供按需组合的接入组件。示例玩家网关服务名为 `player-gateway`。
 
@@ -33,6 +33,7 @@ just docs
 just run
 just smoke
 just rpc-smoke
+just client-smoke
 just config-check examples/demo-game/config/gateway.toml
 just config-check examples/demo-game/config/game.toml
 just build
@@ -40,11 +41,15 @@ just build
 
 `just fmt` 格式化代码，`just verify` 检查格式、clippy 和测试。`just proto` 在协议输入变更时触发构建期生成，生成代码位于 Cargo 的 OUT_DIR，不提交生成的 Rust 文件。
 
-`just run` 持续运行本地服务与内部 RPC，`just smoke` 运行一秒后通过同一退出流程结束。`just rpc-smoke` 验证 player 与 guild 的实际内部调用后退出，不代表客户端登录或 session 已实现。也可传入 `--run-for <秒数>`。Linux 额外支持 SIGTERM，适配容器停止。服务默认初始化期限为 30 秒，整体退出期限为 10 秒，游戏可通过 `Application::with_timeouts` 调整。
+`just run` 持续运行客户端 TCP 与内部 RPC，`just smoke` 运行一秒后通过同一退出流程结束。`just rpc-smoke` 验证内部调用；`just client-smoke` 使用真实 TCP 完成登录、状态读取、状态变更和公会查询，然后优雅退出。也可传入 `--run-for <秒数>`。Linux 额外支持 SIGTERM，适配容器停止。服务默认初始化期限为 30 秒，整体退出期限为 10 秒，游戏可通过 `Application::with_timeouts` 调整。
+
+示例凭证为 `demo:<正整数玩家 ID>`，只用于本地开发。TCP 使用 4 字节大端长度和 protobuf Frame，协议及状态机见 [客户端与 session 约定](docs/client-session.md)。身份以认证后的 session 为准，同玩家请求串行，不同玩家可以并发。队列满返回明确错误；重复登录先关闭旧入口并收束旧调用，断线立即释放会话。完整帧的读写期限也包含空闲等待，本批尚无心跳和断线宽限期。
+
+`[player_gateway]` 配置连接、session、执行队列、下行缓冲、帧长度与期限；默认值见 local.toml。此批为明文 TCP 和单进程内存协调，示例状态是有界内存数据，生产认证、安全、持久化和跨网关恢复按后续阶段实施。
 
 游戏通过 `ServiceFactory` 注册各类服务，通过 `Application::register_rpc_endpoint` 显式注册共享 gRPC 端点。应用先绑定监听，业务初始化完成后才加入目录并开启对应的就绪入口；未就绪调用返回 Unavailable。监听或服务启动失败、超时、崩溃或提前结束会触发全进程清理，撤销目录并通知任务退出。服务在取消后负责清理自己的资源，超出退出期限会中止任务。
 
-进程配置 `node_id` 和 `endpoints`，每个端点配置 `name`、`protocol` 和 `address`；各服务通过 `endpoint` 引用端点。多个 protobuf 服务可通过 `RpcEndpoint` 绑定到同一内部 gRPC 端点，每个端点只监听一次。同一 protobuf 服务不能在一个端点重复绑定。示例监听 internal-rpc，客户端端点仍未启用；配置描述本身不自动创建监听。
+进程配置 `node_id` 和 `endpoints`，每个端点配置 `name`、`protocol` 和 `address`；各服务通过 `endpoint` 引用端点。多个 protobuf 服务可通过 `RpcEndpoint` 绑定到同一内部 gRPC 端点，每个端点只监听一次。同一 protobuf 服务不能在一个端点重复绑定。示例监听 internal-rpc 和 client，配置描述本身不自动创建监听，TCP 由网关工厂准备。
 
 服务通过 `(node_id, service_name)` 定位，服务名在节点内唯一，不同节点可使用相同服务名。游戏通过 `Application::register("guild", factory)` 按服务名注册实现，目录通过 `snapshot("guild")` 查询该服务的节点及绑定端点的协议、地址。业务实体仍通过 bid 路由和互斥。
 

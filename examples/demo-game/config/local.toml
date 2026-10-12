@@ -11,7 +11,19 @@ log_format = "text"
 # trace_sample_ratio = 1.0
 # [[observability.trace_force_rules]]
 # span = "client_request"
-# fields = { player_id = 123 }
+# fields = { player_id = "42" }
+
+[player_gateway]
+max_connections = 128
+max_sessions = 1024
+queue_capacity = 64
+outbound_capacity = 64
+max_frame_size = 1048576
+io_timeout_ms = 15000
+auth_timeout_ms = 5000
+rpc_timeout_ms = 5000
+ownership_ttl_ms = 30000
+renew_interval_ms = 10000
 
 [[endpoints]]
 name = "client"

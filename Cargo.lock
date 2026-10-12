@@ -241,6 +241,7 @@ dependencies = [
  "protoc-bin-vendored",
  "tok",
  "tokio",
+ "tokio-util",
  "tonic",
  "tonic-prost",
  "tonic-prost-build",
@@ -1408,9 +1409,17 @@ dependencies = [
 name = "tok-gateway"
 version = "0.1.0"
 dependencies = [
+ "metrics",
+ "prost",
+ "serde",
+ "thiserror",
  "tok-core",
  "tok-events",
+ "tok-infra",
  "tok-rpc",
+ "tokio",
+ "tokio-util",
+ "tracing",
 ]
 
 [[package]]

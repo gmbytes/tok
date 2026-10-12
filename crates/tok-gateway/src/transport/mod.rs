@@ -1,4 +1,4 @@
-//! 接入协议适配与能力描述，具体协议实现后续按选型加入。
+//! 接入协议能力描述。初期 TCP 由 PlayerGateway 与 FrameCodec 组合，其他协议后续按选型加入。
 
 /// 接入组件需要声明的逻辑通信能力。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -10,6 +10,16 @@ license.workspace = true
 tok-core.workspace = true
 tok-events.workspace = true
 tok-rpc.workspace = true
+prost.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+metrics.workspace = true
+
+[dev-dependencies]
+tok-infra.workspace = true
 
 [lints]
 workspace = true

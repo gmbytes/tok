@@ -52,6 +52,9 @@ pub struct AppConfig {
     /// 进程级日志、指标和追踪配置。
     #[serde(default)]
     pub observability: tok_observability::Config,
+    /// 玩家 TCP 网关的容量与期限；未组装网关时不创建监听。
+    #[serde(default)]
+    pub player_gateway: tok_gateway::player::GatewayConfig,
 }
 
 impl AppConfig {
@@ -65,6 +68,7 @@ impl AppConfig {
 
     /// 验证身份、端点和服务绑定，不连接外部依赖。
     pub fn validate(&self) -> Result<()> {
+        self.player_gateway.validate()?;
         self.observability
             .validate()
             .map_err(|error| Error::InvalidConfig(error.to_string()))?;

@@ -1,6 +1,25 @@
 //! 与发现后端独立的业务 ID 路由。
 
+use std::sync::Arc;
 use tok_core::{Error, Result, ServiceDescriptor, ServiceDirectory};
+
+/// 使用注入目录快照的稳定 rendezvous 路由器。
+pub struct RendezvousRouter {
+    directory: Arc<dyn ServiceDirectory>,
+}
+
+impl RendezvousRouter {
+    /// 创建路由器，每次选点读取当前本地快照。
+    pub fn new(directory: Arc<dyn ServiceDirectory>) -> Self {
+        Self { directory }
+    }
+}
+
+impl tok_core::ServiceRouter for RendezvousRouter {
+    fn route(&self, service_name: &str, bid: &str) -> Result<ServiceDescriptor> {
+        route(self.directory.as_ref(), service_name, bid)
+    }
+}
 
 /// 使用稳定的 rendezvous hash 选择目标，输入快照顺序不影响结果。
 ///

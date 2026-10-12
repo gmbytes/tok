@@ -33,5 +33,7 @@ jobs:
         run: just smoke
       - name: 验证共享端点内部 RPC
         run: just rpc-smoke
+      - name: 验证真实 TCP 客户端业务
+        run: just client-smoke
       - name: 验证生产服务配置
         run: just config-check examples/demo-game/config/game.toml

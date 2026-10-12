@@ -1,4 +1,4 @@
-//! 示例游戏二进制：配置校验、内部 RPC 调用验证及协作退出。
+//! 示例游戏二进制：客户端登录、内部 RPC 调用验证及协作退出。
 
 use std::{path::PathBuf, time::Duration};
 
@@ -10,7 +10,7 @@ use tok::{
 };
 
 #[derive(Parser)]
-#[command(about = "tok 单进程多服务与内部 RPC 示例")]
+#[command(about = "tok 单进程 TCP 客户端与内部 RPC 示例")]
 struct Args {
     /// 服务配置文件路径。
     #[arg(long, default_value = "examples/demo-game/config/local.toml")]
@@ -24,6 +24,9 @@ struct Args {
     /// 验证 player 与 guild 的内部 RPC 后通过正常生命周期退出。
     #[arg(long, conflicts_with_all = ["check_config", "run_for"])]
     rpc_smoke: bool,
+    /// 使用真实 TCP 验证客户端登录、状态读写和公会调用后退出。
+    #[arg(long, conflicts_with_all = ["check_config", "run_for", "rpc_smoke"])]
+    client_smoke: bool,
 }
 
 #[tokio::main]
@@ -41,11 +44,11 @@ async fn main() -> Result<(), Error> {
     let result = async {
         let application = demo_game::application(config)?;
         let directory = application.service_directory();
-        tracing::info!("运行服务与内部 RPC，按 Ctrl+C 退出；客户端网关尚未监听");
+        tracing::info!("运行客户端 TCP 与内部 RPC，按 Ctrl+C 退出");
         application
             .run_until(async {
-                if args.rpc_smoke {
-                    return tokio::time::timeout(Duration::from_secs(5), async {
+                if args.rpc_smoke || args.client_smoke {
+                    return tokio::time::timeout(Duration::from_secs(10), async {
                         while directory
                             .snapshot("player")
                             .map_err(std::io::Error::other)?
@@ -54,13 +57,31 @@ async fn main() -> Result<(), Error> {
                                 .snapshot("guild")
                                 .map_err(std::io::Error::other)?
                                 .is_empty()
+                            || (args.client_smoke
+                                && directory
+                                    .snapshot("player-gateway")
+                                    .map_err(std::io::Error::other)?
+                                    .is_empty())
                         {
                             tokio::task::yield_now().await;
                         }
-                        demo_game::rpc_smoke(directory.as_ref())
-                            .await
-                            .map_err(std::io::Error::other)?;
-                        tracing::info!("player 与 guild 内部 RPC 验证通过");
+                        if args.client_smoke {
+                            let gateway = directory
+                                .snapshot("player-gateway")
+                                .map_err(std::io::Error::other)?
+                                .into_iter()
+                                .next()
+                                .ok_or_else(|| std::io::Error::other("玩家网关尚未就绪"))?;
+                            demo_game::client::smoke(gateway.address)
+                                .await
+                                .map_err(std::io::Error::other)?;
+                            tracing::info!("TCP 登录、玩家状态与公会调用验证通过");
+                        } else {
+                            demo_game::rpc_smoke(directory.as_ref())
+                                .await
+                                .map_err(std::io::Error::other)?;
+                            tracing::info!("player 与 guild 内部 RPC 验证通过");
+                        }
                         Ok(())
                     })
                     .await

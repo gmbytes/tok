@@ -3,6 +3,35 @@
 use tok::{AppConfig, DiscoveryBackend};
 
 #[test]
+fn player_gateway_limits_and_lease_coverage_are_validated() {
+    let original = AppConfig::from_toml(include_str!(
+        "../../../examples/demo-game/config/local.toml"
+    ))
+    .unwrap();
+    for invalid in 0..5 {
+        let mut config = original.clone();
+        match invalid {
+            0 => config.player_gateway.queue_capacity = 0,
+            1 => config.player_gateway.max_connections = 65_537,
+            2 => config.player_gateway.max_frame_size = 16 * 1024 * 1024 + 1,
+            3 => config.player_gateway.rpc_timeout_ms = 0,
+            _ => {
+                config.player_gateway.ownership_ttl_ms = config.player_gateway.renew_interval_ms
+                    + config.player_gateway.rpc_timeout_ms * 2
+            }
+        }
+        assert!(config.validate().is_err());
+    }
+    assert!(
+        AppConfig::from_toml(
+            &include_str!("../../../examples/demo-game/config/local.toml")
+                .replace("queue_capacity", "queue_capcity")
+        )
+        .is_err()
+    );
+}
+
+#[test]
 fn example_configs_select_services_in_the_same_binary() {
     for (source, count) in [
         (

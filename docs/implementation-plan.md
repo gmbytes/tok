@@ -2,7 +2,7 @@
 
 ## 实施目标与范围
 
-当前项目已具备配置、服务生命周期、可观测和内部 RPC 基础，客户端局外请求链路尚未接通。下一步应完成单进程局外请求闭环，再实现多网关所有权和恢复、跨节点事件及 Kubernetes 部署，最后推进场景接入。
+当前项目已接通单进程局外请求链路：客户端登录后，经串行 session 调用 player，收到业务响应，并可由 player 调用 guild。下一步实现 timer、同网关恢复及多网关所有权和交接，再推进跨节点事件、Kubernetes 部署和场景接入。
 
 本大纲以 2026-10-12 的代码为基线，遵循 [设计文档](design.md)。各阶段的技术选择属于实施建议；已经确定的执行语义继续以设计文档为准。阶段完成以可运行示例和验收结果为依据，不以模块或接口存在为依据。
 
@@ -16,10 +16,10 @@
 | --- | --- | --- |
 | 内部 RPC | 共享监听、强类型分发、连接复用、超时不重试及追踪传播已验证 | 上下文字段校验不代替内部调用身份认证 |
 | 服务发现与路由 | 内存快照、合并通知、后端注入和稳定 bid 选点已验证 | Channel 失效入口为显式调用；生产监听与自动失效策略随生产发现补齐 |
-| 并发和过载 | 用户 Tower 并发限制经测试，连接缓存有界 | 未默认配置 RPC 过载拒绝层；第二批明确 session 队列满的快速失败 |
-| 协調与会话 | 有界内存所有权、epoch 比较、条件续租释放已验证 | 尚无 session 驱动与跨进程唯一性；session 在第二批，Redis 与交接在第三批 |
+| 并发和过载 | 用户 Tower 并发限制、session 队列满快速失败经测试，连接与下行容量有界 | 未默认配置 RPC 过载拒绝层；生产容量仍需负载验证 |
+| 协调与会话 | 串行 session、有界内存所有权、epoch 比较、条件续租释放及重复登录已验证 | 无跨进程唯一性；Redis 与交接在第三批 |
 | 开发检查 | Windows 常规检查、文档、smoke 和 release 构建通过 | Linux 以对应 CI 的实际运行结果为准，不能由本地 Windows 验证替代 |
-| 客户端协议 | 基础逻辑消息与内部 timer 类型已定义 | 客户端控制帧、错误映射和身份绑定在第二批；ack、补发和恢复在第三批 |
+| 客户端协议 | TCP 分帧、控制帧、错误映射与认证身份绑定已实现 | ack、补发、timer 调度和恢复在第三批 |
 
 第二批的交付顺序是协议与错误码、认证契约、session 执行器、TCP 适配、示例业务与客户端 smoke。重复登录必须收束旧调用后建立新入口；断线立即关闭的本批行为在第三批扩展为宽限期保留和恢复。
 
@@ -28,19 +28,21 @@
 | 能力 | 实现现状与代码依据 | 主要缺口 |
 | --- | --- | --- |
 | 工程与构建 | Cargo workspace 包含八个框架 crate 和 demo-game；just、rustdoc 用户与 API 文档及双平台 CI 已配置 | 外部依赖和生产环境的集成验证 |
-| 配置 | [config.rs](../crates/tok/src/config.rs) 校验节点、端点、服务引用及可观测参数 | 中间件、接入安全、容量及外部依赖配置 |
+| 配置 | [config.rs](../crates/tok/src/config.rs) 校验节点、端点、服务引用、可观测及 player_gateway 容量和期限参数 | 中间件、生产接入安全及外部依赖配置 |
 | 服务生命周期 | [runtime.rs](../crates/tok/src/runtime.rs) 提供工厂注册、共享端点、就绪入口、初始化期限及失败清理 | 生产依赖就绪策略与发现后端 |
 | 发现 | [MemoryDirectory](../crates/tok-infra/src/discovery/memory.rs) 支持注册、注销、快照与合并变更通知；服务上下文可注入查询后端 | Kubernetes 本地缓存与资源映射 |
 | 协议与 RPC | [tok-rpc](../crates/tok-rpc/src/lib.rs) 提供 PlayerRpc、BusinessRpc、强类型分发、连接复用、超时、追踪传播和 TowerHandler | 配置式中间件、锁 Layer 及生产调用身份认证 |
-| 网关 | player、scene、transport、security、codec 模块边界已建立，具有 TransportCapabilities 类型 | 接入监听、身份认证、session 执行、timer、下行缓存与恢复 |
+| 网关 | [PlayerGateway](../crates/tok-gateway/src/player/gateway.rs) 接通 TCP、注入认证、串行 session、所有权续租、下行通知和任务监督 | timer、下行缓存与恢复、生产安全及 scene 接入 |
 | 路由与 Redis | bid rendezvous 路由、所有权与锁契约、有界内存所有权已实现 | Redis 跨进程所有权、租约故障处理与请求级锁后端 |
 | 事件 | [tok-events](../crates/tok-events/src/lib.rs) 已有 DeliveryPolicy 和 EventTarget | 同步本地分发、NATS 后端、订阅、去重及交接处理 |
 | 可观测 | 日志动态过滤、Prometheus、OTLP、强追踪规则、RPC metadata 传播及调用指标已实现 | 事件 headers 传播及 session、timer 指标 |
-| 示例与部署 | 示例 player 与 guild 共享内部 gRPC 监听；`just rpc-smoke` 验证真实调用 | 客户端驱动、容器构建和可部署清单 |
+| 示例与部署 | player 与 guild 共享内部 gRPC；`just client-smoke` 经真实 TCP 验证登录、状态读写和 player 调用 guild | 容器构建和可部署清单 |
 
-现有测试覆盖配置、目录变更、路由、内存所有权、共享端点、RPC 分发、连接复用、超时不重试、追踪及生命周期异常。`just smoke` 验证进程启动退出，`just rpc-smoke` 验证内部请求回应；客户端接入尚未实现。生产 TOML 可通过配置校验，但 Application 会拒绝尚未实现的 Kubernetes 后端。
+现有测试覆盖配置、目录变更、路由、内存所有权、共享端点、RPC 分发、连接复用、超时不重试、追踪及生命周期异常。第二批增加真实 TCP 测试，覆盖认证身份、同玩家串行与不同玩家并发、队列满、重复登录、通知、分帧限制、超时、panic 监督及退出清理。`just smoke` 验证进程启动退出，`just rpc-smoke` 验证内部请求回应，`just client-smoke` 验证完整客户端链路。生产 TOML 可通过配置校验，但 Application 会拒绝尚未实现的 Kubernetes 后端。
 
 第一批 Windows 验证使用 Rust 1.99.0 与 just 1.58.0：格式检查、clippy、37 项测试、2 项文档测试、rustdoc 生成、生命周期 smoke、内部 RPC smoke、两份生产配置校验及 release 构建均通过。工具链覆盖仅在验证命令进程中调整为 1.99.0。双平台 CI 已配置，Linux 运行结果仍需由对应环境验证。
+
+第二批 Windows 验证使用 Rust 1.99.0 与 just 1.58.0：`just verify` 通过 50 项测试与 3 项文档测试，格式与 clippy 无警告；`just docs` 生成中文指南及 API 文档；生命周期、内部 RPC 和真实 TCP 客户端 smoke、两份生产配置校验及 release 构建均通过。新增 11 项网关 TCP 测试、1 项示例端到端测试及 1 项配置测试。校准提交为 `7865907`，第二批代码、测试及文档作为独立实现提交。Linux 仍以 CI 的实际结果为准。
 
 ## 设计约束与实施依赖
 
@@ -184,7 +186,7 @@
 
 ## 交付与推进方式
 
-第一批已接通基础类型与协调契约、内存开发后端、RPC service、共享监听、连接复用与调用验证，同时加入 Rust 原生用户文档生成。客户端认证和串行 session 属于下一批；Redis、锁 Layer、NATS、生产安全和 Kubernetes 仍按后续阶段推进。
+第一批已接通基础类型与协调契约、内存开发后端、RPC service、共享监听、连接复用与调用验证，同时加入 Rust 原生用户文档生成。第二批已实现注入认证、串行 session、TCP 接入及示例客户端闭环，并完成本地验收。第三批先推进 timer 与同网关恢复，再扩展 Redis 所有权和跨网关交接；锁 Layer、NATS、生产安全和 Kubernetes 仍按后续阶段推进。
 
 每个阶段按“契约与协议 → 组件实现 → 示例接通 → 故障与边界验证 → 文档更新”拆分变更。优先开始阶段零至三，得到可运行的局外链路后，再推进恢复与集群能力。
 

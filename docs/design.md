@@ -374,13 +374,13 @@ bid 路由独立于发现后端，由路由组件根据节点列表选择目标�
 
 依赖选型、文件路径处理、进程退出和开发命令都需要兼容这两个平台。Linux 的 GNU 或 musl 工具链及最低系统版本在构建方案中另行确定。Rust 工程建立后，构建与测试覆盖两个目标平台。
 
-项目命令统一通过 just 1.58.0 组织，仓库根目录的 `justfile` 作为开发入口。提供 check、test、fmt、fmt-check、clippy、proto、docs、build、run、smoke、rpc-smoke、config-check 和 verify；底层 Rust 构建工具使用 Cargo，CI 也通过 just 执行常规检查。用户指南作为 tok crate 的 rustdoc 首页，API 文档由 Rust 注释生成，示例通过文档测试验证；CI 构建并保存 HTML 文档。
+项目命令统一通过 just 1.58.0 组织，仓库根目录的 `justfile` 作为开发入口。提供 check、test、fmt、fmt-check、clippy、proto、docs、build、run、smoke、rpc-smoke、client-smoke、config-check 和 verify；底层 Rust 构建工具使用 Cargo，CI 也通过 just 执行常规检查。用户指南作为 tok crate 的 rustdoc 首页，API 文档由 Rust 注释生成，示例通过文档测试验证；CI 构建并保存 HTML 文档。
 
 服务在逻辑上分离，使用同一个二进制并不要求所有服务运行在同一个进程中。初始配置采用 TOML，支持声明节点、发现后端和多个服务，并在启动前校验。组装层通过 ServiceFactory 按 service_name 注册实现，Application 管理初始化、运行监督及退出。本文服务分类描述业务职责，不对应框架内置枚举，也不决定锁、中间件或执行方式；这些由用户配置。
 
 开发环境按配置顺序初始化服务，初始化成功后才注册到内存服务目录；默认单服务初始化期限为 30 秒。初始化必须可取消，资源通过 RAII 释放，服务不得遗留脱管任务。运行任务持续执行，收到取消通知后停止接收工作并清理资源。初始化失败或超时、服务运行失败、提前结束或崩溃均触发进程退出，撤销已注册服务并通知所有已启动服务清理。默认整体协作退出期限为 10 秒，超时中止剩余任务并返回错误；游戏可调整期限。
 
-Windows 使用 Ctrl+C，Linux 使用 Ctrl+C 或 SIGTERM。示例提供 --run-for 用于自动化退出验证，CI 通过 just smoke 执行，just rpc-smoke 额外验证 player 和 guild 的内部调用。当前示例监听共享内部 gRPC 端点，客户端网关仍仅运行生命周期。应用先准备监听，工厂初始化后发布服务并开启对应 RPC 入口；工厂不能在初始化中等待尚未启动的其他服务，就绪后的依赖调用在运行阶段发起。
+Windows 使用 Ctrl+C，Linux 使用 Ctrl+C 或 SIGTERM。示例提供 --run-for 用于自动化退出验证，CI 通过 just smoke 执行，just rpc-smoke 验证内部调用，just client-smoke 经真实 TCP 验证登录、状态读写和 player 调用 guild。示例监听共享内部 gRPC 和客户端 TCP 端点。应用先准备内部监听，工厂初始化后发布服务并开启对应 RPC 入口；TCP 监听由网关工厂初始化并交给监督任务。工厂不能在初始化中等待尚未启动的其他服务，就绪后的依赖调用在运行阶段发起。
 
 资源隔离是必要要求。容量控制、运行指标和可观测能力在开发过程中补齐，不作为当前设计推进的阻塞项。
 
@@ -453,7 +453,7 @@ tok-gateway/src/
 └── codec/
 ```
 
-player 模块包含玩家逻辑会话、串行执行、timer、下行缓存和重连交接；scene 模块包含场景接入和场景连接会话。transport、security 和 codec 供两类网关按需组合。两类 session 按各自业务语义设计，不自动套用相同的串行或所有权约定。当前目录仅提供扩展骨架，协议适配器初期作为模块，实际需要独立发布或隔离依赖时再拆 crate。
+player 模块按玩家逻辑会话、串行执行、timer、下行缓存和重连交接组织；scene 模块包含场景接入和场景连接会话。transport、security 和 codec 供两类网关按需组合。两类 session 按各自业务语义设计，不自动套用相同的串行或所有权约定。当前已实现 player 的 TCP 接入、认证与串行执行，timer、恢复、scene 和安全适配仍待扩展。协议适配器初期作为模块，实际需要独立发布或隔离依赖时再拆 crate。
 
 依赖保持单向：游戏依赖 tok 组装入口及必要组件；tok 依赖组件 crate；组件依赖 tok-core 或 tok-proto，不反向依赖具体游戏或 tok 组装层。网关通过基础契约使用发现、路由与所有权实现，具体实现由组装层选择。RPC 与事件组件不依赖网关。
 
@@ -461,7 +461,7 @@ player 模块包含玩家逻辑会话、串行执行、timer、下行缓存和�
 
 workspace 统一 edition、工具链、依赖版本、lint 和 release 配置，共享 Cargo.lock。单元测试靠近实现，集成测试放对应 crate 的 tests 目录。Windows amd64 和 Linux amd64 通过 CI 分别验证；本地检查仅证明当前主机平台。
 
-当前实现包括八个框架 crate、示例游戏、TOML 配置验证、内存目录与合并变更通知、bid 亲和路由、单进程内存所有权、服务生命周期、可观测组件、protobuf 生成、共享内部 RPC、rustdoc 用户与 API 文档、just 命令和 CI。示例 player 和 guild 通过不同 protobuf 服务共享内部端点，客户端网关尚未监听。ServiceContext 可注入发现查询后端，生产 Kubernetes 配置可验证但后端运行仍报尚未实现。Redis、NATS、session 调度、补发及安全适配后续实现；内存所有权不提供跨进程唯一性，内部上下文字段校验不代替调用身份认证。部署目录暂不提供可运行的 Kubernetes 清单。
+当前实现包括八个框架 crate、示例游戏、TOML 配置验证、内存目录与合并变更通知、bid 亲和路由、单进程内存所有权、服务生命周期、可观测组件、protobuf 生成、共享内部 RPC、客户端 TCP 分帧与注入认证、有界串行 session、下行通知、rustdoc 用户与 API 文档、just 命令和 CI。示例 player 和 guild 共享内部端点，客户端网关经认证身份完成状态读写和 player 到 guild 的调用。ServiceContext 可注入发现查询后端，生产 Kubernetes 配置可验证但后端运行仍报尚未实现。Redis、NATS、timer 调度、补发及安全适配后续实现；内存所有权不提供跨进程唯一性，内部上下文字段校验不代替调用身份认证。部署目录暂不提供可运行的 Kubernetes 清单。
 
 ## 可观测约定
 
@@ -511,4 +511,4 @@ workspace 统一 edition、工具链、依赖版本、lint 和 release 配置，
 
 RPC 异常、客户端等待、重复登录、快速重登、本地事件、timerSpec，以及按类型选择事件投递策略和重复处理分工，均按本文约定执行。
 
-初期接入协议与安全组件的组合、局内场景定位方式尚未选定。频道加入退出及交接 API、离线玩家临时加载的释放方式、token 签发与撤销规则、协议字段布局、接口签名、容量参数和指标在实现时细化；存储层与无缝场景切换仍按既定范围留待后续设计。
+初期局外接入已选定单进程开发用明文 TCP，分帧、认证契约、容量和期限见 client-session.md；生产安全组合与局内场景定位方式仍待选定。频道加入退出及交接 API、离线玩家临时加载的释放方式、生产 token 签发与撤销规则、恢复协议字段和指标在对应阶段细化；存储层与无缝场景切换仍按既定范围留待后续设计。

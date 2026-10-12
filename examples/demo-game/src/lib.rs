@@ -1,5 +1,7 @@
 //! 示例游戏自己的协议和业务模块，框架 crate 不依赖这些模块。
 
+pub mod client;
+pub mod gateway;
 pub mod guild;
 pub mod player;
 pub mod protocol;
@@ -26,12 +28,23 @@ impl ServiceFactory for LifecycleService {
     }
 }
 
-/// 组装示例的内部 gRPC 服务；客户端网关仍只运行生命周期。
+/// 组装客户端 TCP 网关和共享内部 gRPC 服务，使用单进程开发所有权。
 pub fn application(config: AppConfig) -> Result<Application, Error> {
     let mut app = Application::new(config.clone())?;
+    let ownership = Arc::new(tok::infra::ownership::MemoryOwnership::new(
+        config.player_gateway.max_sessions,
+    )?);
     for service in &config.services {
-        app.register(&service.service_name, LifecycleService)?;
+        if service.service_name == "player-gateway" {
+            app.register(
+                &service.service_name,
+                gateway::GatewayFactory::new(config.player_gateway.clone(), ownership.clone()),
+            )?;
+        } else {
+            app.register(&service.service_name, LifecycleService)?;
+        }
     }
+    let state = Arc::new(player::State::new(config.player_gateway.max_sessions)?);
     for endpoint in &config.endpoints {
         if endpoint.protocol != "grpc" {
             continue;
@@ -46,8 +59,12 @@ pub fn application(config: AppConfig) -> Result<Application, Error> {
             rpc = match service.service_name.as_str() {
                 "player" => rpc.add_service(
                     "player",
-                    RpcService::new(&config.node_id, "player", Arc::new(player::handlers()?))?
-                        .into_player(),
+                    RpcService::new(
+                        &config.node_id,
+                        "player",
+                        Arc::new(player::handlers(state.clone(), app.service_directory())?),
+                    )?
+                    .into_player(),
                 )?,
                 "guild" => rpc.add_service(
                     "guild",

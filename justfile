@@ -29,7 +29,7 @@ clippy:
 build:
     cargo build --release -p demo-game --locked
 
-# 持续运行服务和内部 RPC，Ctrl+C 优雅退出；客户端网关尚未监听
+# 持续运行客户端 TCP 和内部 RPC，Ctrl+C 优雅退出
 run config="examples/demo-game/config/local.toml":
     cargo run -p demo-game --locked -- --config "{{config}}"
 
@@ -40,6 +40,10 @@ smoke:
 # 验证共享 gRPC 端点上的 player 和 guild 调用，再优雅退出
 rpc-smoke:
     cargo run -p demo-game --locked -- --config examples/demo-game/config/local.toml --rpc-smoke
+
+# 通过真实 TCP 验证客户端登录、状态读写与公会调用，再优雅退出
+client-smoke:
+    cargo run -p demo-game --locked -- --config examples/demo-game/config/local.toml --client-smoke
 
 # 验证指定服务配置
 config-check config="examples/demo-game/config/local.toml":

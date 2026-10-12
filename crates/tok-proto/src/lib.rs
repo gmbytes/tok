@@ -8,3 +8,12 @@ pub mod internal {
         include!(concat!(env!("OUT_DIR"), "/tok.internal.v1.rs"));
     }
 }
+
+/// 与具体游戏消息正文分开的客户端逻辑信封。
+pub mod client {
+    /// v1 登录、业务请求回应和通知，由 protobuf 自动生成。
+    #[allow(missing_docs)] // 仅豁免生成代码。
+    pub mod v1 {
+        include!(concat!(env!("OUT_DIR"), "/tok.client.v1.rs"));
+    }
+}
