@@ -1,4 +1,5 @@
 use super::*;
+use crate::player::outbound::Outbound;
 use crate::player::{PlayerReply, PlayerTask};
 use std::sync::atomic::AtomicUsize;
 use tok_core::{TimerSpec, TimerTrigger, TimerUpdate};
@@ -93,7 +94,7 @@ impl Fixture {
             .await
             .unwrap();
         let (queue, receiver) = mpsc::channel(2);
-        let (outbound, outgoing) = mpsc::channel(8);
+        let (outbound, mut outgoing) = mpsc::channel(8);
         let active = Arc::new(Active {
             ownership: lease,
             cancel: CancellationToken::new(),
@@ -102,8 +103,18 @@ impl Fixture {
                 notify: Notify::new(),
             },
             queue,
-            outbound,
+            outbound: Downlink::new(outbound, &PlayerConfig::default()),
         });
+        active
+            .outbound
+            .start(crate::protocol::Frame {
+                version: crate::codec::VERSION,
+                content: Some(crate::protocol::frame::Content::LoggedIn(
+                    crate::protocol::LoginResponse::default(),
+                )),
+            })
+            .unwrap();
+        outgoing.try_recv().unwrap();
         let due = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()

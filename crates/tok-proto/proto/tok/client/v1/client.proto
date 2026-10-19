@@ -11,6 +11,7 @@ message Frame {
     BusinessResponse response = 5;
     Notify notify = 6;
     ControlError error = 7;
+    Ack ack = 8;
   }
 }
 message LoginRequest {
@@ -34,10 +35,18 @@ message BusinessResponse {
   uint32 message_id = 2;
   uint32 error_code = 3;
   bytes body = 4;
+  // 同一逻辑会话的下行序号，从 1 开始，包含失败回应。
+  uint64 server_seq = 5;
 }
 message Notify {
   uint32 message_id = 1;
   bytes body = 2;
+  // 与 BusinessResponse 共用连续下行序列。
+  uint64 server_seq = 3;
+}
+// 客户端已连续应用到业务状态的最大序号，绑定当前连接的会话。
+message Ack {
+  uint64 ack_seq = 1;
 }
 message ControlError {
   uint64 request_id = 1;

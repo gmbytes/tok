@@ -4,7 +4,8 @@ use crate::{
     ErrorCode, GatewayContext, Result,
     player::{
         PlayerConfig, PlayerExecutor,
-        outbound::{self, Outbound, Sender},
+        outbound::{self, Downlink, Sender},
+        replay::ReplayBatch,
         timer::{Ticket, Timers},
     },
 };
@@ -59,12 +60,13 @@ struct Active {
     cancel: CancellationToken,
     completion: Completion,
     queue: mpsc::Sender<Job>,
-    outbound: Sender,
+    outbound: Downlink,
 }
 struct Finished(Arc<Active>);
 impl Drop for Finished {
     fn drop(&mut self) {
         self.0.cancel.cancel();
+        self.0.outbound.close();
         self.0.completion.done.store(true, Ordering::Release);
         self.0.completion.notify.notify_waiters();
     }
@@ -86,6 +88,39 @@ impl SessionHandle {
     /// 停止新业务，在途调用由执行任务收束。
     pub fn close(&self) {
         self.0.cancel.cancel();
+        self.0.outbound.close();
+    }
+
+    pub(super) fn start(&self, login: crate::protocol::Frame) -> Result<()> {
+        self.0.outbound.start(login)
+    }
+
+    pub(super) fn acknowledge(&self, seq: u64) -> Result<()> {
+        if self.0.cancel.is_cancelled() {
+            return Err(ErrorCode::SessionClosed.into());
+        }
+        self.0.outbound.acknowledge(seq)
+    }
+
+    /// 查询确认位置之后的完整缓存快照；存在缺口或位置越界时返回 None。
+    ///
+    /// 不发送、不确认消息，也不恢复连接；会话关闭后返回 SessionClosed。
+    pub fn replay_after(&self, ack_seq: u64) -> Result<Option<ReplayBatch>> {
+        if self.0.cancel.is_cancelled() {
+            return Err(ErrorCode::SessionClosed.into());
+        }
+        self.0.outbound.replay_after(ack_seq)
+    }
+
+    pub(super) fn respond(&self, response: LogicalMessage, request_message_id: u32) -> Result<()> {
+        if self.0.cancel.is_cancelled() {
+            return Err(ErrorCode::SessionClosed.into());
+        }
+        if let Err(error) = self.0.outbound.publish(response, request_message_id) {
+            self.close();
+            return Err(error);
+        }
+        Ok(())
     }
 
     fn enqueue(
@@ -102,6 +137,7 @@ impl SessionHandle {
         {
             return Err(ErrorCode::InvalidRequest.into());
         }
+        self.0.outbound.check_ready()?;
         self.0
             .queue
             .try_send(Job::Request(RequestJob { request, reply }))
@@ -115,6 +151,8 @@ impl SessionHandle {
         self.enqueue(request, None)
     }
     /// 非阻塞提交并取得独立回应 future，满队列立即失败，不自动重试。
+    ///
+    /// 回应只交给调用方，不自动发给游戏客户端，不分配下行序号或写入缓存。
     pub fn try_request(&self, request: LogicalMessage) -> Result<PendingResponse> {
         let fallback = outbound::failed(&request, ErrorCode::SessionClosed);
         let (sender, receiver) = oneshot::channel();
@@ -122,6 +160,7 @@ impl SessionHandle {
         Ok(Box::pin(async move { receiver.await.unwrap_or(fallback) }))
     }
     /// 主动通知进入下行入口，不调用 player；慢连接的缓冲满时关闭会话。
+    /// 超大通知返回 FrameTooLarge，不消耗序号；登录回应入队前返回 InvalidState。
     pub fn notify(&self, message: LogicalMessage) -> Result<()> {
         if self.0.cancel.is_cancelled() {
             return Err(ErrorCode::SessionClosed.into());
@@ -129,8 +168,13 @@ impl SessionHandle {
         if message.kind != MessageKind::Notify || message.message_id == 0 {
             return Err(ErrorCode::InvalidRequest.into());
         }
-        if let Err(error) = outbound::send(&self.0.outbound, message) {
-            self.close();
+        if let Err(error) = self.0.outbound.publish(message, 0) {
+            if !matches!(
+                error.code,
+                ErrorCode::FrameTooLarge | ErrorCode::InvalidState
+            ) {
+                self.close();
+            }
             return Err(error);
         }
         Ok(())
@@ -293,7 +337,7 @@ impl SessionManager {
                 notify: Notify::new(),
             },
             queue,
-            outbound,
+            outbound: Downlink::new(outbound, &self.config),
         });
         // 在下一次 await 前登记已确认的租约，取消登录时退出流程仍能条件释放。
         *slot.active.lock().map_err(|_| ErrorCode::Internal)? = Some(active.clone());
@@ -446,7 +490,7 @@ fn actor(
                         request.body.clear();
                         metrics::counter!("tok_session_requests_total", "result" => if response.error_code == 0 { "ok" } else { "error" }).increment(1);
                         if let Some(reply) = job.reply { let _ = reply.send(response); }
-                        else if active.outbound.try_send(Outbound::Logical(response)).is_err() { active.cancel.cancel(); }
+                        else { let _ = SessionHandle(active.clone()).respond(response, request.message_id); }
                     }
                 }
             }

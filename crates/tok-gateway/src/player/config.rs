@@ -31,6 +31,12 @@ pub struct PlayerConfig {
     pub max_timers: usize,
     /// 每个 session 所有 timer 的 ID 与正文总字节上限。
     pub max_timer_bytes: usize,
+    /// 下行缓存从原始发布时间起的保留时长，单位毫秒。
+    pub replay_ttl_ms: u64,
+    /// 每个 session 的下行缓存条数上限，允许淘汰未确认记录。
+    pub replay_capacity: usize,
+    /// 每个 session 的编码下行正文总字节上限，不小于 max_frame_size。
+    pub replay_max_bytes: usize,
 }
 
 impl Default for PlayerConfig {
@@ -48,6 +54,9 @@ impl Default for PlayerConfig {
             renew_interval_ms: 10_000,
             max_timers: 128,
             max_timer_bytes: 1_048_576,
+            replay_ttl_ms: 30_000,
+            replay_capacity: 256,
+            replay_max_bytes: 4_194_304,
         }
     }
 }
@@ -68,6 +77,7 @@ impl PlayerConfig {
             self.queue_capacity,
             self.outbound_capacity,
             self.max_timers,
+            self.replay_capacity,
         ]
         .iter()
         .any(|value| *value == 0 || *value > 65_536)
@@ -75,12 +85,15 @@ impl PlayerConfig {
             || self.max_timer_bytes > 16 * 1024 * 1024
             || self.max_frame_size == 0
             || self.max_frame_size > 16 * 1024 * 1024
+            || self.replay_max_bytes < self.max_frame_size
+            || self.replay_max_bytes > 64 * 1024 * 1024
             || [
                 self.io_timeout_ms,
                 self.auth_timeout_ms,
                 self.rpc_timeout_ms,
                 self.ownership_ttl_ms,
                 self.renew_interval_ms,
+                self.replay_ttl_ms,
             ]
             .iter()
             .any(|value| *value == 0 || *value > 86_400_000)

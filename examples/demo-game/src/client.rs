@@ -41,9 +41,11 @@ pub async fn smoke(address: std::net::SocketAddr) -> Result<(), Error> {
     {
         return Err(std::io::Error::other("登录身份无效").into());
     }
+    let mut server_seq = 0;
     let player = call::<_, v1::GetPlayerResponse>(
         &mut stream,
         &codec,
+        &mut server_seq,
         2,
         &v1::GetPlayerRequest { player_id: 9999 },
     )
@@ -54,6 +56,7 @@ pub async fn smoke(address: std::net::SocketAddr) -> Result<(), Error> {
     let set = call::<_, v1::SetPlayerResponse>(
         &mut stream,
         &codec,
+        &mut server_seq,
         3,
         &v1::SetPlayerRequest { value: 123 },
     )
@@ -61,6 +64,7 @@ pub async fn smoke(address: std::net::SocketAddr) -> Result<(), Error> {
     let player = call::<_, v1::GetPlayerResponse>(
         &mut stream,
         &codec,
+        &mut server_seq,
         4,
         &v1::GetPlayerRequest { player_id: 0 },
     )
@@ -71,6 +75,7 @@ pub async fn smoke(address: std::net::SocketAddr) -> Result<(), Error> {
     let guild = call::<_, v1::QueryGuildResponse>(
         &mut stream,
         &codec,
+        &mut server_seq,
         5,
         &v1::QueryGuildRequest { guild_id: 7 },
     )
@@ -78,14 +83,21 @@ pub async fn smoke(address: std::net::SocketAddr) -> Result<(), Error> {
     if guild.guild_id != 7 {
         return Err(std::io::Error::other("公会回应不一致").into());
     }
-    call::<_, v1::StartProductionResponse>(&mut stream, &codec, 6, &v1::StartProductionRequest {})
-        .await?;
+    call::<_, v1::StartProductionResponse>(
+        &mut stream,
+        &codec,
+        &mut server_seq,
+        6,
+        &v1::StartProductionRequest {},
+    )
+    .await?;
     tokio::time::timeout(Duration::from_secs(3), async {
         let mut request_id = 7;
         loop {
             let state = call::<_, v1::GetPlayerResponse>(
                 &mut stream,
                 &codec,
+                &mut server_seq,
                 request_id,
                 &v1::GetPlayerRequest { player_id: 0 },
             )
@@ -105,6 +117,7 @@ pub async fn smoke(address: std::net::SocketAddr) -> Result<(), Error> {
 async fn call<Req: GameMessage, Resp: GameMessage + Default>(
     stream: &mut TcpStream,
     codec: &FrameCodec,
+    server_seq: &mut u64,
     request_id: u64,
     request: &Req,
 ) -> Result<Resp, Error> {
@@ -129,6 +142,10 @@ async fn call<Req: GameMessage, Resp: GameMessage + Default>(
         return Err(std::io::Error::other("未收到业务回应").into());
     };
     if response.request_id != request_id
+        || response.server_seq
+            != server_seq
+                .checked_add(1)
+                .ok_or_else(|| std::io::Error::other("下行序号耗尽"))?
         || response.message_id != Resp::MESSAGE_ID
         || response.error_code != 0
     {
@@ -136,5 +153,18 @@ async fn call<Req: GameMessage, Resp: GameMessage + Default>(
             std::io::Error::other(format!("客户端请求失败：{}", response.error_code)).into(),
         );
     }
-    Ok(Resp::decode(response.body.as_slice())?)
+    let message = Resp::decode(response.body.as_slice())?;
+    *server_seq = response.server_seq;
+    codec
+        .write(
+            stream,
+            &Frame {
+                version: VERSION,
+                content: Some(Content::Ack(protocol::Ack {
+                    ack_seq: *server_seq,
+                })),
+            },
+        )
+        .await?;
+    Ok(message)
 }

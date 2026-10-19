@@ -331,14 +331,15 @@ Redis 发现只解决服务定位。玩家状态仍在进程内存，session 所
 运行 `just run` 可持续监听本地客户端端口 `127.0.0.1:7000`。
 示例凭据为 `demo:<正整数玩家 ID>`，如 `demo:42`；该认证器仅供本地开发，状态保存在有界内存中。
 
-客户端使用四字节大端长度前缀与 protobuf [`gateway::protocol::Frame`]，版本为 1。
+客户端使用四字节大端长度前缀与 protobuf [`gateway::protocol::Frame`]，版本为 2。
+protobuf 命名空间仍为 `tok.client.v1`，帧版本由 `VERSION` 决定；旧版本 1 客户端须同步升级，服务端拒绝旧帧版本。
 登录和业务请求的 `request_id` 必须非零，并在同一连接上严格递增。
 下面示例登录后读取玩家状态；示例游戏的读取消息 ID 为 1，空正文是合法的默认 protobuf 请求。
 
 ```rust,no_run
 use std::time::Duration;
 use tok::gateway::{codec::{FrameCodec, VERSION},
-    protocol::{Frame, LoginRequest, BusinessRequest, frame::Content}};
+    protocol::{Frame, LoginRequest, BusinessRequest, Ack, frame::Content}};
 use tokio::net::TcpStream;
 
 #[tokio::main]
@@ -370,7 +371,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         Some(Content::Response(response)) => {
             assert_eq!(response.request_id, 2);
             assert_eq!(response.error_code, 0);
-            // 游戏使用自己的 protobuf 响应类型解码 response.body。
+            assert_eq!(response.server_seq, 1);
+            // 游戏在这里解码 response.body 并应用业务状态；完成后才累计确认。
+            codec.write(&mut connection, &Frame {
+                version: VERSION,
+                content: Some(Content::Ack(Ack { ack_seq: response.server_seq })),
+            }).await?;
         },
         _ => return Err("响应类型错误".into()),
     }
@@ -402,6 +408,9 @@ ownership_ttl_ms = 30000
 renew_interval_ms = 10000
 max_timers = 128
 max_timer_bytes = 1048576
+replay_ttl_ms = 30000
+replay_capacity = 256
+replay_max_bytes = 4194304
 ```
 
 同一玩家的业务请求顺序执行，不同玩家可以并发。队列满立即返回错误，RPC 超时不重试。
@@ -413,7 +422,39 @@ max_timer_bytes = 1048576
 重复登录使用新连接：先关闭旧入口，等待当前执行结束或达到执行期限，再条件释放所有权并建立新的 session_id 和 epoch。
 旧队列不再执行，外部网关持有的所有权直接拒绝。连接断开即关闭 session；退出时等待在途执行并条件释放所有权。
 当前没有心跳，完整帧读取期限包含等待首字节的空闲时间，默认空闲 15 秒会断开。
-已支持 RPC 返回的 timer 更新；断线宽限期、ack、补发和恢复仍按后续步骤实现。
+已支持 RPC 返回的 timer 更新、统一下行序号、累计 ACK 与内存缓存；断线宽限期、真正补发和恢复仍按后续步骤实现。
+
+### 下行序号、确认与缓存
+
+已绑定 session 的 `BusinessResponse`（含业务错误、队列拒绝和超时）与 `Notify` 共用连续 `server_seq`，
+从 1 开始，按发布顺序编号。`request_id` 关联请求和回应，`message_id` 标识游戏消息类型；
+较晚请求被队列拒绝时，其回应可能先于较早请求的在途 RPC 回应发布。
+登录回应和控制错误不占业务序号；未认证业务请求改为返回 `ControlError`，不再返回无会话序号的业务回应。
+
+客户端按序应用回应和通知后，使用独立 `Ack { ack_seq }` 确认连续处理完成的位置。
+缺少 3 而已收到 4 时不能确认 4；重复下行不重复应用业务状态。
+ACK 不使用 `request_id`，不进入 player 队列，不触发 RPC。零值、重复或倒退的 ACK 忽略；
+超过最大发布序号的 ACK 返回 `InvalidRequest` 控制错误并关闭连接，未认证 ACK 返回 `Unauthenticated` 并关闭连接。
+确认上界使用缓存已提交的序号，本地写入完成通知不等于客户端确认。
+
+下行先编码并缓存再提交发送队列，缓存和 writer 共享最终正文，包含版本和序号，不含 TCP 长度前缀或加密封装。
+超大回应在缓存前转换为空正文的 `FrameTooLarge` 回应，使用原请求消息 ID；
+超大通知直接返回 `FrameTooLarge`，不消耗序号，也不因此关闭 session。
+发布成功表示进入缓存和发送队列，不表示客户端已收到或处理。
+
+缓存按单会话的时间、条数和编码字节上限淘汰最旧记录，允许淘汰未确认消息；时间使用单调时钟。
+`replay_capacity` 上限 65536，`replay_ttl_ms` 上限 86400000，`replay_max_bytes` 上限 64 MiB 且不得小于 `max_frame_size`。
+这些值均须为正；默认 30 秒、256 条、4 MiB 是开发参数，单会话上限并非整个网关内存预算。
+合法 ACK 释放已确认记录；过期记录在发布、ACK 或缓存查询时清理，重读快照不延长原始保留时间。
+
+[`gateway::player::SessionHandle::replay_after`] 查询给定确认位置之后的完整缓存，返回
+[`gateway::player::replay::ReplayBatch`]，其 `through_seq` 是查询时的最大序号，`frames` 是按序编码正文。
+范围有缺口或位置越界返回 `None`；已确认释放的字节不能再从更早位置查询，关闭后返回 `SessionClosed`。
+查询不发送、不确认消息；调用方持有快照会延长对应字节的生命期，应及时释放。
+`try_request` 的独立回应只交给调用方，仍无下行序号，也不自动写入客户端缓存。
+
+本步断线仍立即关闭 session 并清理 timer 与缓存，新登录重新从序号 1 开始。
+尚未提供 Resume 请求、token、宽限期或对外 `ResumeUnavailable` 流程；查询缓存不代表已经支持重连。
 
 ## 玩家 timer
 
@@ -538,7 +579,7 @@ Scene 目前仅预留模块，不套用 Player 的串行与所有权语义。
 | [`observability`] | 日志、指标与追踪 |
 
 目前示例监听共享内部 gRPC 和客户端 TCP 端点，已接通注入认证、有界串行 session、状态读写及服务组合。
-Redis 开发发现、session 所有权和 timer 调度已接通；恢复、跨网关交接和 NATS 尚未接通。
+Redis 开发发现、session 所有权、timer 调度、下行序号与 ACK 缓存已接通；恢复、跨网关交接和 NATS 尚未接通。
 配置端点地址本身不启动监听，内部端点需显式注册 RpcEndpoint，TCP 由网关工厂绑定。
 Kubernetes 配置可校验，运行该发现后端仍会明确报错。
 游戏业务协议和 handler 由游戏定义，框架组件不反向依赖具体游戏。

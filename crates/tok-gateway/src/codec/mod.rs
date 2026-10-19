@@ -6,7 +6,7 @@ use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 /// 客户端协议的当前版本。
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 
 /// 有长度上限和整帧期限的 TCP 编解码器，不能取消半帧读取后继续复用连接。
 #[derive(Debug, Clone)]
@@ -74,14 +74,26 @@ impl FrameCodec {
         if size > self.limit {
             return Err(ErrorCode::FrameTooLarge.into());
         }
-        let body = frame.encode_to_vec();
+        self.write_body(writer, &frame.encode_to_vec()).await
+    }
+
+    // 发送已经检查并缓存的最终正文；不再重编码或替换业务内容。
+    pub(crate) async fn write_body<W: AsyncWrite + Unpin>(
+        &self,
+        writer: &mut W,
+        body: &[u8],
+    ) -> Result<()> {
+        let size = body.len();
+        if size == 0 || size > self.limit {
+            return Err(ErrorCode::FrameTooLarge.into());
+        }
         tokio::time::timeout(self.timeout, async {
             writer
                 .write_all(&(size as u32).to_be_bytes())
                 .await
                 .map_err(|_| ErrorCode::SessionClosed)?;
             writer
-                .write_all(&body)
+                .write_all(body)
                 .await
                 .map_err(|_| ErrorCode::SessionClosed)?;
             writer.flush().await.map_err(|_| ErrorCode::SessionClosed)?;

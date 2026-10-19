@@ -7,6 +7,7 @@ pub mod executor;
 pub mod gateway;
 pub mod ingress;
 pub mod outbound;
+pub mod replay;
 pub mod resume;
 pub mod session;
 pub mod timer;

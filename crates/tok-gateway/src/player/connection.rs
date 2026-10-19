@@ -10,7 +10,6 @@ use crate::{
     },
     protocol::{self, Frame, frame::Content},
 };
-use prost::Message;
 use std::{
     sync::{Arc, Mutex},
     time::Duration,
@@ -46,28 +45,14 @@ pub(super) async fn connection(
     let binding = Arc::new(Binding::default());
     let writing = async {
         while let Some(outbound) = outgoing.recv().await {
-            let (mut frame, written) = match outbound {
-                Outbound::Frame(frame, written) => (frame, written),
-                Outbound::Logical(message) => (outbound::frame(message)?, None),
-            };
-            if frame.encoded_len() > config.max_frame_size {
-                if let Some(Content::Response(response)) = &frame.content {
-                    frame = Frame {
-                        version: VERSION,
-                        content: Some(Content::Response(protocol::BusinessResponse {
-                            request_id: response.request_id,
-                            message_id: response.message_id,
-                            error_code: ErrorCode::FrameTooLarge as u32,
-                            body: Vec::new(),
-                        })),
-                    };
-                } else {
-                    return Err(ErrorCode::FrameTooLarge.into());
+            match outbound {
+                Outbound::Frame(frame, written) => {
+                    codec.write(&mut writer, &frame).await?;
+                    if let Some(written) = written {
+                        let _ = written.send(());
+                    }
                 }
-            }
-            codec.write(&mut writer, &frame).await?;
-            if let Some(written) = written {
-                let _ = written.send(());
+                Outbound::Encoded(body) => codec.write_body(&mut writer, &body).await?,
             }
         }
         Ok(())
@@ -188,14 +173,19 @@ async fn read_connection(
                     Ok(opened) => {
                         let identity = opened.identity().clone();
                         *binding.0.lock().map_err(|_| ErrorCode::Internal)? = Some(opened.clone());
-                        session = Some(opened);
-                        protocol::LoginResponse {
+                        let response = protocol::LoginResponse {
                             request_id: login.request_id,
                             error_code: 0,
                             player_id: identity.player_id,
                             session_id: identity.session_id,
                             epoch: identity.epoch,
-                        }
+                        };
+                        opened.start(Frame {
+                            version: VERSION,
+                            content: Some(Content::LoggedIn(response)),
+                        })?;
+                        session = Some(opened);
+                        continue;
                     }
                     Err(error) => protocol::LoginResponse {
                         request_id: login.request_id,
@@ -228,7 +218,33 @@ async fn read_connection(
                 };
                 last_request_id = last_request_id.max(request.request_id);
                 if let Err(error) = result {
-                    outbound::send(&sender, outbound::failed(&request, error.code))?;
+                    if let Some(session) = &session {
+                        session
+                            .respond(outbound::failed(&request, error.code), request.message_id)?;
+                    } else {
+                        enqueue_content(
+                            &sender,
+                            Content::Error(protocol::ControlError {
+                                request_id: request.request_id,
+                                error_code: error.code as u32,
+                            }),
+                        )?;
+                    }
+                }
+            }
+            Content::Ack(ack) => {
+                let result = session
+                    .as_ref()
+                    .ok_or_else(|| GatewayError::from(ErrorCode::Unauthenticated))
+                    .and_then(|session| session.acknowledge(ack.ack_seq));
+                if let Err(error) = result {
+                    close_with_error(
+                        &sender,
+                        error.code,
+                        Duration::from_millis(config.io_timeout_ms),
+                    )
+                    .await;
+                    return Err(error);
                 }
             }
             _ => {

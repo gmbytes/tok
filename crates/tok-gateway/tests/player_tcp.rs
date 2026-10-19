@@ -96,7 +96,11 @@ impl PlayerExecutor for Executor {
                 request_id: request.request_id,
                 error_code: 0,
                 server_seq: None,
-                body: identity.player_id.into_bytes(),
+                body: if request.message_id == 3 {
+                    vec![7; 1024]
+                } else {
+                    identity.player_id.into_bytes()
+                },
             }
             .into())
         })
@@ -344,6 +348,147 @@ fn config() -> PlayerConfig {
 }
 
 #[tokio::test]
+async fn cumulative_ack_releases_cache_and_never_executes_player() {
+    let fixture = Fixture::new(config()).await;
+    let mut client = fixture.connect().await;
+    client.login(1, "1").await;
+    let session = fixture.sessions.session("1").unwrap().unwrap();
+    client
+        .send(Content::Ack(protocol::Ack { ack_seq: 0 }))
+        .await;
+    client.request(2, 1, b"ok").await;
+    assert_eq!(client.response().await.server_seq, 1);
+    for ack_seq in [0, 1, 1, 0] {
+        client.send(Content::Ack(protocol::Ack { ack_seq })).await;
+    }
+    client.request(3, 1, b"ok").await;
+    assert_eq!(client.response().await.server_seq, 2);
+    assert!(session.replay_after(0).unwrap().is_none());
+    let batch = session.replay_after(1).unwrap().unwrap();
+    assert_eq!(batch.through_seq, 2);
+    assert_eq!(batch.frames.len(), 1);
+    assert_eq!(fixture.tracker.calls.load(Ordering::SeqCst), 2);
+    let internal = session
+        .try_request(LogicalMessage {
+            kind: MessageKind::Request,
+            message_id: 1,
+            request_id: 4,
+            error_code: 0,
+            server_seq: None,
+            body: vec![],
+        })
+        .unwrap()
+        .await;
+    assert!(internal.server_seq.is_none());
+    assert_eq!(session.replay_after(2).unwrap().unwrap().through_seq, 2);
+    assert_eq!(fixture.tracker.calls.load(Ordering::SeqCst), 3);
+    client
+        .send(Content::Ack(protocol::Ack { ack_seq: 3 }))
+        .await;
+    let Content::Error(error) = client.read().await else {
+        panic!("缺少越界确认错误");
+    };
+    assert_eq!(error.error_code, ErrorCode::InvalidRequest as u32);
+    assert!(
+        client
+            .codec
+            .read(&mut client.stream)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    fixture.released("1").await;
+    assert_eq!(
+        session.replay_after(2).unwrap_err().code,
+        ErrorCode::SessionClosed
+    );
+    fixture.finish().await;
+}
+
+#[tokio::test]
+async fn ack_requires_authenticated_binding_and_cannot_confirm_unpublished_messages() {
+    let fixture = Fixture::new(config()).await;
+    for authenticated in [false, true] {
+        let mut client = fixture.connect().await;
+        if authenticated {
+            client.login(1, "1").await;
+        }
+        client
+            .send(Content::Ack(protocol::Ack { ack_seq: 1 }))
+            .await;
+        let Content::Error(error) = client.read().await else {
+            panic!("缺少 ACK 控制错误");
+        };
+        assert_eq!(
+            error.error_code,
+            if authenticated {
+                ErrorCode::InvalidRequest
+            } else {
+                ErrorCode::Unauthenticated
+            } as u32
+        );
+        assert!(
+            client
+                .codec
+                .read(&mut client.stream)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+    assert_eq!(fixture.tracker.calls.load(Ordering::SeqCst), 0);
+    fixture.finish().await;
+}
+
+#[tokio::test]
+async fn oversized_response_is_cached_after_normalization_and_notify_rejection_preserves_sequence()
+{
+    let fixture = Fixture::new(PlayerConfig {
+        max_frame_size: 256,
+        ..config()
+    })
+    .await;
+    let mut client = fixture.connect().await;
+    assert_eq!(client.login(1, "1").await.error_code, 0);
+    let session = fixture.sessions.session("1").unwrap().unwrap();
+    assert_eq!(
+        session
+            .notify(LogicalMessage {
+                kind: MessageKind::Notify,
+                message_id: 90,
+                request_id: 0,
+                error_code: 0,
+                server_seq: None,
+                body: vec![8; 256],
+            })
+            .unwrap_err()
+            .code,
+        ErrorCode::FrameTooLarge
+    );
+    assert!(!session.cancellation().is_cancelled());
+    client.request(2, 3, b"ok").await;
+    let response = client.response().await;
+    assert_eq!(response.server_seq, 1);
+    assert_eq!(response.request_id, 2);
+    assert_eq!(response.message_id, 3);
+    assert_eq!(response.error_code, ErrorCode::FrameTooLarge as u32);
+    assert!(response.body.is_empty());
+    let batch = session.replay_after(0).unwrap().unwrap();
+    assert_eq!(
+        batch.frames[0].as_ref(),
+        Frame {
+            version: VERSION,
+            content: Some(Content::Response(response))
+        }
+        .encode_to_vec()
+    );
+    client.request(3, 1, b"ok").await;
+    assert_eq!(client.response().await.server_seq, 2);
+    assert_eq!(fixture.tracker.calls.load(Ordering::SeqCst), 2);
+    fixture.finish().await;
+}
+
+#[tokio::test]
 async fn authentication_errors_and_request_ids_do_not_execute_business() {
     let fixture = Fixture::new(config()).await;
     let mut client = fixture.connect().await;
@@ -352,10 +497,11 @@ async fn authentication_errors_and_request_ids_do_not_execute_business() {
         ErrorCode::AuthenticationFailed as u32
     );
     client.request(2, 1, b"ok").await;
-    assert_eq!(
-        client.response().await.error_code,
-        ErrorCode::Unauthenticated as u32
-    );
+    let Content::Error(error) = client.read().await else {
+        panic!("未认证业务应返回控制错误");
+    };
+    assert_eq!(error.error_code, ErrorCode::Unauthenticated as u32);
+    assert_eq!(error.request_id, 2);
     assert_eq!(client.login(3, "1").await.error_code, 0);
     assert_eq!(
         client.login(4, "2").await.error_code,
@@ -402,11 +548,34 @@ async fn same_player_is_serial_and_queue_full_is_immediate() {
     let rejected = client.response().await;
     assert_eq!(rejected.request_id, 4);
     assert_eq!(rejected.error_code, ErrorCode::QueueFull as u32);
+    assert_eq!(rejected.server_seq, 1);
+    let session = fixture.sessions.session("1").unwrap().unwrap();
+    session
+        .notify(LogicalMessage {
+            kind: MessageKind::Notify,
+            message_id: 90,
+            request_id: 0,
+            error_code: 0,
+            server_seq: None,
+            body: vec![9],
+        })
+        .unwrap();
+    let Content::Notify(notify) = client.read().await else {
+        panic!("缺少通知");
+    };
+    assert_eq!(notify.server_seq, 2);
     fixture.tracker.permits.add_permits(1);
-    assert_eq!(client.response().await.request_id, 2);
+    let response = client.response().await;
+    assert_eq!(response.request_id, 2);
+    assert_eq!(response.server_seq, 3);
     assert_eq!(fixture.started().await, "1");
     fixture.tracker.permits.add_permits(1);
-    assert_eq!(client.response().await.request_id, 3);
+    let response = client.response().await;
+    assert_eq!(response.request_id, 3);
+    assert_eq!(response.server_seq, 4);
+    let batch = session.replay_after(0).unwrap().unwrap();
+    assert_eq!(batch.through_seq, 4);
+    assert_eq!(batch.frames.len(), 4);
     assert_eq!(fixture.tracker.calls.load(Ordering::SeqCst), 2);
     assert_eq!(fixture.tracker.players.lock().unwrap()["1"].1, 1);
     fixture.finish().await;
@@ -436,6 +605,20 @@ async fn duplicate_login_waits_for_old_call_and_invalidates_old_handle() {
     let mut first = fixture.connect().await;
     let old = first.login(1, "1").await;
     let old_handle = fixture.sessions.session("1").unwrap().unwrap();
+    old_handle
+        .notify(LogicalMessage {
+            kind: MessageKind::Notify,
+            message_id: 90,
+            request_id: 0,
+            error_code: 0,
+            server_seq: None,
+            body: vec![],
+        })
+        .unwrap();
+    let Content::Notify(notify) = first.read().await else {
+        panic!()
+    };
+    assert_eq!(notify.server_seq, 1);
     first.request(2, 1, b"block").await;
     fixture.started().await;
     let mut second = fixture.connect().await;
@@ -471,7 +654,13 @@ async fn duplicate_login_waits_for_old_call_and_invalidates_old_handle() {
         ErrorCode::SessionClosed
     );
     second.request(2, 1, b"ok").await;
-    assert_eq!(second.response().await.body, b"1");
+    let response = second.response().await;
+    assert_eq!(response.body, b"1");
+    assert_eq!(response.server_seq, 1);
+    assert_eq!(
+        old_handle.replay_after(0).unwrap_err().code,
+        ErrorCode::SessionClosed
+    );
     assert_eq!(fixture.tracker.players.lock().unwrap()["1"].1, 1);
     fixture.finish().await;
 }
@@ -573,11 +762,16 @@ async fn notify_uses_bounded_outbound_without_executing_player() {
         panic!("缺少通知");
     };
     assert_eq!(message.body, vec![9]);
+    assert_eq!(message.server_seq, 1);
     assert_eq!(fixture.tracker.calls.load(Ordering::SeqCst), 0);
     handle.notify(notification.clone()).unwrap();
     assert!(handle.notify(notification).is_err());
     let _ = client.codec.read(&mut client.stream).await;
     fixture.released("1").await;
+    assert_eq!(
+        handle.replay_after(0).unwrap_err().code,
+        ErrorCode::SessionClosed
+    );
     fixture.finish().await;
 }
 
@@ -608,25 +802,27 @@ async fn malformed_frames_are_rejected_before_business_execution() {
                 .is_none()
         );
     }
-    let mut client = fixture.connect().await;
-    let body = Frame {
-        version: 99,
-        content: Some(Content::Login(protocol::LoginRequest {
-            request_id: 1,
-            credential: "1".into(),
-        })),
+    for version in [1, 99] {
+        let mut client = fixture.connect().await;
+        let body = Frame {
+            version,
+            content: Some(Content::Login(protocol::LoginRequest {
+                request_id: 1,
+                credential: "1".into(),
+            })),
+        }
+        .encode_to_vec();
+        client
+            .stream
+            .write_all(&(body.len() as u32).to_be_bytes())
+            .await
+            .unwrap();
+        client.stream.write_all(&body).await.unwrap();
+        let Content::Error(error) = client.read().await else {
+            panic!("缺少版本错误");
+        };
+        assert_eq!(error.error_code, ErrorCode::InvalidRequest as u32);
     }
-    .encode_to_vec();
-    client
-        .stream
-        .write_all(&(body.len() as u32).to_be_bytes())
-        .await
-        .unwrap();
-    client.stream.write_all(&body).await.unwrap();
-    let Content::Error(error) = client.read().await else {
-        panic!("缺少版本错误");
-    };
-    assert_eq!(error.error_code, ErrorCode::InvalidRequest as u32);
     let mut partial = fixture.connect().await;
     partial.stream.write_all(&[0, 0]).await.unwrap();
     partial.stream.shutdown().await.unwrap();
