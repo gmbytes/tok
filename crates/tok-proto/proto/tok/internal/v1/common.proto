@@ -32,6 +32,14 @@ message CallContext {
 message CallRequest {
   CallContext context = 1;
   Payload payload = 2;
+  // 仅由可信网关提供；客户端业务正文不能指定计时来源。
+  TimerTrigger timer = 3;
+}
+
+message TimerTrigger {
+  string timer_id = 1;
+  int64 scheduled_at_ms = 2;
+  int64 fired_at_ms = 3;
 }
 
 message TimerSpec {

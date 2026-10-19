@@ -117,13 +117,16 @@ fn player_gateway_limits_and_lease_coverage_are_validated() {
         "../../../examples/demo-game/config/local.toml"
     ))
     .unwrap();
-    for invalid in 0..5 {
+    for invalid in 0..8 {
         let mut config = original.clone();
         match invalid {
             0 => config.player_gateway.queue_capacity = 0,
             1 => config.player_gateway.max_connections = 65_537,
             2 => config.player_gateway.max_frame_size = 16 * 1024 * 1024 + 1,
             3 => config.player_gateway.rpc_timeout_ms = 0,
+            4 => config.player_gateway.max_timers = 0,
+            5 => config.player_gateway.max_timers = 65_537,
+            6 => config.player_gateway.max_timer_bytes = 0,
             _ => {
                 config.player_gateway.ownership_ttl_ms = config.player_gateway.renew_interval_ms
                     + config.player_gateway.rpc_timeout_ms * 2

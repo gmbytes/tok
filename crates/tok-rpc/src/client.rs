@@ -96,11 +96,19 @@ impl RpcClients {
         payload: Payload,
         player: bool,
     ) -> Result<CallResponse, Status> {
+        if !player && context.timer.is_some() {
+            return Err(Status::invalid_argument("计时触发只能调用 player 入口"));
+        }
         if context.node_id != target.node_id || context.service_name != target.service_name {
             return Err(Status::invalid_argument("调用上下文与目标服务不匹配"));
         }
         let channel = self.channel(target)?;
         let request_id = context.request_id;
+        let timer = context.timer.map(|timer| proto::TimerTrigger {
+            timer_id: timer.timer_id,
+            scheduled_at_ms: timer.scheduled_at_ms,
+            fired_at_ms: timer.fired_at_ms,
+        });
         let context = proto::CallContext {
             node_id: context.node_id,
             service_name: context.service_name,
@@ -113,6 +121,7 @@ impl RpcClients {
             }),
         };
         let mut request = Request::new(CallRequest {
+            timer,
             context: Some(context),
             payload: Some(payload),
         });

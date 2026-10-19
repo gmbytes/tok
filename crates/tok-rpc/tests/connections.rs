@@ -65,6 +65,7 @@ async fn two_services_on_one_endpoint_share_a_tcp_connection() {
             address,
         };
         let context = CallContext {
+            timer: None,
             node_id: "local".into(),
             service_name: name.into(),
             bid: None,

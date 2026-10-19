@@ -1,6 +1,6 @@
 use prost::Message;
 use std::{collections::BTreeMap, future::Future, pin::Pin, sync::Arc};
-use tok_core::{CallContext, SessionIdentity};
+use tok_core::{CallContext, SessionIdentity, TimerTrigger, TimerUpdate};
 use tok_proto::internal::v1::{self as proto, CallRequest, CallResponse, Payload};
 use tonic::{Request, Response, Status};
 use tower::{Service, ServiceExt};
@@ -42,10 +42,19 @@ where
 
 type RegisteredHandler = dyn Fn(CallContext, Vec<u8>) -> CallTask<'static> + Send + Sync;
 
+/// 强类型业务回应及仅供 session 消费的可选计时更新。
+pub struct HandlerReply<M> {
+    /// 编码给调用方的业务回应。
+    pub message: M,
+    /// None 保持已有计时集合；更新成功应用前不会发送客户端回应。
+    pub timers: Option<TimerUpdate>,
+}
+
 /// 显式维护消息 ID 和 Request / Response 配对的强类型分发表。
 #[derive(Default)]
 pub struct HandlerRegistry {
     handlers: BTreeMap<u32, Arc<RegisteredHandler>>,
+    timers: BTreeMap<u32, Arc<RegisteredHandler>>,
 }
 
 impl HandlerRegistry {
@@ -67,6 +76,34 @@ impl HandlerRegistry {
         Resp: Message + Send + 'static,
         F: Fn(CallContext, Req) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<Resp, Status>> + Send + 'static,
+    {
+        self.register_with_timers(
+            request_message_id,
+            response_message_id,
+            move |context, request| {
+                let future = handler(context, request);
+                async move {
+                    Ok(HandlerReply {
+                        message: future.await?,
+                        timers: None,
+                    })
+                }
+            },
+        )
+    }
+
+    /// 注册可同时返回业务回应与计时更新的强类型请求处理函数。
+    pub fn register_with_timers<Req, Resp, F, Fut>(
+        &mut self,
+        request_message_id: u32,
+        response_message_id: u32,
+        handler: F,
+    ) -> Result<(), crate::Error>
+    where
+        Req: Message + Default + Send + 'static,
+        Resp: Message + Send + 'static,
+        F: Fn(CallContext, Req) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<HandlerReply<Resp>, Status>> + Send + 'static,
     {
         if request_message_id == 0
             || response_message_id == 0
@@ -90,10 +127,49 @@ impl HandlerRegistry {
                         request_id,
                         payload: Some(Payload {
                             message_id: response_message_id,
-                            body: response.encode_to_vec(),
+                            body: response.message.encode_to_vec(),
                         }),
                         error: None,
-                        timers: None,
+                        timers: response.timers.map(crate::timer::encode_update),
+                    })
+                })
+            }),
+        );
+        Ok(())
+    }
+
+    /// 注册内部 timer 处理函数；参数从 spec 正文解码，来源和预定、实际时刻来自 context.timer。
+    /// 返回的更新只交给 session，不产生客户端回应；客户端业务请求不能进入此分发表。
+    pub fn register_timer<Req, F, Fut>(
+        &mut self,
+        message_id: u32,
+        handler: F,
+    ) -> Result<(), crate::Error>
+    where
+        Req: Message + Default + Send + 'static,
+        F: Fn(CallContext, Req) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<Option<TimerUpdate>, Status>> + Send + 'static,
+    {
+        if message_id == 0 || self.timers.contains_key(&message_id) {
+            return Err(crate::Error::Configuration(
+                "计时消息 ID 必须非零且只能注册一次".into(),
+            ));
+        }
+        let handler = Arc::new(handler);
+        self.timers.insert(
+            message_id,
+            Arc::new(move |context, body| {
+                let handler = handler.clone();
+                Box::pin(async move {
+                    let request = Req::decode(body.as_slice())
+                        .map_err(|_| Status::invalid_argument("计时参数解码失败"))?;
+                    let request_id = context.request_id;
+                    let timers = handler(context, request).await?;
+                    Ok(CallResponse {
+                        request_id,
+                        payload: None,
+                        error: None,
+                        timers: timers.map(crate::timer::encode_update),
                     })
                 })
             }),
@@ -105,8 +181,12 @@ impl HandlerRegistry {
 impl CallHandler for HandlerRegistry {
     fn call(&self, context: CallContext, payload: Payload) -> CallTask<'_> {
         Box::pin(async move {
-            let handler = self
-                .handlers
+            let handlers = if context.timer.is_some() {
+                &self.timers
+            } else {
+                &self.handlers
+            };
+            let handler = handlers
                 .get(&payload.message_id)
                 .ok_or_else(|| Status::unimplemented("游戏消息尚未注册"))?;
             handler(context, payload.body).await
@@ -190,12 +270,27 @@ impl RpcService {
         {
             return Err(Status::failed_precondition("player 调用需要匹配的会话身份"));
         }
+        let timer = request.timer.map(|timer| TimerTrigger {
+            timer_id: timer.timer_id,
+            scheduled_at_ms: timer.scheduled_at_ms,
+            fired_at_ms: timer.fired_at_ms,
+        });
+        if timer.as_ref().is_some_and(|timer| {
+            !player
+                || timer.timer_id.trim().is_empty()
+                || timer.timer_id.len() > 256
+                || timer.scheduled_at_ms < 0
+                || timer.fired_at_ms < timer.scheduled_at_ms
+        }) {
+            return Err(Status::invalid_argument("计时来源或时刻无效"));
+        }
         let context = CallContext {
             node_id: context.node_id,
             service_name: context.service_name,
             bid: context.bid,
             request_id: context.request_id,
             session,
+            timer,
         };
         let span = tracing::info_span!("rpc_server", node_id = %self.node_id, service_name = %self.service_name, request_id = context.request_id, bid = ?context.bid);
         let _ = span.set_parent(parent);

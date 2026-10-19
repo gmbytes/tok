@@ -1,5 +1,5 @@
 //! 统一 Gateway 运行框架，按组件组装 Player 接入及后续 Scene 接入。
-//! 当前提供 TCP、注入认证、路由和所有权后端；timer、恢复及场景组件后续实施。
+//! 当前提供 TCP、注入认证、路由、所有权与 timer 调度；恢复及场景组件后续实施。
 
 pub mod error;
 pub use error::{ErrorCode, GatewayError, Result};

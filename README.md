@@ -17,7 +17,7 @@ workspace 启用 `missing_docs = "deny"`，对外公开的模块、类型、字�
 
 框架采用 Cargo workspace，库位于 `crates/`，具体游戏组装最终二进制。`examples/demo-game` 展示游戏协议、服务配置和内存服务目录。
 
-当前已提供配置校验、内存目录、Redis 开发发现与变更订阅、bid 路由、内存与 Redis session 所有权、protobuf 生成、服务生命周期、可观测组件及共享内部 gRPC 端点。PlayerGateway 提供 TCP 登录、认证扩展点、有界串行 session 和通知入口。示例支持玩家状态读写及 player 调用 guild；按 Ctrl+C 优雅退出。timer、断线恢复、跨网关交接、Kubernetes 发现和 NATS 消费按后续批次推进。
+当前已提供配置校验、内存目录、Redis 开发发现与变更订阅、bid 路由、内存与 Redis session 所有权、protobuf 生成、服务生命周期、可观测组件及共享内部 gRPC 端点。PlayerGateway 提供 TCP 登录、认证扩展点、有界串行 session、timer 调度和通知入口。示例支持玩家状态读写、player 调用 guild 及计时更新状态；按 Ctrl+C 优雅退出。断线恢复、跨网关交接、Kubernetes 发现和 NATS 消费按后续批次推进。
 
 网关共用 `Gateway` 运行框架，接入组件负责具体业务语义。当前 `PlayerIngress` 实现 TCP 登录和串行 session，Scene 接入尚未实现；`PlayerGateway` 保留为兼容包装。`player/`、`scene/` 分别组织玩家和场景组件，`transport/`、`security/`、`codec/` 提供传输、安全与编解码适配。示例通过可选的 `factory = "player-ingress"` 选择网关工厂，服务名可自行命名。
 
@@ -105,7 +105,7 @@ Redis 所有权提供原子获取、epoch 更新、条件续租和释放；活�
 
 租约和 RPC 均有期限且不自动重试。发起业务前根据续租开始时刻检查剩余租期，Redis 获取与续租也拒绝明显超过租期的迟到回应。
 超时不表示远端业务停止或回滚，系统接受检查后暂停、延迟导致的竞态窗口，不默认对每次写入增加远程校验或 fencing。
-后续存储封装将按调用期限和本地已知租约期限做尽力检查；当前示例玩家状态仍在内存，timer、恢复及交接按后续阶段实施。
+后续存储封装将按调用期限和本地已知租约期限做尽力检查；当前示例玩家状态仍在内存，timer 与请求共用串行队列，恢复及交接按后续阶段实施。
 
 ## 日志、指标与追踪
 

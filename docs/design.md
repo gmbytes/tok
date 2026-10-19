@@ -4,7 +4,7 @@ tok 是一个使用 Rust 开发的游戏服务器框架。框架围绕业务 ID 
 
 本文记录当前设计约定、业务与框架的职责边界，以及后续设计范围。当前以局外执行模型和服务通信为主，存储细节与无缝场景切换留待后续设计。
 
-第二批单进程客户端接入的分帧、登录、session 状态、重复登录与容量约定见 [局外 TCP 协议与 session 实施约定](client-session.md)。该阶段断线立即关闭 session；下文断线宽限期、timer 与消息恢复按第三批目标实现。
+第二批单进程客户端接入的分帧、登录、session 状态、重复登录与容量约定见 [局外 TCP 协议与 session 实施约定](client-session.md)。第三批已接通在线 session 的 timer 调度，当前断线仍立即关闭 session；下文断线宽限期与消息恢复继续按第三批目标实现。
 
 ## 设计范围与术语
 
@@ -109,6 +109,8 @@ player 的 timer 由 player 通过 RPC 或事件通道返回的 timerSpec 确定
 
 session 收到 timerSpec 后，按照 spec 调度 timer，并在触发时串行驱动 player 执行。player 提供业务计时需求，session 负责调度与执行入口。
 
+客户端只发起业务动作，不直接指定框架 timer 的 ID、执行消息、周期或结算产出。这些内容由服务端业务规则生成，随业务处理结果附带返回给 session。示例使用“开始生产”与内部“生产完成”展示该边界，不提供通用客户端 timer 配置接口。
+
 ```text
 session 驱动 player 处理登录或其他 RPC 或事件
     → player 返回 timerSpec
@@ -131,6 +133,8 @@ timer 到期时只向 session 队列提交触发任务，实际 player 调用仍
 一次性 timer 到期后执行一次并移除；安装时已过期的 spec 尽快入队执行一次。周期 timer 错过多个时刻时合并为一次触发，随后按原时间基准计算下一个未来触发时刻，不逐次追赶。传给 player 的参数包含预定与实际触发时间，具体业务结算由 player 决定。
 
 timer RPC 失败按系统级错误记录日志，不自动重试该次触发。周期 timer 的后续触发是独立的调度，仍正常进行。
+
+当前实现由业务响应返回可选 timer 更新，未增加隐式 player 登录调用。强类型请求可返回 HandlerReply，内部触发通过 CallRequest.timer 进入 CallContext.timer，并使用独立的 timer 分发表，客户端不能仅凭消息 ID 选择内部来源。每个 session 使用一个有界调度集合和调度 future，与执行循环共同监督，不按 timer 数量创建后台任务。队列满时等待一个容量许可；同一 timer 在排队及执行期间合并为一次触发。session 建立时对齐 UTC 和单调时钟，后续沿同一基准等待与报告时刻。max_timers 与 max_timer_bytes 限制数量及 ID、正文总字节；更新完整校验后原子应用，同次操作重复 ID、非法参数或超容量会关闭 session，避免继续使用旧集合。
 
 ### 重连与交接
 
@@ -473,7 +477,7 @@ tok-gateway/src/
 └── codec/
 ```
 
-player 模块按玩家逻辑会话、串行执行、timer、下行缓存和重连交接组织；scene 模块预留场景接入和场景连接会话。组件共享 Gateway 的连接容量、后台任务监督与退出流程，并按需组合 transport、security 和 codec。两类 session 按各自业务语义设计，不自动套用相同的串行或所有权约定。当前已实现 player 的 TCP 接入、认证与串行执行，timer、恢复、scene 和安全适配仍待扩展。协议适配器初期作为模块，实际需要独立发布或隔离依赖时再拆 crate。
+player 模块按玩家逻辑会话、串行执行、timer、下行缓存和重连交接组织；scene 模块预留场景接入和场景连接会话。组件共享 Gateway 的连接容量、后台任务监督与退出流程，并按需组合 transport、security 和 codec。两类 session 按各自业务语义设计，不自动套用相同的串行或所有权约定。当前已实现 player 的 TCP 接入、认证、串行执行与 timer 调度，恢复、scene 和安全适配仍待扩展。协议适配器初期作为模块，实际需要独立发布或隔离依赖时再拆 crate。
 
 依赖保持单向：游戏依赖 tok 组装入口及必要组件；tok 依赖组件 crate；组件依赖 tok-core 或 tok-proto，不反向依赖具体游戏或 tok 组装层。网关通过基础契约使用发现、路由与所有权实现，具体实现由组装层选择。RPC 与事件组件不依赖网关。
 
@@ -481,7 +485,7 @@ player 模块按玩家逻辑会话、串行执行、timer、下行缓存和重�
 
 workspace 统一 edition、工具链、依赖版本、lint 和 release 配置，共享 Cargo.lock。单元测试靠近实现，集成测试放对应 crate 的 tests 目录。Windows amd64 和 Linux amd64 通过 CI 分别验证；本地检查仅证明当前主机平台。
 
-当前实现包括八个框架 crate、示例游戏、TOML 配置验证、内存目录、Redis 开发发现与合并变更通知、bid 亲和路由、Memory 与 Redis session 所有权、服务生命周期、可观测组件、protobuf 生成、共享内部 RPC、客户端 TCP 分帧与注入认证、有界串行 session、下行通知、rustdoc 用户与 API 文档、just 命令和 CI。示例 player 和 guild 共享内部端点，客户端网关经认证身份完成状态读写和 player 到 guild 的调用；独立网关与游戏进程可通过 Redis 开发发现联调，多个网关可显式共享 Redis 所有权。ServiceContext 可注入发现查询后端，生产 Kubernetes 配置可验证但后端运行仍报尚未实现。Redis Cluster 客户端、跨网关交接、NATS、timer 调度、补发及安全适配后续实现；内存所有权不提供跨进程协调，Redis 租约不承诺异常路径下的绝对互斥，内部上下文字段校验不代替调用身份认证。部署目录暂不提供可运行的 Kubernetes 清单。
+当前实现包括八个框架 crate、示例游戏、TOML 配置验证、内存目录、Redis 开发发现与合并变更通知、bid 亲和路由、Memory 与 Redis session 所有权、服务生命周期、可观测组件、protobuf 生成、共享内部 RPC、客户端 TCP 分帧与注入认证、有界串行 session、timer 更新与调度、下行通知、rustdoc 用户与 API 文档、just 命令和 CI。示例 player 和 guild 共享内部端点，客户端网关经认证身份完成状态读写、计时更新状态和 player 到 guild 的调用；独立网关与游戏进程可通过 Redis 开发发现联调，多个网关可显式共享 Redis 所有权。ServiceContext 可注入发现查询后端，生产 Kubernetes 配置可验证但后端运行仍报尚未实现。Redis Cluster 客户端、跨网关交接、NATS、补发及安全适配后续实现；内存所有权不提供跨进程协调，Redis 租约不承诺异常路径下的绝对互斥，内部上下文字段校验不代替调用身份认证。部署目录暂不提供可运行的 Kubernetes 清单。
 
 ## 可观测约定
 

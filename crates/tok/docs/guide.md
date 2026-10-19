@@ -388,6 +388,8 @@ auth_timeout_ms = 5000
 rpc_timeout_ms = 5000
 ownership_ttl_ms = 30000
 renew_interval_ms = 10000
+max_timers = 128
+max_timer_bytes = 1048576
 ```
 
 同一玩家的业务请求顺序执行，不同玩家可以并发。队列满立即返回错误，RPC 超时不重试。
@@ -399,7 +401,69 @@ renew_interval_ms = 10000
 重复登录使用新连接：先关闭旧入口，等待当前执行结束或达到执行期限，再条件释放所有权并建立新的 session_id 和 epoch。
 旧队列不再执行，外部网关持有的所有权直接拒绝。连接断开即关闭 session；退出时等待在途执行并条件释放所有权。
 当前没有心跳，完整帧读取期限包含等待首字节的空闲时间，默认空闲 15 秒会断开。
-本批尚不调度 RPC 返回的 timer 信息，也不提供断线宽限期、ack、补发或恢复，这些按下一批实现。
+已支持 RPC 返回的 timer 更新；断线宽限期、ack、补发和恢复仍按后续步骤实现。
+
+## 玩家 timer
+
+timerSpec 由服务端业务逻辑生成，不作为客户端调度接口。客户端只发起“开始生产”等业务动作，
+耗时、执行消息、参数与产出均由服务端规则决定。
+
+业务请求通过 [`rpc::HandlerRegistry::register_with_timers`] 返回 [`rpc::HandlerReply`]，
+其 `timers` 使用 [`core::TimerUpdate`]。`None` 保持原集合，`ReplaceAll` 全量替换，空集合清空；
+`Patch` 可增改或取消指定 ID。timer ID 必须非空且不超过 256 字节，消息 ID 非零，周期必须大于零；
+同一次更新不能重复操作同一 ID。数量和 ID、正文总字节数受 `max_timers`、`max_timer_bytes` 限制，
+默认分别为 128 和 1048576。更新先完整校验再替换；非法或超容量的更新会终止 session，避免继续驱动旧集合。
+
+```rust
+use prost::Message;
+use tok::{core::{TimerSpec, TimerUpdate}, rpc::{HandlerRegistry, HandlerReply}};
+
+#[derive(Clone, PartialEq, Message)]
+struct StartProduction {}
+#[derive(Clone, PartialEq, Message)]
+struct ProductionFinished {}
+
+# fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+let mut handlers = HandlerRegistry::new();
+handlers.register_with_timers(1, 2, |_context, _request: StartProduction| async move {
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+        .map_err(|_| tok::rpc::tonic::Status::internal("系统时钟无效"))?.as_millis() as i64;
+    Ok(HandlerReply {
+        message: StartProduction {},
+        timers: Some(TimerUpdate::ReplaceAll(vec![TimerSpec {
+            timer_id: "production".into(), message_id: 3, body: ProductionFinished {}.encode_to_vec(),
+            due_at_ms: now + 1000, interval_ms: None,
+        }])),
+    })
+})?;
+handlers.register_timer(3, |context, _event: ProductionFinished| async move {
+    let trigger = context.timer.expect("分发表已确认内部计时来源");
+    // 在这里根据可信 session 和服务端生产规则结算产出。
+    let _ = (context.session, trigger.scheduled_at_ms, trigger.fired_at_ms);
+    Ok(None) // 不改变当前 timer 集合。
+})?;
+# Ok(())
+# }
+```
+
+[`rpc::HandlerRegistry::register_timer`] 独立于客户端请求分发表；`CallContext.timer` 由内部 RPC 信封传递，
+客户端不能通过填写 timer 的消息 ID 进入该处理函数。它包含 ID、预定与实际触发时刻，仍需遵循部署侧的内部调用身份约定。
+业务正文只包含游戏参数，timer 更新和触发来源不直接发送客户端。
+直接构造 [`core::CallContext`] 的普通调用需填写 `timer: None`；自定义 CallHandler 和 Tower 中间件可以读取该字段识别内部计时来源。
+
+session 建立时对齐 UTC 与单调时钟，此后按同一基准等待，墙钟调整不会重放已调度的周期。
+每个 session 使用一个调度 future，与执行循环共同受网关监督，不为每个 timer 创建任务。
+到期只进入已有的有界执行队列，排队与执行期间同一 timer 合并为一个触发，满队列等待容量；客户端可能收到 QueueFull。
+执行前检查调度版本、取消状态和所有权预算；旧更新对应的排队任务失效。
+周期错过的时刻不逐次追赶，完成后按原基准计算下一个未来时刻；一次性 timer 触发后移除。
+timer 失败或超时只记录本次失败，不重试；周期的后续触发独立进行。
+
+自定义 [`gateway::player::PlayerExecutor`] 的 `execute` 返回 [`gateway::player::PlayerReply`]，
+普通 `LogicalMessage` 可通过 `.into()` 转换；需要计时执行时实现 `timer` 方法。
+`timer` 的关联序号由 session 独立生成，不消耗客户端 request_id；计时结果可继续返回更新，不产生客户端回应。
+示例 `START_PRODUCTION` 发起生产，由服务端安装一次性 timer；内部 `FINISH_PRODUCTION` 按固定规则更新玩家状态。
+请求中没有 timer 配置或产出参数，`just client-smoke` 验证完整 TCP 与 RPC 链路。
+当前由业务响应安装 spec，未增加隐式的 player 登录调用。断线仍立即关闭 session 并清理 timer；断线期间继续运行需后续恢复步骤支持。
 
 ## 统一 Gateway 与接入组件
 
@@ -462,7 +526,7 @@ Scene 目前仅预留模块，不套用 Player 的串行与所有权语义。
 | [`observability`] | 日志、指标与追踪 |
 
 目前示例监听共享内部 gRPC 和客户端 TCP 端点，已接通注入认证、有界串行 session、状态读写及服务组合。
-Redis 开发发现和 session 所有权已接通；timer 调度、恢复、跨网关交接和 NATS 尚未接通。
+Redis 开发发现、session 所有权和 timer 调度已接通；恢复、跨网关交接和 NATS 尚未接通。
 配置端点地址本身不启动监听，内部端点需显式注册 RpcEndpoint，TCP 由网关工厂绑定。
 Kubernetes 配置可校验，运行该发现后端仍会明确报错。
 游戏业务协议和 handler 由游戏定义，框架组件不反向依赖具体游戏。

@@ -24,6 +24,8 @@ auth_timeout_ms = 5000
 rpc_timeout_ms = 5000
 ownership_ttl_ms = 30000
 renew_interval_ms = 10000
+max_timers = 128
+max_timer_bytes = 1048576
 
 [[endpoints]]
 name = "client"

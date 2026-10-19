@@ -143,6 +143,7 @@ pub async fn rpc_smoke(directory: &dyn ServiceDirectory) -> Result<(), Error> {
         .player_call(
             &player,
             CallContext {
+                timer: None,
                 node_id: player.node_id.clone(),
                 service_name: player.service_name.clone(),
                 bid: Some("42".into()),
@@ -173,6 +174,7 @@ pub async fn rpc_smoke(directory: &dyn ServiceDirectory) -> Result<(), Error> {
         .business_call(
             &guild,
             CallContext {
+                timer: None,
                 node_id: guild.node_id.clone(),
                 service_name: guild.service_name.clone(),
                 bid: Some("7".into()),

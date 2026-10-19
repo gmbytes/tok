@@ -2,7 +2,7 @@
 
 ## 实施目标与范围
 
-当前项目已接通局外请求链路，并提供 Redis 开发发现与共享 session 所有权：客户端登录后，经串行 session 调用 player，收到业务响应，并可由 player 调用 guild。下一步实现 timer、同网关恢复和跨网关交接，再推进跨节点事件、Kubernetes 部署和场景接入。
+当前项目已接通局外请求链路、在线 timer 调度、Redis 开发发现与共享 session 所有权：客户端登录后，经串行 session 调用 player，收到业务响应，并可由 player 调用 guild。下一步实现下行序列与缓存、同网关恢复和跨网关交接，再推进跨节点事件、Kubernetes 部署和场景接入。
 
 本大纲以 2026-10-12 的代码为基线，遵循 [设计文档](design.md)。各阶段的技术选择属于实施建议；已经确定的执行语义继续以设计文档为准。阶段完成以可运行示例和验收结果为依据，不以模块或接口存在为依据。
 
@@ -34,7 +34,7 @@
 | 服务生命周期 | [runtime.rs](../crates/tok/src/runtime.rs) 提供工厂注册、共享端点、就绪入口、初始化期限及失败清理 | 生产依赖就绪策略与发现后端 |
 | 发现 | [MemoryDirectory](../crates/tok-infra/src/discovery/memory.rs) 支持单进程；[RedisDirectory](../crates/tok-infra/src/discovery/redis.rs) 提供多进程开发租约注册、条件撤销、本地缓存与合并通知 | Kubernetes 本地缓存与资源映射；Redis 发现不代替 session 所有权 |
 | 协议与 RPC | [tok-rpc](../crates/tok-rpc/src/lib.rs) 提供 PlayerRpc、BusinessRpc、强类型分发、连接复用、超时、追踪传播和 TowerHandler | 配置式中间件、锁 Layer 及生产调用身份认证 |
-| 网关 | [Gateway](../crates/tok-gateway/src/runtime.rs) 统一接收、容量及监督；[PlayerIngress](../crates/tok-gateway/src/player/ingress.rs) 提供 TCP 认证、串行 session、所有权续租和下行通知 | timer、下行缓存与恢复、生产安全及 scene 接入 |
+| 网关 | [Gateway](../crates/tok-gateway/src/runtime.rs) 统一接收、容量及监督；[PlayerIngress](../crates/tok-gateway/src/player/ingress.rs) 提供 TCP 认证、串行 session、所有权续租、timer 调度和下行通知 | 下行缓存与恢复、生产安全及 scene 接入 |
 | 路由与 Redis | bid rendezvous 路由、Memory 与 Redis 所有权、条件续租释放及本地时间预算检查已实现 | Cluster 拓扑与故障切换适配、交接及请求级锁后端 |
 | 事件 | [tok-events](../crates/tok-events/src/lib.rs) 已有 DeliveryPolicy 和 EventTarget | 同步本地分发、NATS 后端、订阅、去重及交接处理 |
 | 可观测 | 日志动态过滤、Prometheus、OTLP、强追踪规则、RPC metadata 传播及调用指标已实现 | 事件 headers 传播及 session、timer 指标 |
@@ -154,6 +154,14 @@ RPC 超时后远端仍可能执行，存储层落地时统一加入写入前期�
 
 **目标：** 让单网关 session 可以持续调度并接续断线消息。
 
+第三批第一步已实现在线 timer：HandlerReply 保留可选计时更新，PlayerReply 交给 session 应用；ReplaceAll、Upsert、Cancel 原子校验，旧版本的排队触发失效；同一有界队列串行执行客户端与计时任务，繁忙时合并周期，失败或超时不重试。CallContext.timer 区分内部来源，强类型 timer 分发表拒绝客户端仅凭消息 ID 触发。数量、ID 和正文总字节有限，非法更新关闭 session。示例 START_PRODUCTION 只发起业务操作，服务端决定 timer 与产出，内部 FINISH_PRODUCTION 结算状态，client-smoke 覆盖完整链路。
+
+本步未接通断线宽限期、下行序列、ack、补发、恢复或交接，断线仍停止 timer；也未增加隐式 player 登录调用，当前由业务响应安装计时集合。下一步先统一下行序列与缓存，再接同网关恢复。
+
+2026-10-19 Windows 验收：Rust 1.99.0、just 1.58.0，73 项常规测试、4 项文档测试与 7 项真实 Redis 集成测试通过；新增 10 项调度及会话测试、2 项 RPC 测试和 1 项文档测试，客户端既有用例增加计时状态变更与来源隔离。格式、clippy、中文 rustdoc、三类 smoke、四份部署配置校验及 release 构建通过。Redis 数据库无遗留测试数据，临时容器已清理。PlayerExecutor 结果改为 PlayerReply，CallContext 增加可选 timer 来源，迁移方式见 Rust 用户指南；Linux 结果以 CI 为准。
+
+示例业务边界校准：移除客户端计时配置接口，改为无计时参数的“开始生产”请求，耗时、内部消息和产出全部由服务端规则决定。新增客户端夹带计时或产出字段不能覆盖规则的回归测试；74 项常规测试、4 项文档测试、格式、clippy、rustdoc、客户端 smoke、Redis 发现与所有权两项多进程联调及 release 构建通过。临时 Redis 数据库无遗留数据，容器已清理。
+
 - 实现 timerSpec 的 ReplaceAll、Upsert 和 Cancel，以及调度版本检查；UTC due_at 转换为本地等待时间。
 - timer 到期只入 session 队列；同一 timer 至多保留一个待执行触发，错过周期合并一次并沿原时间基准计算下次时刻；该次 RPC 失败不重试。
 - 统一 Response 与 Notify 的 server_seq；先缓存编码字节再发送，校验客户端连续 ack_seq。
@@ -233,7 +241,7 @@ RPC 超时后远端仍可能执行，存储层落地时统一加入写入前期�
 
 ## 交付与推进方式
 
-第一批已接通基础类型与协调契约、内存开发后端、RPC service、共享监听、连接复用与调用验证，同时加入 Rust 原生用户文档生成。第二批已实现注入认证、串行 session、TCP 接入及示例客户端闭环，并完成本地验收。第三批先推进 timer 与同网关恢复，再扩展 Redis 所有权和跨网关交接；锁 Layer、NATS、生产安全和 Kubernetes 仍按后续阶段推进。
+第一批已接通基础类型与协调契约、内存开发后端、RPC service、共享监听、连接复用与调用验证，同时加入 Rust 原生用户文档生成。第二批已实现注入认证、串行 session、TCP 接入及示例客户端闭环，并完成本地验收。第三批已接通在线 timer 与 Redis 所有权基础，接下来推进下行序列、缓存、同网关恢复和跨网关交接；锁 Layer、NATS、生产安全和 Kubernetes 仍按后续阶段推进。
 
 每个阶段按“契约与协议 → 组件实现 → 示例接通 → 故障与边界验证 → 文档更新”拆分变更。优先开始阶段零至三，得到可运行的局外链路后，再推进恢复与集群能力。
 

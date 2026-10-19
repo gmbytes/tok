@@ -27,6 +27,10 @@ pub struct PlayerConfig {
     pub ownership_ttl_ms: u64,
     /// 空闲 session 的续租间隔，单位毫秒。
     pub renew_interval_ms: u64,
+    /// 每个 session 的 timer 数量上限。
+    pub max_timers: usize,
+    /// 每个 session 所有 timer 的 ID 与正文总字节上限。
+    pub max_timer_bytes: usize,
 }
 
 impl Default for PlayerConfig {
@@ -42,6 +46,8 @@ impl Default for PlayerConfig {
             rpc_timeout_ms: 5000,
             ownership_ttl_ms: 30_000,
             renew_interval_ms: 10_000,
+            max_timers: 128,
+            max_timer_bytes: 1_048_576,
         }
     }
 }
@@ -61,9 +67,12 @@ impl PlayerConfig {
             self.max_sessions,
             self.queue_capacity,
             self.outbound_capacity,
+            self.max_timers,
         ]
         .iter()
         .any(|value| *value == 0 || *value > 65_536)
+            || self.max_timer_bytes == 0
+            || self.max_timer_bytes > 16 * 1024 * 1024
             || self.max_frame_size == 0
             || self.max_frame_size > 16 * 1024 * 1024
             || [

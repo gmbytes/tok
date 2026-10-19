@@ -13,7 +13,7 @@ pub mod timer;
 
 pub use auth::{AuthenticatedPlayer, AuthenticationTask, Authenticator};
 pub use config::PlayerConfig;
-pub use executor::{PlayerExecutor, PlayerTask, RpcErrorMapper, RpcPlayerExecutor};
+pub use executor::{PlayerExecutor, PlayerReply, PlayerTask, RpcErrorMapper, RpcPlayerExecutor};
 pub use gateway::PlayerGateway;
 pub use ingress::PlayerIngress;
 pub use session::{SessionHandle, SessionManager};

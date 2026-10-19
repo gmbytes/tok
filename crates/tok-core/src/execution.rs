@@ -24,6 +24,19 @@ pub struct CallContext {
     pub request_id: u64,
     /// player 调用的会话身份；其他服务可以没有会话。
     pub session: Option<SessionIdentity>,
+    /// 网关调度产生的内部计时来源；客户端业务请求为 None。
+    pub timer: Option<TimerTrigger>,
+}
+
+/// 一次内部计时触发的来源信息，不由客户端业务正文决定。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TimerTrigger {
+    /// player 范围内的稳定 timer 标识。
+    pub timer_id: String,
+    /// 本次触发原定的 UTC Unix 毫秒时刻。
+    pub scheduled_at_ms: i64,
+    /// 实际开始驱动业务的 UTC Unix 毫秒时刻。
+    pub fired_at_ms: i64,
 }
 
 /// 逻辑消息类型；握手、确认及恢复等控制消息由接入协议另行定义。

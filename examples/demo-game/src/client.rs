@@ -87,6 +87,36 @@ pub async fn smoke(address: std::net::SocketAddr) -> Result<(), Error> {
     if guild.guild_id != 7 {
         return Err(std::io::Error::other("公会回应不一致").into());
     }
+    call::<_, v1::StartProductionResponse>(
+        &mut stream,
+        &codec,
+        6,
+        player::START_PRODUCTION,
+        player::START_PRODUCTION_RESPONSE,
+        &v1::StartProductionRequest {},
+    )
+    .await?;
+    tokio::time::timeout(Duration::from_secs(3), async {
+        let mut request_id = 7;
+        loop {
+            let state = call::<_, v1::GetPlayerResponse>(
+                &mut stream,
+                &codec,
+                request_id,
+                player::GET_PLAYER,
+                player::GET_PLAYER_RESPONSE,
+                &v1::GetPlayerRequest { player_id: 0 },
+            )
+            .await?;
+            if state.value == 124 {
+                return Ok::<(), Error>(());
+            }
+            request_id += 1;
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .map_err(|_| std::io::Error::other("示例 timer 未按期更新玩家状态"))??;
     Ok(())
 }
 

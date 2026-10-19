@@ -88,6 +88,12 @@ async fn client_to_rpc_reads_writes_queries_guild_and_maps_errors() {
         (3, 999, Vec::new(), ErrorCode::UnknownMessage),
         (
             4,
+            demo_game::player::FINISH_PRODUCTION,
+            Vec::new(),
+            ErrorCode::UnknownMessage,
+        ),
+        (
+            5,
             demo_game::player::QUERY_GUILD,
             Vec::new(),
             ErrorCode::Unavailable,

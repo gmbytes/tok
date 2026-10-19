@@ -1,18 +1,21 @@
 //! 显式注册 player 业务消息，身份来自网关调用上下文。
 
 use crate::protocol::v1::{
-    GetGuildRequest, GetGuildResponse, GetPlayerRequest, GetPlayerResponse, QueryGuildRequest,
-    QueryGuildResponse, SetPlayerRequest, SetPlayerResponse,
+    GetGuildRequest, GetGuildResponse, GetPlayerRequest, GetPlayerResponse, ProductionFinished,
+    QueryGuildRequest, QueryGuildResponse, SetPlayerRequest, SetPlayerResponse,
+    StartProductionRequest, StartProductionResponse,
 };
 use prost::Message;
 use std::{
     collections::BTreeMap,
     sync::{Arc, Mutex},
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tok::{
-    core::{CallContext, ServiceDirectory},
-    rpc::{HandlerRegistry, RpcClients, protocol::internal::v1::Payload, tonic::Status},
+    core::{CallContext, ServiceDirectory, TimerSpec, TimerUpdate},
+    rpc::{
+        HandlerRegistry, HandlerReply, RpcClients, protocol::internal::v1::Payload, tonic::Status,
+    },
 };
 
 /// 读取玩家信息的请求消息 ID。
@@ -27,6 +30,15 @@ pub const SET_PLAYER_RESPONSE: u32 = 6;
 pub const QUERY_GUILD: u32 = 7;
 /// player 返回公会查询结果的回应 ID。
 pub const QUERY_GUILD_RESPONSE: u32 = 8;
+/// 开始生产的业务请求 ID。
+pub const START_PRODUCTION: u32 = 9;
+/// 开始生产的业务回应 ID。
+pub const START_PRODUCTION_RESPONSE: u32 = 10;
+/// 仅由 session 内部计时来源调用的业务类型。
+pub const FINISH_PRODUCTION: u32 = 11;
+
+const PRODUCTION_TIME_MS: i64 = 50;
+const PRODUCTION_OUTPUT: i64 = 1;
 
 /// 模拟游戏存储的有界内存状态，多个 player 请求共享，不创建常驻 player 对象。
 pub struct State {
@@ -81,9 +93,8 @@ pub fn handlers(
             }
         }
     })?;
-    registry.register(
-        SET_PLAYER,
-        SET_PLAYER_RESPONSE,
+    registry.register(SET_PLAYER, SET_PLAYER_RESPONSE, {
+        let state = state.clone();
         move |context, request: SetPlayerRequest| {
             let state = state.clone();
             async move {
@@ -100,6 +111,55 @@ pub fn handlers(
                     player_id,
                     value: request.value,
                 })
+            }
+        }
+    })?;
+    registry.register_with_timers(
+        START_PRODUCTION,
+        START_PRODUCTION_RESPONSE,
+        |context, _request: StartProductionRequest| async move {
+            player_id(&context)?;
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_err(|_| Status::internal("系统时钟无效"))?
+                .as_millis() as i64;
+            let update = TimerUpdate::Patch {
+                upsert: vec![TimerSpec {
+                    timer_id: "production".into(),
+                    message_id: FINISH_PRODUCTION,
+                    body: ProductionFinished {}.encode_to_vec(),
+                    due_at_ms: now + PRODUCTION_TIME_MS,
+                    interval_ms: None,
+                }],
+                cancel: vec![],
+            };
+            Ok(HandlerReply {
+                message: StartProductionResponse {},
+                timers: Some(update),
+            })
+        },
+    )?;
+    registry.register_timer(
+        FINISH_PRODUCTION,
+        move |context, _event: ProductionFinished| {
+            let state = state.clone();
+            async move {
+                let id = player_id(&context)?;
+                let mut values = state
+                    .values
+                    .lock()
+                    .map_err(|_| Status::internal("示例存储锁不可用"))?;
+                if !values.contains_key(&id) && values.len() >= state.capacity {
+                    return Err(Status::resource_exhausted("示例存储容量已满"));
+                }
+                let value = values
+                    .get(&id)
+                    .copied()
+                    .unwrap_or(0)
+                    .checked_add(PRODUCTION_OUTPUT)
+                    .ok_or_else(|| Status::out_of_range("示例计时数值溢出"))?;
+                values.insert(id, value);
+                Ok(None)
             }
         },
     )?;
@@ -121,6 +181,7 @@ pub fn handlers(
                     .business_call(
                         &target,
                         CallContext {
+                            timer: None,
                             node_id: target.node_id.clone(),
                             service_name: target.service_name.clone(),
                             bid: Some(request.guild_id.to_string()),

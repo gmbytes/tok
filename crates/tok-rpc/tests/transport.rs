@@ -33,6 +33,7 @@ fn target(address: std::net::SocketAddr, service: &str) -> ServiceDescriptor {
 }
 fn context(target: &ServiceDescriptor) -> CallContext {
     CallContext {
+        timer: None,
         node_id: target.node_id.clone(),
         service_name: target.service_name.clone(),
         bid: Some("42".into()),
@@ -147,6 +148,7 @@ async fn shared_endpoint_dispatches_and_rejects_unready_malformed_and_wrong_targ
     );
     let mut raw = PlayerRpcClient::new(clients.channel(&player).unwrap());
     let mismatch = CallRequest {
+        timer: None,
         context: Some(tok_proto::internal::v1::CallContext {
             node_id: "wrong-node".into(),
             service_name: "player".into(),

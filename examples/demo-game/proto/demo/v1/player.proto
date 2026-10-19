@@ -20,6 +20,12 @@ message SetPlayerResponse {
 message QueryGuildRequest { uint64 guild_id = 1; }
 message QueryGuildResponse { uint64 guild_id = 1; }
 
+// 客户端只发起生产，耗时和产出由服务端规则决定。
+message StartProductionRequest {}
+message StartProductionResponse {}
+// 仅供内部生产完成处理函数使用。
+message ProductionFinished {}
+
 message GetGuildRequest {
   uint64 guild_id = 1;
 }

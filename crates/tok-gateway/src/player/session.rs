@@ -5,6 +5,7 @@ use crate::{
     player::{
         PlayerConfig, PlayerExecutor,
         outbound::{self, Outbound, Sender},
+        timer::{Ticket, Timers},
     },
 };
 use std::{
@@ -30,7 +31,11 @@ pub(crate) type SessionTask = Pin<Box<dyn Future<Output = ()> + Send>>;
 /// 单次排队请求的回应，不创建额外业务任务；队列关闭时返回失败回应。
 pub type PendingResponse = Pin<Box<dyn Future<Output = LogicalMessage> + Send>>;
 
-struct Job {
+pub(super) enum Job {
+    Request(RequestJob),
+    Timer(Ticket),
+}
+pub(super) struct RequestJob {
     request: LogicalMessage,
     reply: Option<oneshot::Sender<LogicalMessage>>,
 }
@@ -99,7 +104,7 @@ impl SessionHandle {
         }
         self.0
             .queue
-            .try_send(Job { request, reply })
+            .try_send(Job::Request(RequestJob { request, reply }))
             .map_err(|error| match error {
                 mpsc::error::TrySendError::Full(_) => ErrorCode::QueueFull.into(),
                 mpsc::error::TrySendError::Closed(_) => ErrorCode::SessionClosed.into(),
@@ -363,66 +368,128 @@ fn actor(
         let ttl = Duration::from_millis(config.ownership_ttl_ms);
         let mut renewal = tokio::time::interval(Duration::from_millis(config.renew_interval_ms));
         renewal.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        let mut last_request = 0;
-        loop {
-            tokio::select! {
-                biased;
-                _ = active.cancel.cancelled() => break,
-                _ = renewal.tick() => {
-                    if !matches!(tokio::time::timeout(timeout, ownership.renew(active.ownership.clone(), ttl)).await, Ok(Ok(()))) { break; }
-                }
-                job = queue.recv() => {
-                    let Some(job) = job else { break; };
-                    let mut request = job.request;
-                    let response = if active.cancel.is_cancelled() {
-                        outbound::failed(&request, ErrorCode::SessionClosed)
-                    } else if request.request_id <= last_request {
-                        outbound::failed(&request, ErrorCode::InvalidRequest)
-                    } else {
-                        last_request = request.request_id;
-                        let renew_started = tokio::time::Instant::now();
-                        let renewed = matches!(tokio::time::timeout(timeout, ownership.renew(active.ownership.clone(), ttl)).await, Ok(Ok(())));
-                        // 以续租开始时刻作本地保守下界；已不足一次调用预算时停止新驱动。
-                        // 检查后仍可能发生进程暂停，不把这层时间保护视为严格 fencing。
-                        if !renewed || renew_started.elapsed().saturating_add(timeout) >= ttl {
-                            active.cancel.cancel();
+        let timers = Timers::new(config.max_timers, config.max_timer_bytes);
+        let work = async {
+            let mut last_request = 0;
+            let mut timer_request = 0u64;
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = active.cancel.cancelled() => break,
+                    _ = renewal.tick() => {
+                        if !matches!(tokio::time::timeout(timeout, ownership.renew(active.ownership.clone(), ttl)).await, Ok(Ok(()))) { break; }
+                    }
+                    job = queue.recv() => {
+                        let Some(job) = job else { break; };
+                        let job = match job {
+                            Job::Request(job) => job,
+                            Job::Timer(ticket) => {
+                                if !timers.is_current(&ticket) { continue; }
+                                if !renew_for_call(&active, ownership.as_ref(), timeout, ttl).await { break; }
+                                let Some((spec, trigger)) = timers.prepare(&ticket) else { continue; };
+                                let Some(next) = timer_request.checked_add(1) else { active.cancel.cancel(); break; };
+                                timer_request = next;
+                                let span = tracing::info_span!("player_timer", player_id = %active.ownership.identity.player_id, timer_id = %trigger.timer_id, scheduled_at_ms = trigger.scheduled_at_ms, fired_at_ms = trigger.fired_at_ms);
+                                let result = tokio::time::timeout(timeout, executor.timer(active.ownership.identity.clone(), timer_request, spec, trigger).instrument(span)).await;
+                                let success = match result {
+                                    Ok(Ok(reply)) => {
+                                        let mut success = reply.response.as_ref().is_none_or(|response| response.error_code == 0);
+                                        if !success { tracing::error!(player_id = %active.ownership.identity.player_id, "玩家 timer 返回业务错误，未自动重试"); }
+                                        if let Some(update) = reply.timers && let Err(error) = timers.apply(update) {
+                                            tracing::error!(player_id = %active.ownership.identity.player_id, code = ?error.code, "计时更新无效，关闭会话");
+                                            active.cancel.cancel();
+                                            success = false;
+                                        }
+                                        success
+                                    }
+                                    Ok(Err(error)) => { tracing::error!(player_id = %active.ownership.identity.player_id, code = ?error.code, "玩家 timer 调用失败，未自动重试"); false }
+                                    Err(_) => { tracing::error!(player_id = %active.ownership.identity.player_id, "玩家 timer 调用超时，未自动重试"); false }
+                                };
+                                metrics::counter!("tok_session_timers_total", "result" => if success { "ok" } else { "error" }).increment(1);
+                                timers.finish(&ticket);
+                                continue;
+                            }
+                        };
+                        let mut request = job.request;
+                        let response = if active.cancel.is_cancelled() {
                             outbound::failed(&request, ErrorCode::SessionClosed)
-                        } else if active.cancel.is_cancelled() {
-                            outbound::failed(&request, ErrorCode::SessionClosed)
+                        } else if request.request_id <= last_request {
+                            outbound::failed(&request, ErrorCode::InvalidRequest)
                         } else {
-                            let span = tracing::info_span!("client_request", player_id = %active.ownership.identity.player_id, request_id = request.request_id, message_id = request.message_id);
-                            let result = tokio::time::timeout(timeout, executor.execute(active.ownership.identity.clone(), request.clone()).instrument(span)).await;
-                            match result {
-                                Ok(Ok(mut response)) if response.kind == MessageKind::Response => { response.request_id = request.request_id; response.server_seq = None; response }
-                                Ok(Ok(_)) => outbound::failed(&request, ErrorCode::Internal),
-                                Ok(Err(error)) => outbound::failed(&request, error.code),
-                                Err(_) => {
-                                    tracing::error!(player_id = %active.ownership.identity.player_id, request_id = request.request_id, "玩家调用超时，未自动重试");
-                                    outbound::failed(&request, ErrorCode::Timeout)
+                            last_request = request.request_id;
+                            if !renew_for_call(&active, ownership.as_ref(), timeout, ttl).await {
+                                outbound::failed(&request, ErrorCode::SessionClosed)
+                            } else {
+                                let span = tracing::info_span!("client_request", player_id = %active.ownership.identity.player_id, request_id = request.request_id, message_id = request.message_id);
+                                let result = tokio::time::timeout(timeout, executor.execute(active.ownership.identity.clone(), request.clone()).instrument(span)).await;
+                                match result {
+                                    Ok(Ok(reply)) if reply.response.as_ref().is_some_and(|response| response.kind == MessageKind::Response) => {
+                                        if let Some(update) = reply.timers && let Err(error) = timers.apply(update) {
+                                            tracing::error!(player_id = %active.ownership.identity.player_id, code = ?error.code, "计时更新无效，关闭会话");
+                                            active.cancel.cancel();
+                                            outbound::failed(&request, ErrorCode::Internal)
+                                        } else {
+                                            let mut response = reply.response.expect("已检查回应类型");
+                                            response.request_id = request.request_id; response.server_seq = None; response
+                                        }
+                                    }
+                                    Ok(Ok(_)) => outbound::failed(&request, ErrorCode::Internal),
+                                    Ok(Err(error)) => outbound::failed(&request, error.code),
+                                    Err(_) => {
+                                        tracing::error!(player_id = %active.ownership.identity.player_id, request_id = request.request_id, "玩家调用超时，未自动重试");
+                                        outbound::failed(&request, ErrorCode::Timeout)
+                                    }
                                 }
                             }
-                        }
-                    };
-                    // 尽早释放请求正文，慢下行不会持有两份业务缓冲。
-                    request.body.clear();
-                    metrics::counter!("tok_session_requests_total", "result" => if response.error_code == 0 { "ok" } else { "error" }).increment(1);
-                    if let Some(reply) = job.reply { let _ = reply.send(response); }
-                    else if active.outbound.try_send(Outbound::Logical(response)).is_err() { active.cancel.cancel(); }
+                        };
+                        // 尽早释放请求正文，慢下行不会持有两份业务缓冲。
+                        request.body.clear();
+                        metrics::counter!("tok_session_requests_total", "result" => if response.error_code == 0 { "ok" } else { "error" }).increment(1);
+                        if let Some(reply) = job.reply { let _ = reply.send(response); }
+                        else if active.outbound.try_send(Outbound::Logical(response)).is_err() { active.cancel.cancel(); }
+                    }
                 }
             }
-        }
-        active.cancel.cancel();
-        // 本批没有断线宽限期；队列中未开始的任务只失效，不重新执行。
-        while let Ok(job) = queue.try_recv() {
-            if let Some(reply) = job.reply {
-                let _ = reply.send(outbound::failed(&job.request, ErrorCode::SessionClosed));
+            active.cancel.cancel();
+            // 本批没有断线宽限期；队列中未开始的任务只失效，不重新执行。
+            while let Ok(job) = queue.try_recv() {
+                if let Job::Request(job) = job
+                    && let Some(reply) = job.reply
+                {
+                    let _ = reply.send(outbound::failed(&job.request, ErrorCode::SessionClosed));
+                }
             }
-        }
-        if !matches!(
-            tokio::time::timeout(timeout, ownership.release(active.ownership.clone())).await,
-            Ok(Ok(_))
-        ) {
-            tracing::error!(player_id = %active.ownership.identity.player_id, "玩家会话条件释放失败");
-        }
+            if !matches!(
+                tokio::time::timeout(timeout, ownership.release(active.ownership.clone())).await,
+                Ok(Ok(_))
+            ) {
+                tracing::error!(player_id = %active.ownership.identity.player_id, "玩家会话条件释放失败");
+            }
+        };
+        tokio::join!(
+            work,
+            timers.run(active.queue.clone(), active.cancel.clone())
+        );
     })
 }
+
+async fn renew_for_call(
+    active: &Active,
+    ownership: &dyn OwnershipStore,
+    timeout: Duration,
+    ttl: Duration,
+) -> bool {
+    let started = tokio::time::Instant::now();
+    let renewed = matches!(
+        tokio::time::timeout(timeout, ownership.renew(active.ownership.clone(), ttl)).await,
+        Ok(Ok(()))
+    );
+    // 本地保守预算检查仍不能排除检查后的进程暂停，不承诺严格 fencing。
+    if !renewed || started.elapsed().saturating_add(timeout) >= ttl {
+        active.cancel.cancel();
+    }
+    !active.cancel.is_cancelled()
+}
+
+#[cfg(test)]
+mod tests;

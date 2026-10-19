@@ -97,7 +97,8 @@ impl PlayerExecutor for Executor {
                 error_code: 0,
                 server_seq: None,
                 body: identity.player_id.into_bytes(),
-            })
+            }
+            .into())
         })
     }
 }

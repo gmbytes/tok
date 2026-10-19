@@ -75,6 +75,7 @@ async fn trace_context_is_propagated_across_the_network_call() {
             address,
         };
         let call = CallContext {
+            timer: None,
             node_id: "local".into(),
             service_name: "guild".into(),
             bid: Some("7".into()),

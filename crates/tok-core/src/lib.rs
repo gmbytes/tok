@@ -10,7 +10,7 @@ pub mod service;
 pub use discovery::{DirectoryWatch, ServiceDirectory, ServiceRegistry};
 pub use error::{Error, Result};
 pub use execution::{
-    CallContext, LogicalMessage, MessageKind, SessionIdentity, TimerSpec, TimerUpdate,
+    CallContext, LogicalMessage, MessageKind, SessionIdentity, TimerSpec, TimerTrigger, TimerUpdate,
 };
 pub use routing::ServiceRouter;
 pub use service::ServiceDescriptor;
