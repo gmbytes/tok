@@ -56,6 +56,9 @@ fn config(path: &Path, namespace: &str, url: &str, node: &str, port: u16, gatewa
         source.push_str(&format!(
             "[[services]]\nservice_name='{service}'\nendpoint='network'\n"
         ));
+        if gateway {
+            source.push_str("factory='player-ingress'\n");
+        }
     }
     if gateway {
         source.push_str(&format!("[redis_ownership]\nurl='{url}'\nnamespace='{namespace}'\noperation_timeout_ms=300\n[player_gateway]\nrpc_timeout_ms=500\nownership_ttl_ms=1800\nrenew_interval_ms=200\n"));

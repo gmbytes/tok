@@ -36,7 +36,7 @@ async fn redis_startup_timeout_does_not_start_or_publish_business() {
     let mut app = Application::new(config).unwrap();
     let starts = Arc::new(AtomicUsize::new(0));
     for name in ["player", "guild"] {
-        app.register(
+        app.register_factory(
             name,
             Factory {
                 fail: false,
@@ -130,7 +130,7 @@ async fn service_factories_use_injected_directory_without_unregistering_external
     let local = app.directory();
     let observed = Arc::new(AtomicUsize::new(0));
     for name in ["player", "guild"] {
-        app.register(
+        app.register_factory(
             name,
             Inspect {
                 observed: observed.clone(),
@@ -158,7 +158,7 @@ async fn bind_failure_happens_before_business_initialization() {
     let directory = app.directory();
     let starts = Arc::new(AtomicUsize::new(0));
     for name in ["player", "guild"] {
-        app.register(
+        app.register_factory(
             name,
             Factory {
                 fail: false,
@@ -185,7 +185,7 @@ async fn initialization_failure_cleans_up_shared_listener_and_directory() {
         .with_timeouts(Duration::from_secs(2), Duration::from_secs(2));
     let directory = app.directory();
     let starts = Arc::new(AtomicUsize::new(0));
-    app.register(
+    app.register_factory(
         "player",
         Factory {
             fail: false,
@@ -193,7 +193,7 @@ async fn initialization_failure_cleans_up_shared_listener_and_directory() {
         },
     )
     .unwrap();
-    app.register("guild", Factory { fail: true, starts })
+    app.register_factory("guild", Factory { fail: true, starts })
         .unwrap();
     app.register_rpc_endpoint("internal", endpoint()).unwrap();
     drop(reservation);

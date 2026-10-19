@@ -45,6 +45,16 @@ player 服务部署在游戏节点上，负责玩家的局外游戏逻辑。其�
 
 ## 客户端接入与网关
 
+### 统一 Gateway 组装校准
+
+网关采用统一运行框架，按配置选择接入组件。Gateway 负责监听适配、连接容量、后台任务启动与监督、退出收束；PlayerIngress 负责登录协议、玩家所有权、串行 session 与 player RPC；Scene 接入组件后续负责场景定位和异步场景消息，不复制独立网关运行循环。
+
+PlayerGateway 与 SceneGateway 在下文表示两类业务角色，不要求两套独立运行时实现。PlayerGateway 的已有 Rust 接口保留为统一 Gateway 的兼容包装；新组装通过 Gateway 与接入组件完成。游戏按名称注册初始化工厂，服务默认按 service_name 查找，可通过可选 factory 字段选择其他名称的工厂；service_name 始终用于服务身份，同一工厂可创建多个不同身份的服务。ServiceConfig 不包含网关专用选择项；具体组件的协议及端点共享约束由组装层检查。同一二进制可以配置多个独立入口，按需拆分部署。
+
+协议、认证、session 和恢复语义由组件明确，不在通用 Gateway 中到处判断 player/scene。初期提供 TCP 监听适配和 PlayerIngress；Scene 仍未实现，选择它时必须明确报错。通用传输契约不假定所有适配都是 TCP；未来 UDP/KCP 需提供自己的接入适配，不强行沿用逐连接读写流程。
+
+重构验收保持现有认证、串行执行、下行顺序、容量拒绝、租约失效与退出清理行为，并验证自定义组件能够复用运行时、业务服务名可独立配置、后台与连接任务异常可被统一监督。
+
 ### PlayerGateway（玩家网关）
 
 客户端通过可替换的接入协议访问PlayerGateway，可以采用 TCP、HTTP、WebSocket 等。PlayerGateway为玩家维护逻辑 session，并根据 player id 的 hash 选择游戏节点。
@@ -436,13 +446,19 @@ tok/
 | tok-gateway | 局外 session、timer、下行补发与交接，以及局内场景接入、协议与安全适配 |
 | tok | 对外 API 入口、配置、运行时服务组装与生命周期监督 |
 
-tok-gateway 按 player、scene、transport、security 和 codec 分模块，网关名称统一为 PlayerGateway 和 SceneGateway，分别对接 player 服务与场景服务。两者均可维护 session，名称不依据是否有 session、玩法所在位置或传输协议划分；本文“局外／局内”仍用于描述默认业务分工。
+tok-gateway 的 runtime 提供统一 Gateway，player、scene 组织不同接入组件，transport、security 和 codec 提供适配。PlayerGateway 和 SceneGateway 表示业务角色，已有 PlayerGateway Rust 类型保留为兼容包装。两类角色均可维护 session，本文“局外／局内”描述默认业务分工。
 
 ```text
 tok-gateway/src/
 ├── lib.rs
+├── runtime.rs
 ├── player/
 │   ├── mod.rs
+│   ├── ingress.rs
+│   ├── connection.rs
+│   ├── config.rs
+│   ├── auth.rs
+│   ├── executor.rs
 │   ├── gateway.rs
 │   ├── session.rs
 │   ├── timer.rs
@@ -450,14 +466,14 @@ tok-gateway/src/
 │   └── resume.rs
 ├── scene/
 │   ├── mod.rs
-│   ├── gateway.rs
+│   ├── ingress.rs
 │   └── session.rs
 ├── transport/
 ├── security/
 └── codec/
 ```
 
-player 模块按玩家逻辑会话、串行执行、timer、下行缓存和重连交接组织；scene 模块包含场景接入和场景连接会话。transport、security 和 codec 供两类网关按需组合。两类 session 按各自业务语义设计，不自动套用相同的串行或所有权约定。当前已实现 player 的 TCP 接入、认证与串行执行，timer、恢复、scene 和安全适配仍待扩展。协议适配器初期作为模块，实际需要独立发布或隔离依赖时再拆 crate。
+player 模块按玩家逻辑会话、串行执行、timer、下行缓存和重连交接组织；scene 模块预留场景接入和场景连接会话。组件共享 Gateway 的连接容量、后台任务监督与退出流程，并按需组合 transport、security 和 codec。两类 session 按各自业务语义设计，不自动套用相同的串行或所有权约定。当前已实现 player 的 TCP 接入、认证与串行执行，timer、恢复、scene 和安全适配仍待扩展。协议适配器初期作为模块，实际需要独立发布或隔离依赖时再拆 crate。
 
 依赖保持单向：游戏依赖 tok 组装入口及必要组件；tok 依赖组件 crate；组件依赖 tok-core 或 tok-proto，不反向依赖具体游戏或 tok 组装层。网关通过基础契约使用发现、路由与所有权实现，具体实现由组装层选择。RPC 与事件组件不依赖网关。
 

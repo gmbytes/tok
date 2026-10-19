@@ -16,6 +16,7 @@ Rust 示例随 `cargo test --workspace --locked` 执行文档测试，API 链接
 
 [`AppConfig`] 描述节点、端点、服务和可观测配置。
 服务通过 `(node_id, service_name)` 定位，业务实体 ID 与服务身份分别管理。
+游戏通过 `Application::register_factory` 注册初始化工厂。服务默认按 `service_name` 查找工厂，需要另选实现时填写可选的 `factory`。
 多个服务可以引用同一个端点；端点中的协议名由对应的传输组件解释。
 
 ```rust
@@ -53,7 +54,7 @@ endpoint = "internal-rpc"
 "#)?;
 
 let mut app = Application::new(config)?;
-app.register("guild", GameService)?;
+app.register_factory("guild", GameService)?;
 let directory = app.directory();
 
 let runtime = tokio::runtime::Runtime::new()?;
@@ -156,7 +157,7 @@ endpoint = "internal-rpc"
     let service = RpcService::new("local", "guild", Arc::new(handlers))?;
     let endpoint = RpcEndpoint::new().add_service("guild", service.into_business())?;
     let mut app = Application::new(config)?;
-    app.register("guild", Lifecycle)?;
+    app.register_factory("guild", Lifecycle)?;
     app.register_rpc_endpoint("internal-rpc", endpoint)?;
     app.run_until(shutdown_signal()).await?;
     Ok(())
@@ -366,13 +367,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 ```
 
 游戏通过 [`gateway::player::Authenticator`] 返回规范化的可信玩家 ID，同一玩家的凭据别名必须归一到相同 ID。
-[`gateway::player::PlayerGateway::new`] 注入认证器、[`core::coordination::OwnershipStore`] 和
+`gateway::Gateway::player` 注入认证器、[`core::coordination::OwnershipStore`] 和
 [`gateway::player::PlayerExecutor`]；[`gateway::player::RpcPlayerExecutor`] 可组合
 [`infra::routing::RendezvousRouter`] 与 [`rpc::RpcClients`] 调用 player 服务。
 网关工厂先绑定 TCP 监听，再把监听及服务退出 token 交给 `serve` 的受监督任务。
 客户端正文不提供 session 身份；示例 player 从可信的调用上下文读取玩家 ID。
 
-[`gateway::player::GatewayConfig`] 对连接数、会话数、请求队列、下行队列、包长及期限提供有界默认值。
+[`gateway::player::PlayerConfig`] 对连接数、会话数、请求队列、下行队列、包长及期限提供有界默认值。
 TOML 的可选 `[player_gateway]` 节可覆盖参数，未知字段和非法容量会使配置校验失败：
 
 ```toml
@@ -390,7 +391,7 @@ renew_interval_ms = 10000
 ```
 
 同一玩家的业务请求顺序执行，不同玩家可以并发。队列满立即返回错误，RPC 超时不重试。
-通过 `gateway.sessions()` 获取 [`gateway::player::SessionManager`]，可查询当前
+通过 `gateway.ingress().sessions()` 获取 [`gateway::player::SessionManager`]，可查询当前
 [`gateway::player::SessionHandle`]；`notify` 与响应共用有界下行队列，不调用 player。
 下行队列满会关闭连接，避免慢客户端无限积压。框架错误见 [`gateway::ErrorCode`]，业务响应的非零错误码保留原值，
 游戏可通过 [`gateway::player::RpcErrorMapper`] 自定义 tonic 状态映射。
@@ -399,6 +400,53 @@ renew_interval_ms = 10000
 旧队列不再执行，外部网关持有的所有权直接拒绝。连接断开即关闭 session；退出时等待在途执行并条件释放所有权。
 当前没有心跳，完整帧读取期限包含等待首字节的空闲时间，默认空闲 15 秒会断开。
 本批尚不调度 RPC 返回的 timer 信息，也不提供断线宽限期、ack、补发或恢复，这些按下一批实现。
+
+## 统一 Gateway 与接入组件
+
+[`gateway::Gateway`] 共用连接接收、容量控制、后台任务监督与退出流程。
+[`gateway::GatewayIngress`] 定义连接处理和清理钩子，当前
+[`gateway::player::PlayerIngress`] 实现玩家认证、所有权和串行 session。
+运行框架通过 [`gateway::transport::GatewayTransport`] 接收连接，当前具体适配为 TCP；
+其他传输和 Scene 组件仍待实现，不需要复制网关运行循环。
+
+服务可通过 `factory` 显式选择初始化工厂，省略时按服务名查找。例如自定义入口名称：
+
+```toml
+[[endpoints]]
+name = "client"
+protocol = "tcp"
+address = "127.0.0.1:7000"
+
+[[services]]
+service_name = "my-entry"
+endpoint = "client"
+factory = "player-ingress"
+```
+
+[`runtime::Application::register_factory`] 按名称注册工厂；运行前检查配置实际使用的工厂是否已注册，
+每个服务调用一次工厂并传入自身的服务身份、端点和退出 token。
+[`config::ServiceConfig::factory_name`] 优先返回显式的 `factory`，省略时返回 `service_name`；端点协议不参与工厂选择。
+demo-game 提供 `player-ingress`、`player` 与 `guild`；选择 `scene-ingress` 明确返回尚未实现。
+Player 接入组件要求独占 TCP 端点，业务组件要求 gRPC 端点；具体约束由游戏组装层检查。
+
+普通业务配置只需 `service_name` 和 `endpoint`，例如 player、guild 默认找到同名工厂；示例网关显式使用 `factory = "player-ingress"`。
+直接构造 `ServiceConfig` 时填写 `factory: None` 或 `Some(名称)`；原 `gateway` 和 `component` 配置字段已移除。
+初始化工厂使用 `register_factory` 按名称注册，同一工厂注册一次即可供多个服务使用。
+RPC 端点仍显式绑定服务名；业务调用方、路由与发现查询使用实际的 `service_name`。
+
+自定义组件通过 `Gateway::new` 获取 [`gateway::GatewayContext`]，调用 `launch` 提交受监督的后台任务。
+[`gateway::GatewayConfig`] 单独限制连接数和后台任务总数，任务总数包含等待启动的任务。
+Player 保留 `[player_gateway]` 配置布局，`PlayerConfig::runtime_limits` 从连接数和最大 session 数
+生成运行时容量；会话、队列、所有权与协议参数仍由 Player 组件使用。
+
+普通连接错误只关闭该连接；连接 panic、后台任务错误或 panic 会使网关退出。
+退出时运行框架取消任务、调用组件 `stop`、收束后台任务，再调用异步 `finish`。
+`stop` 必须可重复调用；组件收到取消后应停止新业务并完成清理，整体退出期限由外层 Application 或调用方控制。
+运行 future 被强制丢弃时会取消并中止受监督任务、调用 `stop`，无法等待异步 `finish`。
+
+已有 [`gateway::player::PlayerGateway`] 保留原构造、`sessions()` 和 TCP `serve` 接口，内部委托统一运行框架；
+玩家接入参数统一使用 `PlayerConfig`，通用运行时容量使用 `gateway::GatewayConfig`。新代码使用 `Gateway::player` 与 `PlayerIngress`。
+Scene 目前仅预留模块，不套用 Player 的串行与所有权语义。
 
 ## 组件入口与当前边界
 
@@ -409,7 +457,7 @@ renew_interval_ms = 10000
 | [`core`] | 共享类型、错误和组件契约 |
 | [`infra`] | 服务目录、路由及协调后端 |
 | [`rpc`] | 内部 RPC 与 Tower 组装 |
-| [`gateway`] | PlayerGateway、SceneGateway 与接入组件 |
+| [`gateway`] | 统一 Gateway 运行框架与 Player、Scene 接入组件 |
 | [`events`] | 本地及跨节点事件 |
 | [`observability`] | 日志、指标与追踪 |
 

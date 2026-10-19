@@ -19,7 +19,7 @@ workspace 启用 `missing_docs = "deny"`，对外公开的模块、类型、字�
 
 当前已提供配置校验、内存目录、Redis 开发发现与变更订阅、bid 路由、内存与 Redis session 所有权、protobuf 生成、服务生命周期、可观测组件及共享内部 gRPC 端点。PlayerGateway 提供 TCP 登录、认证扩展点、有界串行 session 和通知入口。示例支持玩家状态读写及 player 调用 guild；按 Ctrl+C 优雅退出。timer、断线恢复、跨网关交接、Kubernetes 发现和 NATS 消费按后续批次推进。
 
-网关统一命名为 `PlayerGateway` 和 `SceneGateway`，分别对接 player 与场景服务。`tok-gateway` 中的 `player/` 放置玩家逻辑 session、timer、下行补发及重连交接，`scene/` 放置场景接入和场景连接 session；`transport/`、`security/`、`codec/` 提供按需组合的接入组件。示例玩家网关服务名为 `player-gateway`。
+网关共用 `Gateway` 运行框架，接入组件负责具体业务语义。当前 `PlayerIngress` 实现 TCP 登录和串行 session，Scene 接入尚未实现；`PlayerGateway` 保留为兼容包装。`player/`、`scene/` 分别组织玩家和场景组件，`transport/`、`security/`、`codec/` 提供传输、安全与编解码适配。示例通过可选的 `factory = "player-ingress"` 选择网关工厂，服务名可自行命名。
 
 ## 开发命令
 
@@ -51,7 +51,7 @@ just build
 
 进程配置 `node_id` 和 `endpoints`，每个端点配置 `name`、`protocol` 和 `address`；各服务通过 `endpoint` 引用端点。多个 protobuf 服务可通过 `RpcEndpoint` 绑定到同一内部 gRPC 端点，每个端点只监听一次。同一 protobuf 服务不能在一个端点重复绑定。示例监听 internal-rpc 和 client，配置描述本身不自动创建监听，TCP 由网关工厂准备。
 
-服务通过 `(node_id, service_name)` 定位，服务名在节点内唯一，不同节点可使用相同服务名。游戏通过 `Application::register("guild", factory)` 按服务名注册实现，目录通过 `snapshot("guild")` 查询该服务的节点及绑定端点的协议、地址。业务实体仍通过 bid 路由和互斥。
+服务通过 `(node_id, service_name)` 定位，服务名在节点内唯一，不同节点可使用相同服务名。游戏通过 `Application::register_factory("guild", factory)` 注册初始化工厂；服务默认按服务名查找，只有名称不同时才填写可选的 `factory`。同一工厂可创建多个不同身份的服务。目录通过 `snapshot("guild")` 查询名为 guild 的服务节点及端点，业务实体仍通过 bid 路由和互斥。
 
 ```toml
 [[endpoints]]

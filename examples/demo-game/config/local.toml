@@ -37,6 +37,7 @@ address = "127.0.0.1:7001"
 
 [[services]]
 service_name = "player-gateway"
+factory = "player-ingress"
 endpoint = "client"
 
 [[services]]

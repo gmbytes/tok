@@ -10,6 +10,8 @@
 
 ## 批次校准与验收状态
 
+网关组装已校准为统一 Gateway 运行框架加可配置接入组件。当前重构拆出监听、连接容量与任务监督，PlayerIngress 保留玩家登录和串行 session，Scene 按后续阶段实现；服务配置显式选择组件，业务服务名不承担类型判断。重构期间保留 PlayerGateway 兼容接口，验收覆盖现有 TCP 和 Redis 行为及自定义组件的生命周期。
+
 第一批按“内部 RPC 基础可运行”完成；阶段零至二的全部生产能力仍按各自验收项推进。第二批以 [局外 TCP 协议与 session 实施约定](client-session.md) 为编码和验收依据。
 
 | 范围 | 已实现或验证 | 剩余边界 |
@@ -32,7 +34,7 @@
 | 服务生命周期 | [runtime.rs](../crates/tok/src/runtime.rs) 提供工厂注册、共享端点、就绪入口、初始化期限及失败清理 | 生产依赖就绪策略与发现后端 |
 | 发现 | [MemoryDirectory](../crates/tok-infra/src/discovery/memory.rs) 支持单进程；[RedisDirectory](../crates/tok-infra/src/discovery/redis.rs) 提供多进程开发租约注册、条件撤销、本地缓存与合并通知 | Kubernetes 本地缓存与资源映射；Redis 发现不代替 session 所有权 |
 | 协议与 RPC | [tok-rpc](../crates/tok-rpc/src/lib.rs) 提供 PlayerRpc、BusinessRpc、强类型分发、连接复用、超时、追踪传播和 TowerHandler | 配置式中间件、锁 Layer 及生产调用身份认证 |
-| 网关 | [PlayerGateway](../crates/tok-gateway/src/player/gateway.rs) 接通 TCP、注入认证、串行 session、所有权续租、下行通知和任务监督 | timer、下行缓存与恢复、生产安全及 scene 接入 |
+| 网关 | [Gateway](../crates/tok-gateway/src/runtime.rs) 统一接收、容量及监督；[PlayerIngress](../crates/tok-gateway/src/player/ingress.rs) 提供 TCP 认证、串行 session、所有权续租和下行通知 | timer、下行缓存与恢复、生产安全及 scene 接入 |
 | 路由与 Redis | bid rendezvous 路由、Memory 与 Redis 所有权、条件续租释放及本地时间预算检查已实现 | Cluster 拓扑与故障切换适配、交接及请求级锁后端 |
 | 事件 | [tok-events](../crates/tok-events/src/lib.rs) 已有 DeliveryPolicy 和 EventTarget | 同步本地分发、NATS 后端、订阅、去重及交接处理 |
 | 可观测 | 日志动态过滤、Prometheus、OTLP、强追踪规则、RPC metadata 传播及调用指标已实现 | 事件 headers 传播及 session、timer 指标 |
@@ -72,6 +74,20 @@ RPC 超时后远端仍可能执行，存储层落地时统一加入写入前期�
 验证入口为 just ownership-test 与 just ownership-smoke，常规测试不依赖 Redis；CI 独立 Redis 任务包含这些检查。
 
 2026-10-19 Windows 验证：Rust 1.99.0 与 just 1.58.0，55 项常规测试、3 项文档测试通过；独立 Redis 7.4 容器通过 7 项集成测试（发现后端 2 项、发现双进程 1 项、所有权后端 3 项、独立网关所有权 1 项）。格式、clippy、中文 rustdoc、原有三类 smoke、两份 Redis 开发配置及两份生产配置校验、release 构建均通过。Linux 以 CI 实际结果为准。
+
+## 统一网关运行框架重构
+
+设计与实现已统一为 Gateway 加接入组件：运行时不判断 Player 或 Scene，GatewayTransport 提供连接，GatewayIngress 处理业务连接，GatewayContext 提交有界后台任务。PlayerIngress 保留原登录、串行 session、所有权与通知行为，PlayerGateway 保留兼容包装。
+
+服务配置使用可选 factory 指定初始化工厂，省略时按 service_name 查找，普通 player 和 guild 无需重复填写；示例网关显式选择 player-ingress。Application::register_factory 按名称注册并复用工厂，不再提供 gateway 或 component 配置字段。具体协议与端点共享规则由组装层检查，scene-ingress 仍明确报尚未实现。现有 player_gateway 参数保留，PlayerConfig 派生通用运行时容量。连接普通错误仅关闭连接，panic 与后台失败由网关统一监督；退出取消入口并收束任务，组件负责清理。
+
+新增测试覆盖非 TCP 自定义组件、连接与后台任务容量、普通错误、panic、后台失败、正常及强制退出，以及组件配置与自定义服务名。既有 TCP 和 Redis 多进程测试用于验证行为兼容。此重构不代表第三批 timer、恢复或交接已完成。
+
+2026-10-19 Windows 验证：Rust 1.99.0、just 1.58.0，60 项常规测试、3 项文档测试与 7 项真实 Redis 集成测试通过；格式、clippy、中文 rustdoc、生命周期及 RPC、TCP 三类 smoke、四份部署配置校验和 release 构建通过。临时 Redis 数据库无遗留数据，容器已清理；Linux 结果以 CI 为准。
+
+同日组件选择校准后，61 项常规测试与 3 项文档测试通过，新增同一工厂创建两个不同身份服务的生命周期验证；格式、clippy 和中文 rustdoc 通过。重新执行 Redis 双进程发现与多网关所有权两项集成测试、三类 smoke、四份配置校验及 release 构建，全部通过。临时 Redis 数据库无遗留数据，容器已清理。
+
+工厂选择最终简化为可选 factory：默认按服务名查找，显式填写时优先使用指定工厂；示例普通业务配置省去重复字段。61 项常规测试、3 项文档测试、格式、clippy、rustdoc、三类 smoke、四份配置校验及 release 构建通过。Redis 所有权联调首次发生一次查询超时，未修改参数的连续两次重跑通过；发现双进程联调通过。该次超时暂未复现，临时 Redis 容器均已清理。
 
 ## 设计约束与实施依赖
 

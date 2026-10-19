@@ -19,4 +19,5 @@ advertise_address = "127.0.0.1:7000"
 
 [[services]]
 service_name = "player-gateway"
+factory = "player-ingress"
 endpoint = "client"

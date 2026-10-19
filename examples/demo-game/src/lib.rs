@@ -42,15 +42,52 @@ pub fn application(config: AppConfig) -> Result<Application, Error> {
         }
     };
     for service in &config.services {
-        if service.service_name == "player-gateway" {
-            app.register(
-                &service.service_name,
-                gateway::GatewayFactory::new(config.player_gateway.clone(), ownership.clone()),
-            )?;
-        } else {
-            app.register(&service.service_name, LifecycleService)?;
+        let endpoint = config
+            .endpoints
+            .iter()
+            .find(|entry| entry.name == service.endpoint)
+            .expect("端点已校验");
+        match service.factory_name() {
+            "player-ingress" => {
+                if endpoint.protocol != "tcp"
+                    || config
+                        .services
+                        .iter()
+                        .filter(|entry| entry.endpoint == service.endpoint)
+                        .count()
+                        != 1
+                {
+                    return Err(tok::core::Error::InvalidConfig(
+                        "Player 接入组件要求独占 TCP 端点".into(),
+                    )
+                    .into());
+                }
+            }
+            "scene-ingress" => {
+                return Err(tok::core::Error::NotImplemented("Scene 网关接入组件").into());
+            }
+            "player" | "guild" => {
+                if endpoint.protocol != "grpc" {
+                    return Err(tok::core::Error::InvalidConfig(
+                        "示例业务组件要求 grpc 端点".into(),
+                    )
+                    .into());
+                }
+            }
+            factory => {
+                return Err(tok::core::Error::InvalidConfig(format!(
+                    "示例未注册初始化工厂：{factory}"
+                ))
+                .into());
+            }
         }
     }
+    app.register_factory(
+        "player-ingress",
+        gateway::PlayerIngressFactory::new(config.player_gateway.clone(), ownership),
+    )?;
+    app.register_factory("player", LifecycleService)?;
+    app.register_factory("guild", LifecycleService)?;
     let state = Arc::new(player::State::new(config.player_gateway.max_sessions)?);
     for endpoint in &config.endpoints {
         if endpoint.protocol != "grpc" {
@@ -63,20 +100,24 @@ pub fn application(config: AppConfig) -> Result<Application, Error> {
             .iter()
             .filter(|service| service.endpoint == endpoint.name)
         {
-            rpc = match service.service_name.as_str() {
+            rpc = match service.factory_name() {
                 "player" => rpc.add_service(
-                    "player",
+                    &service.service_name,
                     RpcService::new(
                         &config.node_id,
-                        "player",
+                        &service.service_name,
                         Arc::new(player::handlers(state.clone(), app.service_directory())?),
                     )?
                     .into_player(),
                 )?,
                 "guild" => rpc.add_service(
-                    "guild",
-                    RpcService::new(&config.node_id, "guild", Arc::new(guild::handlers()?))?
-                        .into_business(),
+                    &service.service_name,
+                    RpcService::new(
+                        &config.node_id,
+                        &service.service_name,
+                        Arc::new(guild::handlers()?),
+                    )?
+                    .into_business(),
                 )?,
                 other => {
                     return Err(

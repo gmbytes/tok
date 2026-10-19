@@ -46,12 +46,12 @@ pub enum RuntimeError {
     /// 配置校验或本地目录操作失败。
     #[error(transparent)]
     Core(#[from] tok_core::Error),
-    /// 配置启用的服务没有注册工厂。
-    #[error("服务未注册：{0}")]
-    MissingService(String),
-    /// 同一业务服务名重复注册工厂。
-    #[error("服务重复注册：{0}")]
-    DuplicateService(String),
+    /// 配置选用的初始化工厂尚未注册。
+    #[error("初始化工厂未注册：{0}")]
+    MissingFactory(String),
+    /// 同一名称重复注册初始化工厂。
+    #[error("初始化工厂重复注册：{0}")]
+    DuplicateFactory(String),
     /// 业务服务初始化或共享端点绑定失败。
     #[error("服务 {service_name} 启动失败：{source}")]
     Start {
@@ -159,17 +159,17 @@ impl Application {
         })
     }
 
-    /// 按业务服务名注册初始化工厂；不从服务名推导执行或加锁策略。
-    pub fn register(
+    /// 按名称注册初始化工厂；服务默认按服务名查找，也可通过 factory 显式选择。
+    pub fn register_factory(
         &mut self,
-        service_name: impl Into<String>,
+        name: impl Into<String>,
         factory: impl ServiceFactory + 'static,
     ) -> Result<(), RuntimeError> {
-        let service_name = service_name.into();
-        if self.factories.contains_key(&service_name) {
-            return Err(RuntimeError::DuplicateService(service_name));
+        let name = name.into();
+        if self.factories.contains_key(&name) {
+            return Err(RuntimeError::DuplicateFactory(name));
         }
-        self.factories.insert(service_name, Arc::new(factory));
+        self.factories.insert(name, Arc::new(factory));
         Ok(())
     }
 
@@ -192,7 +192,7 @@ impl Application {
     /// 将显式绑定的 protobuf 服务交给应用统一监听和监督。
     ///
     /// 端点必须是已配置的 grpc 端点，其业务绑定必须与配置完全一致。
-    /// 每个业务服务仍需通过 register 注册初始化工厂，完成初始化后才接受 RPC。
+    /// 每个业务服务选用的工厂仍需通过 register_factory 注册，完成初始化后才接受 RPC。
     pub fn register_rpc_endpoint(
         &mut self,
         endpoint_name: impl Into<String>,
@@ -242,8 +242,8 @@ impl Application {
         shutdown: impl Future<Output = std::io::Result<()>>,
     ) -> Result<(), RuntimeError> {
         for service in &self.config.services {
-            if !self.factories.contains_key(&service.service_name) {
-                return Err(RuntimeError::MissingService(service.service_name.clone()));
+            if !self.factories.contains_key(service.factory_name()) {
+                return Err(RuntimeError::MissingFactory(service.factory_name().into()));
             }
         }
         let token = CancellationToken::new();
@@ -294,7 +294,7 @@ impl Application {
                     directory: self.service_directory.clone(),
                     shutdown: token.child_token(),
                 };
-                let factory = self.factories[&service.service_name].clone();
+                let factory = self.factories[binding.factory_name()].clone();
                 let mut starting = JoinSet::new();
                 let started = std::time::Instant::now();
                 let span = tracing::info_span!("service_start", node_id = %self.config.node_id, service_name = %service.service_name);

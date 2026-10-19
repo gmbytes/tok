@@ -17,7 +17,7 @@ use tok_gateway::{
     ErrorCode,
     codec::{FrameCodec, VERSION},
     player::{
-        AuthenticatedPlayer, AuthenticationTask, Authenticator, GatewayConfig, PlayerExecutor,
+        AuthenticatedPlayer, AuthenticationTask, Authenticator, PlayerConfig, PlayerExecutor,
         PlayerGateway, PlayerTask, SessionManager,
     },
     protocol::{self, Frame, frame::Content},
@@ -112,11 +112,11 @@ struct Fixture {
     ownership: Arc<MemoryOwnership>,
 }
 impl Fixture {
-    async fn new(config: GatewayConfig) -> Self {
+    async fn new(config: PlayerConfig) -> Self {
         Self::with_backend(config, |memory| memory).await
     }
     async fn with_backend(
-        config: GatewayConfig,
+        config: PlayerConfig,
         backend: impl FnOnce(Arc<MemoryOwnership>) -> Arc<dyn OwnershipStore>,
     ) -> Self {
         let (started, receiver) = mpsc::unbounded_channel();
@@ -226,7 +226,7 @@ async fn known_exhausted_lease_budget_rejects_work_after_process_pause() {
     let delay = delay_once.clone();
     let renew_count = renewals.clone();
     let fixture = Fixture::with_backend(
-        GatewayConfig {
+        PlayerConfig {
             rpc_timeout_ms: 20,
             ownership_ttl_ms: 300,
             renew_interval_ms: 100,
@@ -330,15 +330,15 @@ impl Client {
         }
     }
 }
-fn config() -> GatewayConfig {
-    GatewayConfig {
+fn config() -> PlayerConfig {
+    PlayerConfig {
         max_sessions: 8,
         max_connections: 8,
         rpc_timeout_ms: 1000,
         ownership_ttl_ms: 5000,
         renew_interval_ms: 500,
         io_timeout_ms: 3000,
-        ..GatewayConfig::default()
+        ..PlayerConfig::default()
     }
 }
 
@@ -387,7 +387,7 @@ async fn authentication_errors_and_request_ids_do_not_execute_business() {
 
 #[tokio::test]
 async fn same_player_is_serial_and_queue_full_is_immediate() {
-    let mut fixture = Fixture::new(GatewayConfig {
+    let mut fixture = Fixture::new(PlayerConfig {
         queue_capacity: 1,
         ..config()
     })
@@ -477,7 +477,7 @@ async fn duplicate_login_waits_for_old_call_and_invalidates_old_handle() {
 
 #[tokio::test]
 async fn closed_sessions_are_reclaimed_and_foreign_ownership_is_not_taken() {
-    let fixture = Fixture::new(GatewayConfig {
+    let fixture = Fixture::new(PlayerConfig {
         max_sessions: 1,
         ..config()
     })
@@ -521,7 +521,7 @@ async fn closed_sessions_are_reclaimed_and_foreign_ownership_is_not_taken() {
 
 #[tokio::test]
 async fn timeouts_do_not_retry_and_session_remains_usable() {
-    let fixture = Fixture::new(GatewayConfig {
+    let fixture = Fixture::new(PlayerConfig {
         rpc_timeout_ms: 30,
         auth_timeout_ms: 30,
         ..config()
@@ -551,7 +551,7 @@ async fn timeouts_do_not_retry_and_session_remains_usable() {
 
 #[tokio::test]
 async fn notify_uses_bounded_outbound_without_executing_player() {
-    let fixture = Fixture::new(GatewayConfig {
+    let fixture = Fixture::new(PlayerConfig {
         outbound_capacity: 1,
         ..config()
     })
@@ -582,7 +582,7 @@ async fn notify_uses_bounded_outbound_without_executing_player() {
 
 #[tokio::test]
 async fn malformed_frames_are_rejected_before_business_execution() {
-    let fixture = Fixture::new(GatewayConfig {
+    let fixture = Fixture::new(PlayerConfig {
         max_frame_size: 256,
         ..config()
     })
@@ -639,7 +639,7 @@ async fn malformed_frames_are_rejected_before_business_execution() {
 
 #[tokio::test]
 async fn frame_deadline_and_connection_capacity_are_bounded() {
-    let fixture = Fixture::new(GatewayConfig {
+    let fixture = Fixture::new(PlayerConfig {
         io_timeout_ms: 50,
         max_connections: 1,
         ..config()

@@ -28,7 +28,7 @@ pub enum OwnershipBackend {
     Redis,
 }
 
-/// 业务服务身份及其端点引用，不决定业务执行或加锁策略。
+/// 业务服务身份、可选初始化工厂及端点引用；实例加锁策略由组装层决定。
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ServiceConfig {
@@ -36,6 +36,16 @@ pub struct ServiceConfig {
     pub service_name: String,
     /// 引用 endpoints 中的端点名称。
     pub endpoint: String,
+    /// 可选的初始化工厂名称；省略时使用 service_name 查找注册工厂。
+    #[serde(default)]
+    pub factory: Option<String>,
+}
+
+impl ServiceConfig {
+    /// 返回实际使用的工厂名称；显式指定优先，否则使用服务名。
+    pub fn factory_name(&self) -> &str {
+        self.factory.as_deref().unwrap_or(&self.service_name)
+    }
 }
 
 /// 节点内可共享的监听端点；协议名由传输实现解释。
@@ -79,7 +89,7 @@ pub struct AppConfig {
     pub observability: tok_observability::Config,
     /// 玩家 TCP 网关的容量与期限；未组装网关时不创建监听。
     #[serde(default)]
-    pub player_gateway: tok_gateway::player::GatewayConfig,
+    pub player_gateway: tok_gateway::player::PlayerConfig,
 }
 
 impl AppConfig {
@@ -170,6 +180,13 @@ impl AppConfig {
         }
         let mut identities = BTreeSet::new();
         for service in &self.services {
+            if service
+                .factory
+                .as_ref()
+                .is_some_and(|name| name.trim().is_empty() || name.len() > 64)
+            {
+                return Err(Error::InvalidConfig("工厂名称无效".into()));
+            }
             if service.service_name.trim().is_empty() {
                 return Err(Error::InvalidConfig("服务名不能为空".into()));
             }

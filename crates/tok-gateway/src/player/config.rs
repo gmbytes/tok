@@ -1,12 +1,12 @@
-//! 玩家网关的有限容量与开发期租约、调用期限。
+//! PlayerIngress 的协议、session 与租约参数，兼容原有 player_gateway 配置布局。
 
 use serde::Deserialize;
 use tok_core::{Error, Result};
 
-/// 第二批的 TCP、串行 session 与租约参数；本批不启用断线恢复。
+/// Player 接入组件的 TCP、串行 session 与租约参数；尚不启用断线恢复。
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
-pub struct GatewayConfig {
+pub struct PlayerConfig {
     /// 同时持有的 TCP 连接数。
     pub max_connections: usize,
     /// 玩家执行目录的最大条目数，关闭且无人使用的条目可回收。
@@ -29,7 +29,7 @@ pub struct GatewayConfig {
     pub renew_interval_ms: u64,
 }
 
-impl Default for GatewayConfig {
+impl Default for PlayerConfig {
     fn default() -> Self {
         Self {
             max_connections: 128,
@@ -46,7 +46,14 @@ impl Default for GatewayConfig {
     }
 }
 
-impl GatewayConfig {
+impl PlayerConfig {
+    /// 从玩家参数提取通用连接和后台任务容量；session 数量限制由玩家目录同时执行。
+    pub fn runtime_limits(&self) -> crate::GatewayConfig {
+        crate::GatewayConfig {
+            max_connections: self.max_connections,
+            max_tasks: self.max_sessions,
+        }
+    }
     /// 验证正数、容量上限及租期对调用和续租间隔的覆盖。
     pub fn validate(&self) -> Result<()> {
         if [

@@ -70,12 +70,12 @@ fn app() -> Application {
 
 fn register(
     app: &mut Application,
-    service_name: &str,
+    factory_name: &str,
     behavior: Behavior,
     stopped: &Arc<AtomicUsize>,
 ) {
-    app.register(
-        service_name,
+    app.register_factory(
+        factory_name,
         TestService {
             behavior,
             stopped: stopped.clone(),
@@ -106,11 +106,11 @@ async fn custom_services_use_independent_factories_and_duplicate_names_are_rejec
     register(&mut app, "guild", Behavior::Wait, &guild_stopped);
     register(&mut app, "mail", Behavior::Wait, &mail_stopped);
     assert!(matches!(
-        app.register("mail", TestService {
+        app.register_factory("mail", TestService {
             behavior: Behavior::FailStart,
             stopped: mail_stopped.clone(),
         }),
-        Err(RuntimeError::DuplicateService(name)) if name == "mail"
+        Err(RuntimeError::DuplicateFactory(name)) if name == "mail"
     ));
     let inspect = directory.clone();
     app.run_until(async move {
@@ -139,12 +139,49 @@ async fn custom_services_use_independent_factories_and_duplicate_names_are_rejec
 }
 
 #[tokio::test]
+async fn one_factory_creates_multiple_service_identities() {
+    let config = AppConfig::from_toml(
+        "node_id='local'\ndiscovery='memory'\n\
+         [[endpoints]]\nname='shared'\nprotocol='grpc'\naddress='127.0.0.1:7101'\n\
+         [[services]]\nservice_name='first'\nfactory='worker'\nendpoint='shared'\n\
+         [[services]]\nservice_name='second'\nfactory='worker'\nendpoint='shared'",
+    )
+    .unwrap();
+    let mut app = Application::new(config).unwrap();
+    let stopped = Arc::new(AtomicUsize::new(0));
+    register(&mut app, "worker", Behavior::Wait, &stopped);
+    let directory = app.directory();
+    let inspect = directory.clone();
+    app.run_until(async move {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while inspect.snapshot("second").unwrap().is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        for name in ["first", "second"] {
+            let nodes = inspect.snapshot(name).unwrap();
+            assert_eq!(nodes.len(), 1);
+            assert_eq!(nodes[0].service_name, name);
+        }
+        assert!(inspect.snapshot("worker").unwrap().is_empty());
+        Ok(())
+    })
+    .await
+    .unwrap();
+    assert_eq!(stopped.load(Ordering::SeqCst), 2);
+    assert!(directory.snapshot("first").unwrap().is_empty());
+    assert!(directory.snapshot("second").unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn services_are_registered_then_drained_on_shutdown() {
     let mut app = app();
     let directory = app.directory();
     let stopped = Arc::new(AtomicUsize::new(0));
-    for service_name in ["player-gateway", "player", "guild"] {
-        register(&mut app, service_name, Behavior::Wait, &stopped);
+    for factory_name in ["player-ingress", "player", "guild"] {
+        register(&mut app, factory_name, Behavior::Wait, &stopped);
     }
     let inspect = directory.clone();
     app.run_until(async move {
@@ -170,7 +207,7 @@ async fn startup_failure_rolls_back_started_services() {
     let mut app = app();
     let directory = app.directory();
     let stopped = Arc::new(AtomicUsize::new(0));
-    register(&mut app, "player-gateway", Behavior::Wait, &stopped);
+    register(&mut app, "player-ingress", Behavior::Wait, &stopped);
     register(&mut app, "player", Behavior::FailStart, &stopped);
     register(&mut app, "guild", Behavior::Wait, &stopped);
     assert!(matches!(
@@ -187,7 +224,7 @@ async fn unexpected_exit_and_panic_stop_the_process() {
         let mut app = app();
         let directory = app.directory();
         let stopped = Arc::new(AtomicUsize::new(0));
-        register(&mut app, "player-gateway", Behavior::Wait, &stopped);
+        register(&mut app, "player-ingress", Behavior::Wait, &stopped);
         register(&mut app, "player", behavior, &stopped);
         register(&mut app, "guild", Behavior::Wait, &stopped);
         let error = app.run_until(pending()).await.unwrap_err();
@@ -205,7 +242,7 @@ async fn shutdown_deadline_aborts_uncooperative_service() {
     let mut app = app();
     let directory = app.directory();
     let stopped = Arc::new(AtomicUsize::new(0));
-    register(&mut app, "player-gateway", Behavior::Hang, &stopped);
+    register(&mut app, "player-ingress", Behavior::Hang, &stopped);
     register(&mut app, "player", Behavior::Wait, &stopped);
     register(&mut app, "guild", Behavior::Wait, &stopped);
     let inspect = directory.clone();
@@ -231,7 +268,7 @@ async fn startup_deadline_and_signal_cancel_pending_initialization() {
         let mut app = app();
         let directory = app.directory();
         let stopped = Arc::new(AtomicUsize::new(0));
-        register(&mut app, "player-gateway", Behavior::Wait, &stopped);
+        register(&mut app, "player-ingress", Behavior::Wait, &stopped);
         register(&mut app, "player", Behavior::SlowStart, &stopped);
         register(&mut app, "guild", Behavior::Wait, &stopped);
         let inspect = directory.clone();
@@ -261,10 +298,10 @@ async fn missing_factory_is_rejected_before_any_service_starts() {
     let mut app = app();
     let directory = app.directory();
     let stopped = Arc::new(AtomicUsize::new(0));
-    register(&mut app, "player-gateway", Behavior::Wait, &stopped);
+    register(&mut app, "player-ingress", Behavior::Wait, &stopped);
     assert!(matches!(
         app.run_until(pending()).await,
-        Err(RuntimeError::MissingService(name)) if name == "player"
+        Err(RuntimeError::MissingFactory(name)) if name == "player"
     ));
     assert_empty(&directory);
 }
@@ -274,8 +311,8 @@ async fn dropping_run_future_removes_directory_entries() {
     let mut app = app();
     let directory = app.directory();
     let stopped = Arc::new(AtomicUsize::new(0));
-    for service_name in ["player-gateway", "player", "guild"] {
-        register(&mut app, service_name, Behavior::Wait, &stopped);
+    for factory_name in ["player-ingress", "player", "guild"] {
+        register(&mut app, factory_name, Behavior::Wait, &stopped);
     }
     let task = tokio::spawn(app.run_until(pending()));
     tokio::time::timeout(Duration::from_secs(2), async {

@@ -3,6 +3,50 @@
 use tok::{AppConfig, DiscoveryBackend};
 
 #[test]
+fn factory_is_optional_and_overrides_service_name() {
+    let local = include_str!("../../../examples/demo-game/config/local.toml");
+    let source = local.replace(
+        "service_name = \"player-gateway\"",
+        "service_name = \"entry-one\"",
+    );
+    let config = AppConfig::from_toml(&source).unwrap();
+    assert_eq!(config.services[0].service_name, "entry-one");
+    assert_eq!(
+        config.services[0].factory.as_deref(),
+        Some("player-ingress")
+    );
+    assert_eq!(config.services[0].factory_name(), "player-ingress");
+    assert!(config.services[1].factory.is_none());
+    assert_eq!(config.services[1].factory_name(), "player");
+    // 通用配置不固定工厂名称，由游戏注册自己的实现。
+    AppConfig::from_toml(&source.replace(
+        "factory = \"player-ingress\"",
+        "factory = \"custom-ingress\"",
+    ))
+    .unwrap();
+    assert!(
+        AppConfig::from_toml(&source.replace("factory = \"player-ingress\"", "factory = \"\""))
+            .is_err()
+    );
+    let implicit =
+        AppConfig::from_toml(&source.replace("factory = \"player-ingress\"", "")).unwrap();
+    assert!(implicit.services[0].factory.is_none());
+    assert_eq!(implicit.services[0].factory_name(), "entry-one");
+    assert!(
+        AppConfig::from_toml(
+            &source.replace("factory = \"player-ingress\"", "gateway = \"player\"")
+        )
+        .is_err()
+    );
+    assert!(AppConfig::from_toml(&source.replace("player-ingress", &"x".repeat(65))).is_err());
+    // 通用配置允许共享端点；具体接入组件决定是否必须独占。
+    AppConfig::from_toml(
+        &(source + "\n[[services]]\nservice_name='other'\nfactory='custom'\nendpoint='client'\n"),
+    )
+    .unwrap();
+}
+
+#[test]
 fn redis_ownership_is_explicit_independent_and_validated() {
     let local = include_str!("../../../examples/demo-game/config/local.toml");
     let source = local.replace(

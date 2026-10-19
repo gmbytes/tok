@@ -1,9 +1,9 @@
 //! 按玩家串行执行、重复登录收束及条件续租释放。
 
 use crate::{
-    ErrorCode, Result,
+    ErrorCode, GatewayContext, Result,
     player::{
-        GatewayConfig, PlayerExecutor,
+        PlayerConfig, PlayerExecutor,
         outbound::{self, Outbound, Sender},
     },
 };
@@ -143,27 +143,27 @@ struct Registry {
     process_id: u128,
 }
 
-/// 有界的玩家会话目录，由 PlayerGateway 构造并通过 sessions 获取。
+/// 有界的玩家会话目录，由 PlayerIngress 构造并通过 sessions 获取。
 ///
 /// 持有者不能直接创建未认证的 session；不同玩家的登录协调锁互相独立。
 #[derive(Clone)]
 pub struct SessionManager {
     registry: Arc<Registry>,
-    config: Arc<GatewayConfig>,
+    config: Arc<PlayerConfig>,
     owner: SessionOwner,
     ownership: Arc<dyn OwnershipStore>,
     executor: Arc<dyn PlayerExecutor>,
-    launches: mpsc::Sender<SessionTask>,
+    runtime: GatewayContext,
     shutdown: CancellationToken,
 }
 
 impl SessionManager {
     pub(crate) fn new(
-        config: Arc<GatewayConfig>,
+        config: Arc<PlayerConfig>,
         owner: SessionOwner,
         ownership: Arc<dyn OwnershipStore>,
         executor: Arc<dyn PlayerExecutor>,
-        launches: mpsc::Sender<SessionTask>,
+        runtime: GatewayContext,
         shutdown: CancellationToken,
     ) -> Self {
         Self {
@@ -179,7 +179,7 @@ impl SessionManager {
             owner,
             ownership,
             executor,
-            launches,
+            runtime,
             shutdown,
         }
     }
@@ -299,7 +299,11 @@ impl SessionManager {
             self.ownership.clone(),
             self.executor.clone(),
         );
-        let launched = tokio::select! { biased; _ = self.shutdown.cancelled() => false, result = self.launches.send(task) => result.is_ok() };
+        let task = Box::pin(async move {
+            task.await;
+            Ok(())
+        });
+        let launched = tokio::select! { biased; _ = self.shutdown.cancelled() => false, result = self.runtime.launch(task) => result.is_ok() };
         if !launched {
             let _ = tokio::time::timeout(timeout, self.ownership.release(active.ownership.clone()))
                 .await;
@@ -347,7 +351,7 @@ impl SessionManager {
 fn actor(
     active: Arc<Active>,
     mut queue: mpsc::Receiver<Job>,
-    config: Arc<GatewayConfig>,
+    config: Arc<PlayerConfig>,
     ownership: Arc<dyn OwnershipStore>,
     executor: Arc<dyn PlayerExecutor>,
 ) -> SessionTask {

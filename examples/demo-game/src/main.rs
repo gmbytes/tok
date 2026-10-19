@@ -38,6 +38,17 @@ async fn main() -> Result<(), Error> {
         println!("配置验证通过");
         return Ok(());
     }
+    let client_service = config
+        .services
+        .iter()
+        .find(|service| service.factory_name() == "player-ingress")
+        .map(|service| service.service_name.clone());
+    if args.client_smoke && client_service.is_none() {
+        return Err(std::io::Error::other(
+            "客户端 smoke 需要配置 factory='player-ingress' 的接入服务",
+        )
+        .into());
+    }
     let telemetry =
         Observability::init(&config.observability, "demo-game", &config.node_id).await?;
     tracing::info!(node_id = %config.node_id, discovery = ?config.discovery, services = config.services.len(), metrics_address = ?telemetry.metrics_address(), "进程启动");
@@ -57,14 +68,22 @@ async fn main() -> Result<(), Error> {
                                 .is_ok_and(|nodes| !nodes.is_empty())
                             || (args.client_smoke
                                 && !directory
-                                    .snapshot("player-gateway")
+                                    .snapshot(
+                                        client_service
+                                            .as_deref()
+                                            .expect("客户端 smoke 已校验接入组件"),
+                                    )
                                     .is_ok_and(|nodes| !nodes.is_empty()))
                         {
                             tokio::time::sleep(Duration::from_millis(20)).await;
                         }
                         if args.client_smoke {
                             let gateway = directory
-                                .snapshot("player-gateway")
+                                .snapshot(
+                                    client_service
+                                        .as_deref()
+                                        .expect("客户端 smoke 已校验接入组件"),
+                                )
                                 .map_err(std::io::Error::other)?
                                 .into_iter()
                                 .next()

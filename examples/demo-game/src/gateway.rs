@@ -4,10 +4,9 @@ use std::{sync::Arc, time::Duration};
 use tok::{
     core::coordination::{OwnershipStore, SessionOwner},
     gateway::{
-        ErrorCode,
+        ErrorCode, Gateway,
         player::{
-            AuthenticatedPlayer, AuthenticationTask, Authenticator, GatewayConfig, PlayerGateway,
-            RpcPlayerExecutor,
+            AuthenticatedPlayer, AuthenticationTask, Authenticator, PlayerConfig, RpcPlayerExecutor,
         },
     },
     infra::routing::RendezvousRouter,
@@ -32,18 +31,18 @@ impl Authenticator for DemoAuthenticator {
     }
 }
 
-/// 在初始化阶段绑定客户端端点，执行阶段监督连接和 session。
-pub struct GatewayFactory {
-    config: GatewayConfig,
+/// 初始化 TCP 监听并组装统一 Gateway 与 PlayerIngress。
+pub struct PlayerIngressFactory {
+    config: PlayerConfig,
     ownership: Arc<dyn OwnershipStore>,
 }
-impl GatewayFactory {
+impl PlayerIngressFactory {
     /// 配置经验证的开发网关，注入内存或共享 Redis 所有权。
-    pub fn new(config: GatewayConfig, ownership: Arc<dyn OwnershipStore>) -> Self {
+    pub fn new(config: PlayerConfig, ownership: Arc<dyn OwnershipStore>) -> Self {
         Self { config, ownership }
     }
 }
-impl ServiceFactory for GatewayFactory {
+impl ServiceFactory for PlayerIngressFactory {
     fn start(&self, context: ServiceContext) -> StartTask {
         let config = self.config.clone();
         let ownership = self.ownership.clone();
@@ -61,7 +60,7 @@ impl ServiceFactory for GatewayFactory {
                 Arc::new(RendezvousRouter::new(context.directory)),
                 clients,
             )?);
-            let gateway = PlayerGateway::new(
+            let gateway = Gateway::player(
                 config,
                 SessionOwner {
                     node_id: context.service.node_id,

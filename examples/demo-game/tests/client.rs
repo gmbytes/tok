@@ -13,13 +13,30 @@ use tok::{
 use tokio::net::{TcpListener, TcpStream};
 use tokio_util::sync::CancellationToken;
 
+#[test]
+fn demo_rejects_unavailable_unknown_or_incompatible_factories() {
+    let local = include_str!("../config/local.toml");
+    for source in [
+        local.replace(
+            "factory = \"player-ingress\"",
+            "factory = \"scene-ingress\"",
+        ),
+        local.replace("factory = \"player-ingress\"", "factory = \"unknown\""),
+        local.replace("factory = \"player-ingress\"", "factory = \"player\""),
+        local.replace("endpoint = \"internal-rpc\"", "endpoint = \"client\""),
+    ] {
+        let config = AppConfig::from_toml(&source).unwrap();
+        assert!(demo_game::application(config).is_err());
+    }
+}
+
 #[tokio::test]
 async fn client_to_rpc_reads_writes_queries_guild_and_maps_errors() {
     let client_reservation = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let rpc_reservation = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let client_address = client_reservation.local_addr().unwrap();
     let rpc_address = rpc_reservation.local_addr().unwrap();
-    let config = AppConfig::from_toml(&format!("node_id='local'\ndiscovery='memory'\n[[endpoints]]\nname='client'\nprotocol='tcp'\naddress='{client_address}'\n[[endpoints]]\nname='internal'\nprotocol='grpc'\naddress='{rpc_address}'\n[[services]]\nservice_name='player-gateway'\nendpoint='client'\n[[services]]\nservice_name='player'\nendpoint='internal'\n[[services]]\nservice_name='guild'\nendpoint='internal'")).unwrap();
+    let config = AppConfig::from_toml(&format!("node_id='local'\ndiscovery='memory'\n[[endpoints]]\nname='client'\nprotocol='tcp'\naddress='{client_address}'\n[[endpoints]]\nname='internal'\nprotocol='grpc'\naddress='{rpc_address}'\n[[services]]\nservice_name='custom-entry'\nfactory='player-ingress'\nendpoint='client'\n[[services]]\nservice_name='player'\nendpoint='internal'\n[[services]]\nservice_name='guild'\nendpoint='internal'")).unwrap();
     let app = demo_game::application(config).unwrap();
     let directory = app.directory();
     let stop = CancellationToken::new();
@@ -38,6 +55,7 @@ async fn client_to_rpc_reads_writes_queries_guild_and_maps_errors() {
     .await
     .unwrap();
     demo_game::client::smoke(client_address).await.unwrap();
+    assert_eq!(directory.snapshot("custom-entry").unwrap().len(), 1);
     let codec = FrameCodec::new(1_048_576, Duration::from_secs(2)).unwrap();
     let mut stream = TcpStream::connect(client_address).await.unwrap();
     codec

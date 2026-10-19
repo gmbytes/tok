@@ -1,5 +1,5 @@
-//! 可注入认证、路由与所有权后端的玩家 TCP 接入和串行 session。
-//! 场景网关、timer、短线恢复和安全适配按后续阶段实施。
+//! 统一 Gateway 运行框架，按组件组装 Player 接入及后续 Scene 接入。
+//! 当前提供 TCP、注入认证、路由和所有权后端；timer、恢复及场景组件后续实施。
 
 pub mod error;
 pub use error::{ErrorCode, GatewayError, Result};
@@ -8,6 +8,8 @@ pub use tok_rpc::protocol::client::v1 as protocol;
 
 pub mod codec;
 pub mod player;
+pub mod runtime;
 pub mod scene;
 pub mod security;
 pub mod transport;
+pub use runtime::{Gateway, GatewayConfig, GatewayContext, GatewayIngress, GatewayTask};

@@ -1,12 +1,21 @@
-//! 接入协议能力描述。初期 TCP 由 PlayerGateway 与 FrameCodec 组合，其他协议后续按选型加入。
+//! 统一 Gateway 的传输接入契约，初期提供 TCP 监听适配。
 
-/// 接入组件需要声明的逻辑通信能力。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct TransportCapabilities {
-    /// 是否支持关联业务请求与回应。
-    pub request_response: bool,
-    /// 是否支持服务端主动下行。
-    pub server_push: bool,
-    /// 是否支持逻辑会话恢复及消息接续。
-    pub resume: bool,
+use std::{future::Future, pin::Pin};
+use tokio::net::{TcpListener, TcpStream};
+
+/// 等待一项接入的异步操作，必须可取消且不能遗留后台任务。
+pub type AcceptTask<'a, C> = Pin<Box<dyn Future<Output = std::io::Result<C>> + Send + 'a>>;
+
+/// 监听接入适配；连接对象由组件解释，不强制其他协议套用 TCP socket。
+pub trait GatewayTransport: Send {
+    /// 每次接入交给组件处理的对象。
+    type Connection: Send + 'static;
+    /// 等待一次接入，取消后应可继续等待，不能丢失已交付给调用方的连接。
+    fn accept(&mut self) -> AcceptTask<'_, Self::Connection>;
+}
+impl GatewayTransport for TcpListener {
+    type Connection = TcpStream;
+    fn accept(&mut self) -> AcceptTask<'_, TcpStream> {
+        Box::pin(async move { TcpListener::accept(self).await.map(|(stream, _)| stream) })
+    }
 }
