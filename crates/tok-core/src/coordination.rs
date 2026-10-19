@@ -26,6 +26,10 @@ pub struct SessionOwnership {
 }
 
 /// 原子获取、续租与条件释放。读取所有权不等同于持有租约。
+///
+/// 这是 session 驱动权租约，不是任意业务写入的严格互斥保证。续租失败后停止新调用；
+/// 已发出的 RPC 在超时或所有权变化后仍可能运行，不默认要求每次存储写入校验 fencing token。
+/// 后续存储封装按调用期限和本地已知租约期限做尽力检查，检查与实际写入间的竞态由系统约定接受。
 pub trait OwnershipStore: Send + Sync {
     /// 读取未过期的所有权；查询结果不能代替获取或续租。
     fn lookup(&self, player_id: &str) -> CoordinationTask<'_, Option<SessionOwnership>>;

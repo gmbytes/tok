@@ -2,7 +2,7 @@
 
 use std::{sync::Arc, time::Duration};
 use tok::{
-    core::coordination::SessionOwner,
+    core::coordination::{OwnershipStore, SessionOwner},
     gateway::{
         ErrorCode,
         player::{
@@ -10,7 +10,7 @@ use tok::{
             RpcPlayerExecutor,
         },
     },
-    infra::{ownership::MemoryOwnership, routing::RendezvousRouter},
+    infra::routing::RendezvousRouter,
     rpc::RpcClients,
     runtime::{ServiceContext, ServiceFactory, ServiceTask, StartTask},
 };
@@ -35,11 +35,11 @@ impl Authenticator for DemoAuthenticator {
 /// 在初始化阶段绑定客户端端点，执行阶段监督连接和 session。
 pub struct GatewayFactory {
     config: GatewayConfig,
-    ownership: Arc<MemoryOwnership>,
+    ownership: Arc<dyn OwnershipStore>,
 }
 impl GatewayFactory {
-    /// 配置经验证的开发网关，所有权实现只保证此进程内唯一。
-    pub fn new(config: GatewayConfig, ownership: Arc<MemoryOwnership>) -> Self {
+    /// 配置经验证的开发网关，注入内存或共享 Redis 所有权。
+    pub fn new(config: GatewayConfig, ownership: Arc<dyn OwnershipStore>) -> Self {
         Self { config, ownership }
     }
 }

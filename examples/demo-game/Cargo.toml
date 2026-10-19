@@ -18,6 +18,7 @@ tonic-prost.workspace = true
 [dev-dependencies]
 tokio-util.workspace = true
 uuid.workspace = true
+redis.workspace = true
 
 [build-dependencies]
 prost-build.workspace = true

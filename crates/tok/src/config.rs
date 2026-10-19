@@ -17,6 +17,17 @@ pub enum DiscoveryBackend {
     Kubernetes,
 }
 
+/// session 所有权后端，独立于服务发现选择。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum OwnershipBackend {
+    /// 默认单进程内存所有权。
+    #[default]
+    Memory,
+    /// 多网关共享 Redis 所有权，跨网关登录当前仍拒绝接管。
+    Redis,
+}
+
 /// 业务服务身份及其端点引用，不决定业务执行或加锁策略。
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -53,6 +64,12 @@ pub struct AppConfig {
     /// 仅在 discovery=redis 时配置的开发发现后端。
     #[serde(default)]
     pub redis_discovery: Option<tok_infra::discovery::redis::RedisDiscoveryConfig>,
+    /// session 所有权后端；省略时使用 Memory，选择不随 discovery 隐式变化。
+    #[serde(default)]
+    pub ownership: OwnershipBackend,
+    /// ownership=redis 时必需的共享所有权配置。
+    #[serde(default)]
+    pub redis_ownership: Option<tok_infra::ownership::redis::RedisOwnershipConfig>,
     /// 节点声明的端点列表，实际监听需显式组装。
     pub endpoints: Vec<EndpointConfig>,
     /// 本进程启用的业务服务与端点绑定。
@@ -76,6 +93,27 @@ impl AppConfig {
 
     /// 验证身份、端点和服务绑定，不连接外部依赖。
     pub fn validate(&self) -> Result<()> {
+        match (self.ownership, &self.redis_ownership) {
+            (OwnershipBackend::Redis, Some(redis)) => {
+                redis.validate()?;
+                if redis.operation_timeout_ms > self.player_gateway.rpc_timeout_ms {
+                    return Err(Error::InvalidConfig(
+                        "所有权操作期限不能大于网关调用期限".into(),
+                    ));
+                }
+            }
+            (OwnershipBackend::Redis, None) => {
+                return Err(Error::InvalidConfig(
+                    "Redis 所有权需要 redis_ownership 配置".into(),
+                ));
+            }
+            (_, Some(_)) => {
+                return Err(Error::InvalidConfig(
+                    "redis_ownership 仅适用于 Redis 所有权".into(),
+                ));
+            }
+            _ => {}
+        }
         match (self.discovery, &self.redis_discovery) {
             (DiscoveryBackend::Redis, Some(redis)) => redis.validate()?,
             (DiscoveryBackend::Redis, None) => {

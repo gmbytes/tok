@@ -51,7 +51,15 @@ redis-test:
 
 # 启动独立游戏和网关进程验证跨进程调用、注销、重启与崩溃过期
 redis-smoke:
-    cargo test -p demo-game --test redis_discovery --locked -- --ignored
+    cargo test -p demo-game --test redis_discovery --locked -- --ignored two_process
+
+# 验证 Redis session 所有权的竞争、条件操作、过期与 epoch 精度
+ownership-test:
+    cargo test -p tok-infra --test redis_ownership --locked -- --ignored
+
+# 验证独立网关进程共享所有权、租约丢失和崩溃过期
+ownership-smoke:
+    cargo test -p demo-game --test redis_discovery --locked -- --ignored ownership
 
 # 验证指定服务配置
 config-check config="examples/demo-game/config/local.toml":

@@ -2,7 +2,7 @@
 
 ## 实施目标与范围
 
-当前项目已接通单进程局外请求链路：客户端登录后，经串行 session 调用 player，收到业务响应，并可由 player 调用 guild。下一步实现 timer、同网关恢复及多网关所有权和交接，再推进跨节点事件、Kubernetes 部署和场景接入。
+当前项目已接通局外请求链路，并提供 Redis 开发发现与共享 session 所有权：客户端登录后，经串行 session 调用 player，收到业务响应，并可由 player 调用 guild。下一步实现 timer、同网关恢复和跨网关交接，再推进跨节点事件、Kubernetes 部署和场景接入。
 
 本大纲以 2026-10-12 的代码为基线，遵循 [设计文档](design.md)。各阶段的技术选择属于实施建议；已经确定的执行语义继续以设计文档为准。阶段完成以可运行示例和验收结果为依据，不以模块或接口存在为依据。
 
@@ -17,7 +17,7 @@
 | 内部 RPC | 共享监听、强类型分发、连接复用、超时不重试及追踪传播已验证 | 上下文字段校验不代替内部调用身份认证 |
 | 服务发现与路由 | 内存与 Redis 开发快照、合并通知、后端注入和稳定 bid 选点已验证 | Channel 失效入口为显式调用；生产监听与自动失效策略随生产发现补齐 |
 | 并发和过载 | 用户 Tower 并发限制、session 队列满快速失败经测试，连接与下行容量有界 | 未默认配置 RPC 过载拒绝层；生产容量仍需负载验证 |
-| 协调与会话 | 串行 session、有界内存所有权、epoch 比较、条件续租释放及重复登录已验证 | 无跨进程唯一性；Redis 与交接在第三批 |
+| 协调与会话 | 串行 session、Memory 与 Redis 所有权、epoch 比较、条件续租释放、双网关竞争及失效收束已验证 | Cluster 客户端与完整交接待实现；接受超时后远端继续执行的竞态窗口 |
 | 开发检查 | Windows 常规检查、文档、smoke 和 release 构建通过 | Linux 以对应 CI 的实际运行结果为准，不能由本地 Windows 验证替代 |
 | 客户端协议 | TCP 分帧、控制帧、错误映射与认证身份绑定已实现 | ack、补发、timer 调度和恢复在第三批 |
 
@@ -33,7 +33,7 @@
 | 发现 | [MemoryDirectory](../crates/tok-infra/src/discovery/memory.rs) 支持单进程；[RedisDirectory](../crates/tok-infra/src/discovery/redis.rs) 提供多进程开发租约注册、条件撤销、本地缓存与合并通知 | Kubernetes 本地缓存与资源映射；Redis 发现不代替 session 所有权 |
 | 协议与 RPC | [tok-rpc](../crates/tok-rpc/src/lib.rs) 提供 PlayerRpc、BusinessRpc、强类型分发、连接复用、超时、追踪传播和 TowerHandler | 配置式中间件、锁 Layer 及生产调用身份认证 |
 | 网关 | [PlayerGateway](../crates/tok-gateway/src/player/gateway.rs) 接通 TCP、注入认证、串行 session、所有权续租、下行通知和任务监督 | timer、下行缓存与恢复、生产安全及 scene 接入 |
-| 路由与 Redis | bid rendezvous 路由、所有权与锁契约、有界内存所有权已实现 | Redis 跨进程所有权、租约故障处理与请求级锁后端 |
+| 路由与 Redis | bid rendezvous 路由、Memory 与 Redis 所有权、条件续租释放及本地时间预算检查已实现 | Cluster 拓扑与故障切换适配、交接及请求级锁后端 |
 | 事件 | [tok-events](../crates/tok-events/src/lib.rs) 已有 DeliveryPolicy 和 EventTarget | 同步本地分发、NATS 后端、订阅、去重及交接处理 |
 | 可观测 | 日志动态过滤、Prometheus、OTLP、强追踪规则、RPC metadata 传播及调用指标已实现 | 事件 headers 传播及 session、timer 指标 |
 | 示例与部署 | player 与 guild 共享内部 gRPC；`just client-smoke` 经真实 TCP 验证登录、状态读写和 player 调用 guild | 容器构建和可部署清单 |
@@ -54,9 +54,24 @@
 - 提供 redis-game.toml 与 redis-gateway.toml；just redis-test 和 just redis-smoke 显式运行真实 Redis 测试，常规测试不依赖外部服务。
 - 独立游戏与网关进程验证 TCP 登录、状态读写、player 到 guild 调用、正常注销、换地址重启和崩溃过期。CI 增加独立 Linux Redis 集成任务，本地结果不能代替 Linux CI 实际运行结果。
 
-开发 Redis 仅负责 discovery；示例状态及 session 所有权仍在进程内，不能据此宣称已具备多网关全局唯一性。
+该次开发发现补充仅负责 discovery，不承担 session 所有权；后续共享所有权补充见下文。
 
 2026-10-19 Windows 本地验证：Rust 1.99.0、just 1.58.0，`just verify` 通过 52 项常规测试与 3 项文档测试；使用独立 Redis 7.4 容器显式通过 2 项后端集成测试和 1 项双进程 smoke。中文 rustdoc、原有三类 smoke、两份 Redis 开发配置与两份生产配置校验、release 构建均通过。测试完成后独立 Redis 数据库无遗留注册记录，临时容器已清理。Linux 集成任务已配置，运行结果以 CI 为准。
+
+## 共享 Redis 所有权与系统异常边界
+
+RedisOwnership 已实现 OwnershipStore 的原子获取、expected_epoch 接管、条件续租和释放；ownership 与 discovery 独立配置，默认 Memory，redis-gateway.toml 显式启用 Redis。
+按玩家保留不过期 epoch 计数器，租约 Hash 使用 TTL；Lua 按字符串校验身份与代次，覆盖 2^53 相邻整数和有符号 64 位计数器耗尽。
+租约与计数器使用同一 hash tag，为 Cluster 共槽预留；当前客户端连接单 Redis 主端点，Cluster 拓扑与故障切换适配尚未实现。
+
+网关仍拒绝抢占其他网关的活动租约，释放或过期后才可重新登录。独立网关进程验证竞争拒绝、旧入口续租失败关闭、条件释放保护新所有者以及崩溃后过期。
+已实现基础后端不代表第三批完成：timer、下行序列、恢复及跨网关交接仍待推进，请求级锁是另一套契约。
+
+系统接受有限的竞态窗口：调用期限与本地已知租约期限做尽力判断，续租失败或剩余预算不足时停止新驱动，不自动重试，也不强制逐次远程校验或存储 fencing。
+RPC 超时后远端仍可能执行，存储层落地时统一加入写入前期限检查；业务按明确需求增加幂等、条件更新或事务。Redis 状态回退不作为绝对互斥保证。
+验证入口为 just ownership-test 与 just ownership-smoke，常规测试不依赖 Redis；CI 独立 Redis 任务包含这些检查。
+
+2026-10-19 Windows 验证：Rust 1.99.0 与 just 1.58.0，55 项常规测试、3 项文档测试通过；独立 Redis 7.4 容器通过 7 项集成测试（发现后端 2 项、发现双进程 1 项、所有权后端 3 项、独立网关所有权 1 项）。格式、clippy、中文 rustdoc、原有三类 smoke、两份 Redis 开发配置及两份生产配置校验、release 构建均通过。Linux 以 CI 实际结果为准。
 
 ## 设计约束与实施依赖
 
@@ -136,6 +151,8 @@
 
 **目标：** 将单进程串行前提扩展到多网关部署。
 
+当前已完成 Redis 所有权基础后端、双网关竞争拒绝和失效入口收束；本阶段的 Cluster 客户端、完整交接和请求级锁仍未完成。
+
 - 实现 Redis 所有权记录、原子获取与 epoch 更新、续租、条件释放和旧所有者失效；明确 Redis Cluster 键布局与原子操作范围。
 - session 开始业务执行前检查所有权有效性。Redis 不可达、续租失败或租约不确定时停止新的有效驱动，避免继续假定自己拥有会话。
 - 设计并实现交接状态机与内部 RPC：旧网关停止接收新业务并收束在途调用，导出下行缓存、确认位置、timer 状态和必要订阅信息，新网关取得所有权后接续驱动。
@@ -143,7 +160,7 @@
 - 实现 Redis 请求级锁与注入后端的 Tower Layer；按服务命名空间和 bid 加锁，确定获取期限、租约、续租与条件释放规则。
 - 锁租约丢失和 RPC 超时都不能视为业务回滚；业务写入需要更强保证时使用业务版本或其他校验，具体持久化方案另行设计。
 
-**验收：** 双网关竞争、重复登录、旧 epoch、Redis 故障、旧网关宕机及交接中断均不会让失效 session 继续开启有效调用；正常交接保留序列与 timer，不丢交接边界内的下行。请求级锁验证同 bid 互斥、不同 bid 并发和旧持有者不能释放新锁。
+**验收：** 覆盖双网关竞争、重复登录、旧 epoch、Redis 故障、旧网关宕机及交接中断；检测到租约失效或预算不足后停止新驱动，已发出或检查后暂停的调用遵循约定的竞态边界。正常交接保留序列与 timer，不丢交接边界内的下行。请求级锁验证同 bid 的正常路径互斥、不同 bid 并发和旧持有者不能释放新锁，不宣称异常路径下绝对安全。
 
 ## 阶段六 本地事件与 NATS 事件
 

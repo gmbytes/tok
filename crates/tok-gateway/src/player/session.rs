@@ -376,7 +376,11 @@ fn actor(
                         outbound::failed(&request, ErrorCode::InvalidRequest)
                     } else {
                         last_request = request.request_id;
-                        if !matches!(tokio::time::timeout(timeout, ownership.renew(active.ownership.clone(), ttl)).await, Ok(Ok(()))) {
+                        let renew_started = tokio::time::Instant::now();
+                        let renewed = matches!(tokio::time::timeout(timeout, ownership.renew(active.ownership.clone(), ttl)).await, Ok(Ok(())));
+                        // 以续租开始时刻作本地保守下界；已不足一次调用预算时停止新驱动。
+                        // 检查后仍可能发生进程暂停，不把这层时间保护视为严格 fencing。
+                        if !renewed || renew_started.elapsed().saturating_add(timeout) >= ttl {
                             active.cancel.cancel();
                             outbound::failed(&request, ErrorCode::SessionClosed)
                         } else if active.cancel.is_cancelled() {

@@ -191,7 +191,58 @@ Channel 缓存有界，节点和地址相同的服务复用连接；节点变更
 [`infra::ownership::MemoryOwnership`] 是有界的单进程所有权后端，实现
 [`core::coordination::OwnershipStore`] 的条件获取、续租与释放。
 接管必须匹配旧 epoch，旧持有者不能续租或释放新所有权。
-其 epoch 仅在后端存活期间有效，不能用于跨进程或进程重启后的协调；生产 Redis 实现仍待后续实现。
+其 epoch 仅在后端存活期间有效，不能用于跨进程或进程重启后的协调；跨网关共享所有权使用下面的 Redis 后端。
+
+## Redis session 所有权与超时边界
+
+[`infra::ownership::redis::RedisOwnership`] 实现 [`core::coordination::OwnershipStore`]，
+提供原子获取、显式 expected_epoch 接管、条件续租和释放。`ownership` 与 `discovery` 独立选择，默认均可使用 Memory：
+
+```toml
+node_id = "dev-gateway-1"
+discovery = "redis"
+ownership = "redis"
+
+[redis_discovery]
+url = "redis://127.0.0.1:6379/"
+namespace = "demo-dev"
+
+[redis_ownership]
+url = "redis://127.0.0.1:6379/"
+namespace = "demo-dev"
+operation_timeout_ms = 2000
+```
+
+以上是配置头部，继续追加端点和服务声明。示例 redis-gateway.toml 已显式启用共享所有权，redis-game.toml 无需持有玩家租约。
+增加网关进程时复制网关配置，修改 node_id、监听及发布端口；所有网关必须共享同一所有权 URL、数据库和 namespace。
+[`infra::ownership::redis::RedisOwnershipConfig`] 验证 namespace 和操作期限，Debug 隐藏 URL。
+单次操作期限为正且不超过 60 秒，也不能超过网关 rpc_timeout_ms；租期与续租间隔仍由 player_gateway 配置。
+同一配置的持有者必须使用相同身份规范化规则，Redis 后端不自行转换玩家 ID。
+
+每个玩家有两个键：`tok:ownership:{namespace:<玩家 ID 十六进制>}:lease` 和 `:epoch`。
+租约 Hash 保存 session_id、node_id、service_name、epoch 并设置 TTL，续租和释放比较全部字段。
+epoch 计数器不自动过期，释放、过期或进程重启后继续递增；按账号规模规划计数器容量，不单独淘汰仍会使用的计数器。
+Lua 使用 INCR 后 GET 读取十进制字符串，比较和返回均不经过 Lua number，避免超过 2^53 失真。
+计数器使用 Redis 有符号 64 位整数，耗尽时操作失败，不回绕。
+两个键使用同一 hash tag，为 Redis Cluster 共槽预留；当前客户端连接单 Redis 主端点，Cluster 拓扑和 MOVED/ASK 适配尚未实现。
+Redis 持久化或故障切换导致状态回退仍属于系统异常边界。
+
+当前网关对其他网关仍持有的租约返回 Unavailable，不自动抢占。只有正常释放或租约过期后，另一个网关才能建立新 session。
+后端的 expected_epoch 接管是交接协议的基础能力，调用方必须先收束旧入口，不能把直接接管当成已完成交接。
+续租失败、后端不可达或调用期限耗尽时停止当前 session 的新业务；旧入口的条件释放不会删除新所有权。
+连接断开与应用正常退出会条件释放，进程崩溃后由 TTL 过期。超时的 Redis 操作可能已提交，结果未知，不自动重试，遗留租约等待过期。
+
+系统采用有限的时间保护：Redis 获取和续租从操作开始计时，明显超过租期的回应不视为有效；
+session 从续租开始时刻计算本地保守下界，剩余租期不足一次 RPC 预算时不发起新调用。进程内使用单调时钟，不比较不同机器的墙上时间。
+RPC 超时不表示远端 handler 已停止或写入已回滚。时间检查通过后仍可能暂停、延迟或过期，系统明确接受检查与实际副作用之间的竞态窗口。
+不默认增加逐次远程校验或强制每次存储写入携带 fencing token。
+存储层尚未实现；后续存储封装在写入前检查调用期限和本地已知租约期限，已超时或有效性不确定时拒绝写入，作为尽力保护。
+资产扣减等业务按实际需要选择幂等键、条件更新或事务，不由框架强制统一增加策略。
+
+`just ownership-test` 显式验证真实 Redis 竞争、完整身份校验、过期、重启代次、2^53 相邻整数和计数器耗尽。
+`just ownership-smoke` 启动独立游戏及两个网关进程，验证竞争拒绝、释放后登录、租约丢失关闭、崩溃后过期和旧代次失效。
+测试使用 TOK_TEST_REDIS_URL，默认本机 6379；常规测试不依赖 Redis。
+timer、消息恢复、跨网关交接和请求级 LockBackend 实现仍按后续阶段推进。
 
 ## Redis 多进程开发发现
 
@@ -258,7 +309,7 @@ namespace 最长 64 字节，只允许 ASCII 字母、数字、短横线和下�
 两者默认使用本机 Redis 6379，可用 `TOK_TEST_REDIS_URL` 覆盖；每次使用唯一 namespace，不清空数据库。
 这些测试需要显式运行，常规 `just verify` 不依赖 Redis；CI 增加独立 Linux Redis 集成任务。
 
-Redis 发现只解决服务定位。示例玩家状态和 session 所有权仍保存在进程内存；多网关竞争与交接需要后续 Redis 所有权实现。
+Redis 发现只解决服务定位。玩家状态仍在进程内存，session 所有权默认 Memory，可独立选择上述 Redis 实现；跨网关交接尚未实现。
 生产发现继续按 Kubernetes 设计推进。
 
 ## 客户端 TCP 与玩家 session
@@ -363,7 +414,7 @@ renew_interval_ms = 10000
 | [`observability`] | 日志、指标与追踪 |
 
 目前示例监听共享内部 gRPC 和客户端 TCP 端点，已接通注入认证、有界串行 session、状态读写及服务组合。
-Redis 开发发现已接通；timer 调度、恢复、Redis 所有权和 NATS 尚未接通。
+Redis 开发发现和 session 所有权已接通；timer 调度、恢复、跨网关交接和 NATS 尚未接通。
 配置端点地址本身不启动监听，内部端点需显式注册 RpcEndpoint，TCP 由网关工厂绑定。
 Kubernetes 配置可校验，运行该发现后端仍会明确报错。
 游戏业务协议和 handler 由游戏定义，框架组件不反向依赖具体游戏。

@@ -39,7 +39,7 @@ jobs:
         run: just config-check examples/demo-game/config/game.toml
 
   redis-integration:
-    name: Redis 开发发现与双进程集成
+    name: Redis 开发发现与共享所有权集成
     runs-on: ubuntu-latest
     services:
       redis:
@@ -61,3 +61,7 @@ jobs:
         run: just redis-test
       - name: 验证游戏与网关双进程
         run: just redis-smoke
+      - name: 验证 Redis 会话所有权
+        run: just ownership-test
+      - name: 验证独立网关共享所有权
+        run: just ownership-smoke

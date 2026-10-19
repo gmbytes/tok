@@ -1,4 +1,6 @@
-//! 单进程开发用所有权后端。生产 Redis 后端尚未实现。
+//! session 所有权后端：单进程 Memory 与跨进程 Redis 租约。
+
+pub mod redis;
 
 use std::{
     collections::BTreeMap,

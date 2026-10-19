@@ -5,13 +5,13 @@ use std::{
     collections::BTreeMap,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::Duration,
 };
 use tok_core::{
     LogicalMessage, MessageKind, SessionIdentity,
-    coordination::{OwnershipStore, SessionOwner},
+    coordination::{CoordinationTask, OwnershipStore, SessionOwner, SessionOwnership},
 };
 use tok_gateway::{
     ErrorCode,
@@ -113,6 +113,12 @@ struct Fixture {
 }
 impl Fixture {
     async fn new(config: GatewayConfig) -> Self {
+        Self::with_backend(config, |memory| memory).await
+    }
+    async fn with_backend(
+        config: GatewayConfig,
+        backend: impl FnOnce(Arc<MemoryOwnership>) -> Arc<dyn OwnershipStore>,
+    ) -> Self {
         let (started, receiver) = mpsc::unbounded_channel();
         let tracker = Arc::new(Tracker {
             calls: AtomicUsize::new(0),
@@ -130,7 +136,7 @@ impl Fixture {
                 service_name: "player-gateway".into(),
             },
             Arc::new(Auth),
-            ownership.clone(),
+            backend(ownership.clone()),
             Arc::new(Executor(tracker.clone())),
         )
         .unwrap();
@@ -176,6 +182,87 @@ impl Fixture {
             .unwrap();
         TcpListener::bind(self.address).await.unwrap();
     }
+}
+
+struct DelayedRenew {
+    memory: Arc<MemoryOwnership>,
+    delay_once: Arc<AtomicBool>,
+    renewals: Arc<AtomicUsize>,
+}
+impl OwnershipStore for DelayedRenew {
+    fn lookup(&self, player: &str) -> CoordinationTask<'_, Option<SessionOwnership>> {
+        self.memory.lookup(player)
+    }
+    fn acquire(
+        &self,
+        player: String,
+        session: String,
+        owner: SessionOwner,
+        expected: Option<u64>,
+        ttl: Duration,
+    ) -> CoordinationTask<'_, SessionOwnership> {
+        self.memory.acquire(player, session, owner, expected, ttl)
+    }
+    fn renew(&self, record: SessionOwnership, ttl: Duration) -> CoordinationTask<'_, ()> {
+        Box::pin(async move {
+            self.memory.renew(record, ttl).await?;
+            self.renewals.fetch_add(1, Ordering::SeqCst);
+            if self.delay_once.swap(false, Ordering::SeqCst) {
+                // 模拟续租已完成后进程暂停；不 yield 的工作不能靠 Tokio timeout 抢占。
+                std::thread::sleep(Duration::from_millis(350));
+            }
+            Ok(())
+        })
+    }
+    fn release(&self, record: SessionOwnership) -> CoordinationTask<'_, bool> {
+        self.memory.release(record)
+    }
+}
+
+#[tokio::test]
+async fn known_exhausted_lease_budget_rejects_work_after_process_pause() {
+    let delay_once = Arc::new(AtomicBool::new(false));
+    let renewals = Arc::new(AtomicUsize::new(0));
+    let delay = delay_once.clone();
+    let renew_count = renewals.clone();
+    let fixture = Fixture::with_backend(
+        GatewayConfig {
+            rpc_timeout_ms: 20,
+            ownership_ttl_ms: 300,
+            renew_interval_ms: 100,
+            ..Default::default()
+        },
+        move |memory| {
+            Arc::new(DelayedRenew {
+                memory,
+                delay_once: delay,
+                renewals: renew_count,
+            })
+        },
+    )
+    .await;
+    let mut client = fixture.connect().await;
+    assert_eq!(client.login(1, "1").await.error_code, 0);
+    while renewals.load(Ordering::SeqCst) == 0 {
+        tokio::task::yield_now().await;
+    }
+    let session = fixture.sessions.session("1").unwrap().unwrap();
+    delay_once.store(true, Ordering::SeqCst);
+    let response = session
+        .try_request(LogicalMessage {
+            kind: MessageKind::Request,
+            request_id: 2,
+            message_id: 1,
+            error_code: 0,
+            server_seq: None,
+            body: Vec::new(),
+        })
+        .unwrap()
+        .await;
+    assert_eq!(response.error_code, ErrorCode::SessionClosed as u32);
+    assert_eq!(fixture.tracker.calls.load(Ordering::SeqCst), 0);
+    assert!(session.cancellation().is_cancelled());
+    fixture.finish().await;
 }
 impl Drop for Fixture {
     fn drop(&mut self) {

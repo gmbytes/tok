@@ -270,6 +270,7 @@ dependencies = [
  "prost",
  "prost-build",
  "protoc-bin-vendored",
+ "redis",
  "tok",
  "tokio",
  "tokio-util",

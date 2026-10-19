@@ -17,7 +17,7 @@ workspace 启用 `missing_docs = "deny"`，对外公开的模块、类型、字�
 
 框架采用 Cargo workspace，库位于 `crates/`，具体游戏组装最终二进制。`examples/demo-game` 展示游戏协议、服务配置和内存服务目录。
 
-当前已提供配置校验、内存目录、Redis 开发发现与变更订阅、bid 路由、单进程内存所有权、protobuf 生成、服务生命周期、可观测组件及共享内部 gRPC 端点。PlayerGateway 提供 TCP 登录、认证扩展点、有界串行 session 和通知入口。示例支持玩家状态读写及 player 调用 guild；按 Ctrl+C 优雅退出。timer、断线恢复、Redis 所有权、Kubernetes 发现和 NATS 消费按后续批次推进。
+当前已提供配置校验、内存目录、Redis 开发发现与变更订阅、bid 路由、内存与 Redis session 所有权、protobuf 生成、服务生命周期、可观测组件及共享内部 gRPC 端点。PlayerGateway 提供 TCP 登录、认证扩展点、有界串行 session 和通知入口。示例支持玩家状态读写及 player 调用 guild；按 Ctrl+C 优雅退出。timer、断线恢复、跨网关交接、Kubernetes 发现和 NATS 消费按后续批次推进。
 
 网关统一命名为 `PlayerGateway` 和 `SceneGateway`，分别对接 player 与场景服务。`tok-gateway` 中的 `player/` 放置玩家逻辑 session、timer、下行补发及重连交接，`scene/` 放置场景接入和场景连接 session；`transport/`、`security/`、`codec/` 提供按需组合的接入组件。示例玩家网关服务名为 `player-gateway`。
 
@@ -45,7 +45,7 @@ just build
 
 示例凭证为 `demo:<正整数玩家 ID>`，只用于本地开发。TCP 使用 4 字节大端长度和 protobuf Frame，协议及状态机见 [客户端与 session 约定](docs/client-session.md)。身份以认证后的 session 为准，同玩家请求串行，不同玩家可以并发。队列满返回明确错误；重复登录先关闭旧入口并收束旧调用，断线立即释放会话。完整帧的读写期限也包含空闲等待，本批尚无心跳和断线宽限期。
 
-`[player_gateway]` 配置连接、session、执行队列、下行缓冲、帧长度与期限；默认值见 local.toml。此批为明文 TCP 和单进程内存协调，示例状态是有界内存数据，生产认证、安全、持久化和跨网关恢复按后续阶段实施。
+`[player_gateway]` 配置连接、session、执行队列、下行缓冲、帧长度与期限；默认值见 local.toml。示例采用明文 TCP，默认 Memory 所有权，可显式选择共享 Redis 协调；玩家状态是有界内存数据，生产认证、安全、持久化和跨网关恢复按后续阶段实施。
 
 游戏通过 `ServiceFactory` 注册各类服务，通过 `Application::register_rpc_endpoint` 显式注册共享 gRPC 端点。应用先绑定监听，业务初始化完成后才加入目录并开启对应的就绪入口；未就绪调用返回 Unavailable。监听或服务启动失败、超时、崩溃或提前结束会触发全进程清理，撤销目录并通知任务退出。服务在取消后负责清理自己的资源，超出退出期限会中止任务。
 
@@ -98,7 +98,14 @@ cargo run -p demo-game --locked -- --config examples/demo-game/config/redis-gate
 测试默认连接 `redis://127.0.0.1:6379/`，可通过环境变量 `TOK_TEST_REDIS_URL` 覆盖；常规 `just verify` 不依赖 Redis。CI 增加独立 Linux Redis 集成任务。
 详细参数及错误边界见 Rust 用户指南中的“Redis 多进程开发发现”。
 
-Redis discovery 只共享服务地址。示例玩家状态和 session 所有权仍是进程内存；多网关玩家竞争与跨网关交接需第三批的共享所有权实现。
+Redis discovery 只共享服务地址。session 所有权独立选择 `ownership = "memory"`（默认）或 `"redis"`。
+redis-gateway.toml 已配置 `ownership = "redis"` 及 `[redis_ownership]`；多个网关共享相同 Redis URL、数据库和 namespace，节点身份及监听端口各不相同。
+Redis 所有权提供原子获取、epoch 更新、条件续租和释放；活动租约被其他网关持有时拒绝登录，释放或过期后才能建立新会话，跨网关交接仍待实现。
+`just ownership-test` 验证竞争、旧身份拒绝、过期与 epoch 精度；`just ownership-smoke` 使用两个独立网关进程验证共享所有权和失效收束。
+
+租约和 RPC 均有期限且不自动重试。发起业务前根据续租开始时刻检查剩余租期，Redis 获取与续租也拒绝明显超过租期的迟到回应。
+超时不表示远端业务停止或回滚，系统接受检查后暂停、延迟导致的竞态窗口，不默认对每次写入增加远程校验或 fencing。
+后续存储封装将按调用期限和本地已知租约期限做尽力检查；当前示例玩家状态仍在内存，timer、恢复及交接按后续阶段实施。
 
 ## 日志、指标与追踪
 

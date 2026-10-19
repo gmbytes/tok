@@ -28,12 +28,19 @@ impl ServiceFactory for LifecycleService {
     }
 }
 
-/// 组装客户端 TCP 网关和共享内部 gRPC 服务，使用单进程开发所有权。
+/// 组装客户端 TCP 网关和共享内部 gRPC 服务，按配置选择内存或 Redis 所有权。
 pub fn application(config: AppConfig) -> Result<Application, Error> {
     let mut app = Application::new(config.clone())?;
-    let ownership = Arc::new(tok::infra::ownership::MemoryOwnership::new(
-        config.player_gateway.max_sessions,
-    )?);
+    let ownership: Arc<dyn tok::core::coordination::OwnershipStore> = match config.ownership {
+        tok::OwnershipBackend::Memory => Arc::new(tok::infra::ownership::MemoryOwnership::new(
+            config.player_gateway.max_sessions,
+        )?),
+        tok::OwnershipBackend::Redis => {
+            Arc::new(tok::infra::ownership::redis::RedisOwnership::new(
+                config.redis_ownership.clone().expect("配置已校验"),
+            )?)
+        }
+    };
     for service in &config.services {
         if service.service_name == "player-gateway" {
             app.register(

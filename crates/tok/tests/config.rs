@@ -3,6 +3,40 @@
 use tok::{AppConfig, DiscoveryBackend};
 
 #[test]
+fn redis_ownership_is_explicit_independent_and_validated() {
+    let local = include_str!("../../../examples/demo-game/config/local.toml");
+    let source = local.replace(
+        "discovery = \"memory\"",
+        "discovery = \"memory\"\nownership = \"redis\"",
+    ) + "\n[redis_ownership]\nnamespace='owners-dev'\n";
+    let config = AppConfig::from_toml(&source).unwrap();
+    assert_eq!(config.discovery, tok::DiscoveryBackend::Memory);
+    assert_eq!(config.ownership, tok::OwnershipBackend::Redis);
+    for invalid in [
+        source.replace("[redis_ownership]\nnamespace='owners-dev'", ""),
+        source.replace("owners-dev", "owners:*"),
+        source.clone() + "operation_timeout_ms=0\n",
+        source.clone() + "operation_timeout_ms=6000\n",
+        source.clone() + "operation_timeot_ms=100\n",
+        source.replace("ownership = \"redis\"", "ownership = \"memory\""),
+    ] {
+        assert!(AppConfig::from_toml(&invalid).is_err());
+    }
+    let mut redis = config.redis_ownership.unwrap();
+    redis.url = "redis://user:secret@127.0.0.1:6379/".into();
+    assert!(!format!("{redis:?}").contains("secret"));
+    let gateway = AppConfig::from_toml(include_str!(
+        "../../../examples/demo-game/config/redis-gateway.toml"
+    ))
+    .unwrap();
+    assert_eq!(gateway.ownership, tok::OwnershipBackend::Redis);
+    assert_eq!(
+        AppConfig::from_toml(local).unwrap().ownership,
+        tok::OwnershipBackend::Memory
+    );
+}
+
+#[test]
 fn redis_configuration_requires_isolation_lease_bounds_and_reachable_advertisement() {
     let local = include_str!("../../../examples/demo-game/config/local.toml");
     let source = local.replace("discovery = \"memory\"", "discovery = \"redis\"")

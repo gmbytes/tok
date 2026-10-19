@@ -1,6 +1,11 @@
-# 开发网关进程：Redis 只用于发现，session 所有权仍限此进程。
+# 开发网关进程：显式启用 Redis 发现与共享 session 所有权。
 node_id = "dev-gateway-1"
 discovery = "redis"
+ownership = "redis"
+
+[redis_ownership]
+url = "redis://127.0.0.1:6379/"
+namespace = "demo-dev"
 
 [redis_discovery]
 url = "redis://127.0.0.1:6379/"
