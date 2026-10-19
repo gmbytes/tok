@@ -217,7 +217,8 @@ async fn connection(
     tokio::select! { biased; _ = shutdown.cancelled() => Ok(()), result = writing => result, result = reading => result }
 }
 
-fn control(sender: &Sender, content: Content) -> Result<()> {
+// 将内容包装为协议帧并非阻塞入队，实际 socket 写入由连接写循环负责。
+fn enqueue_content(sender: &Sender, content: Content) -> Result<()> {
     sender
         .try_send(Outbound::Frame(
             Frame {
@@ -337,7 +338,7 @@ async fn read_connection(
                         epoch: 0,
                     },
                 };
-                control(&sender, Content::LoggedIn(response))?;
+                enqueue_content(&sender, Content::LoggedIn(response))?;
             }
             Content::Request(request) => {
                 let request = LogicalMessage {
