@@ -1,6 +1,4 @@
-//! session 所有权后端：单进程 Memory 与跨进程 Redis 租约。
-
-pub mod redis;
+//! 单进程开发用的有界内存 session 所有权后端。
 
 use std::{
     collections::BTreeMap,
