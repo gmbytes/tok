@@ -11,6 +11,8 @@ use tok_core::{Error, Result, ServiceDescriptor};
 pub enum DiscoveryBackend {
     /// 单进程内存目录。
     Memory,
+    /// 多进程开发用 Redis 租约注册与本地缓存。
+    Redis,
     /// 配置可校验，运行后端尚未实现。
     Kubernetes,
 }
@@ -35,6 +37,9 @@ pub struct EndpointConfig {
     pub protocol: String,
     /// 监听地址；发现后端应提供远端可连接地址。
     pub address: SocketAddr,
+    /// 发现目录中发布的可连接地址，省略时使用 address。
+    #[serde(default)]
+    pub advertise_address: Option<SocketAddr>,
 }
 
 /// 一个游戏进程的配置；未知字段、重复名称与无效引用均被拒绝。
@@ -45,6 +50,9 @@ pub struct AppConfig {
     pub node_id: String,
     /// 服务发现后端选择。
     pub discovery: DiscoveryBackend,
+    /// 仅在 discovery=redis 时配置的开发发现后端。
+    #[serde(default)]
+    pub redis_discovery: Option<tok_infra::discovery::redis::RedisDiscoveryConfig>,
     /// 节点声明的端点列表，实际监听需显式组装。
     pub endpoints: Vec<EndpointConfig>,
     /// 本进程启用的业务服务与端点绑定。
@@ -68,6 +76,20 @@ impl AppConfig {
 
     /// 验证身份、端点和服务绑定，不连接外部依赖。
     pub fn validate(&self) -> Result<()> {
+        match (self.discovery, &self.redis_discovery) {
+            (DiscoveryBackend::Redis, Some(redis)) => redis.validate()?,
+            (DiscoveryBackend::Redis, None) => {
+                return Err(Error::InvalidConfig(
+                    "Redis 发现需要 redis_discovery 配置".into(),
+                ));
+            }
+            (_, Some(_)) => {
+                return Err(Error::InvalidConfig(
+                    "redis_discovery 仅适用于 Redis 发现".into(),
+                ));
+            }
+            _ => {}
+        }
         self.player_gateway.validate()?;
         self.observability
             .validate()
@@ -75,11 +97,26 @@ impl AppConfig {
         if self.node_id.trim().is_empty() {
             return Err(Error::InvalidConfig("node_id 不能为空".into()));
         }
+        if self.discovery == DiscoveryBackend::Redis
+            && (self.node_id.len() > 256 || self.services.len() > 64)
+        {
+            return Err(Error::InvalidConfig(
+                "Redis 发现限制 node_id 为 256 字节、每节点最多 64 个服务".into(),
+            ));
+        }
         if self.services.is_empty() {
             return Err(Error::InvalidConfig("至少需要配置一个服务".into()));
         }
         let mut endpoint_names = BTreeSet::new();
         for endpoint in &self.endpoints {
+            let advertised = endpoint.advertise_address.unwrap_or(endpoint.address);
+            if advertised.port() == 0
+                || (self.discovery == DiscoveryBackend::Redis && advertised.ip().is_unspecified())
+            {
+                return Err(Error::InvalidConfig(
+                    "Redis 发现需要可连接的发布地址".into(),
+                ));
+            }
             if endpoint.name.trim().is_empty()
                 || endpoint.protocol.trim().is_empty()
                 || endpoint.address.port() == 0
@@ -130,7 +167,7 @@ impl AppConfig {
                     node_id: self.node_id.clone(),
                     service_name: service.service_name.clone(),
                     protocol: endpoint.protocol.clone(),
-                    address: endpoint.address,
+                    address: endpoint.advertise_address.unwrap_or(endpoint.address),
                 })
             })
             .collect()

@@ -95,3 +95,20 @@ impl ServiceDirectory for MemoryDirectory {
             .collect())
     }
 }
+
+impl tok_core::discovery::ServiceRegistry for MemoryDirectory {
+    fn register(
+        &self,
+        service: ServiceDescriptor,
+    ) -> tok_core::discovery::RegistrationTask<'_, ()> {
+        Box::pin(async move { MemoryDirectory::register(self, service) })
+    }
+
+    fn unregister<'a>(
+        &'a self,
+        node_id: &'a str,
+        service_name: &'a str,
+    ) -> tok_core::discovery::RegistrationTask<'a, bool> {
+        Box::pin(async move { MemoryDirectory::unregister(self, node_id, service_name) })
+    }
+}

@@ -2,5 +2,6 @@
 
 pub mod kubernetes;
 pub mod memory;
+pub mod redis;
 
 pub use memory::MemoryDirectory;

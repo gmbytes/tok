@@ -10,7 +10,7 @@ use tok::{
 };
 
 #[derive(Parser)]
-#[command(about = "tok 单进程 TCP 客户端与内部 RPC 示例")]
+#[command(about = "tok TCP 客户端与内部 RPC 开发示例")]
 struct Args {
     /// 服务配置文件路径。
     #[arg(long, default_value = "examples/demo-game/config/local.toml")]
@@ -49,21 +49,18 @@ async fn main() -> Result<(), Error> {
             .run_until(async {
                 if args.rpc_smoke || args.client_smoke {
                     return tokio::time::timeout(Duration::from_secs(10), async {
-                        while directory
+                        while !directory
                             .snapshot("player")
-                            .map_err(std::io::Error::other)?
-                            .is_empty()
-                            || directory
+                            .is_ok_and(|nodes| !nodes.is_empty())
+                            || !directory
                                 .snapshot("guild")
-                                .map_err(std::io::Error::other)?
-                                .is_empty()
+                                .is_ok_and(|nodes| !nodes.is_empty())
                             || (args.client_smoke
-                                && directory
+                                && !directory
                                     .snapshot("player-gateway")
-                                    .map_err(std::io::Error::other)?
-                                    .is_empty())
+                                    .is_ok_and(|nodes| !nodes.is_empty()))
                         {
-                            tokio::task::yield_now().await;
+                            tokio::time::sleep(Duration::from_millis(20)).await;
                         }
                         if args.client_smoke {
                             let gateway = directory

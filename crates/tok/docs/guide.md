@@ -193,6 +193,74 @@ Channel 缓存有界，节点和地址相同的服务复用连接；节点变更
 接管必须匹配旧 epoch，旧持有者不能续租或释放新所有权。
 其 epoch 仅在后端存活期间有效，不能用于跨进程或进程重启后的协调；生产 Redis 实现仍待后续实现。
 
+## Redis 多进程开发发现
+
+单进程示例和单元测试继续使用 Memory。多进程联调可以选择 `discovery = "redis"`，
+由 [`infra::discovery::redis::RedisDirectory`] 提供注册与后台同步，由 [`core::ServiceDirectory`]
+读取本地快照。注册生命周期通过 [`core::ServiceRegistry`] 与只读查询分开。
+Application 在运行时连接 Redis，业务初始化成功后发布服务；构造应用与配置检查不访问 Redis。
+
+先启动 Redis 7.4，例如：
+
+```text
+docker run --detach --name tok-dev-redis --publish 127.0.0.1:6379:6379 redis:7.4-alpine
+```
+
+然后在两个终端分别执行：
+
+```text
+just run examples/demo-game/config/redis-game.toml
+just run examples/demo-game/config/redis-gateway.toml
+```
+
+若要验证业务后退出网关，可用下面命令代替第二条：
+
+```text
+cargo run -p demo-game --locked -- --config examples/demo-game/config/redis-gateway.toml --client-smoke
+```
+
+两份配置必须使用相同 Redis URL 和 namespace，node_id 各不相同。增加游戏进程时复制配置并修改 node_id 和监听端口。
+跨开发机使用时，`advertise_address` 应填其他机器能够连接的 IP 与端口；`address` 保留本机监听地址。
+例如监听 `0.0.0.0:7001`，发布 `192.0.2.10:7001`。
+工厂通过 [`runtime::ServiceContext::listen_address`] 获取监听地址，`context.service.address` 是发布地址。
+Redis 发现拒绝发布通配地址；Memory 仍允许原有单进程配置。
+
+```toml
+node_id = "dev-game-1"
+discovery = "redis"
+
+[redis_discovery]
+url = "redis://127.0.0.1:6379/"
+namespace = "my-dev"
+lease_ttl_ms = 15000
+refresh_interval_ms = 1000
+operation_timeout_ms = 2000
+max_nodes = 256
+```
+
+以上是配置头部，端点和服务仍按已有格式声明。完整示例见仓库的 redis-game.toml 与 redis-gateway.toml。
+[`infra::discovery::redis::RedisDiscoveryConfig`] 对 namespace、容量与期限进行校验：
+namespace 最长 64 字节，只允许 ASCII 字母、数字、短横线和下划线；最多 4096 节点，单节点最多 64 个服务、64 KiB 描述。
+租期必须大于刷新间隔与两倍操作期限之和。连接、扫描、发布和注销都有有限期限，连接 URL 的 Debug 输出隐藏凭据。
+
+每个节点使用带 TTL 的 Redis Hash 保存实例 token 和服务列表，key 为 `tok:discovery:{namespace}:node:<node_id 的十六进制编码>`。
+相同 node_id 的活动实例不能互相覆盖，续租、更新和删除均校验实例 token。退出时条件撤销；崩溃或运行 future 被丢弃后停止续租，由 TTL 清理遗留记录。
+后台使用 SCAN 周期读取目录，更新本地缓存并合并发送变更通知，初期不依赖 Pub/Sub。
+变更通常在下一次刷新后可见；后端断开、租约丢失、扫描超时或目录超过配置容量时，缓存失效，监督任务失败，Application 退出。
+该开发后端采用失败后退出策略，恢复 Redis 后需要重新启动应用，不后台无限重连。没有后台刷新时，缓存最多保留一个租期，过期查询返回错误。
+
+`Application::directory()` 始终返回本进程的内存注册镜像；跨进程查询必须使用 `Application::service_directory()` 或 `context.directory`。
+`with_service_directory` 只替换查询来源，注册仍使用配置选定的后端。
+首次 Redis 同步完成前快照返回不可用，业务应等待就绪后发起调用；示例 smoke 会有界等待。
+
+`just redis-test` 验证实际注册、通知、namespace 隔离、崩溃过期、租约丢失与旧实例条件删除。
+`just redis-smoke` 自动启动独立游戏和网关进程，经 TCP 验证登录、状态读写及 player 调用 guild，再验证正常退出、换地址重启及崩溃摘除。
+两者默认使用本机 Redis 6379，可用 `TOK_TEST_REDIS_URL` 覆盖；每次使用唯一 namespace，不清空数据库。
+这些测试需要显式运行，常规 `just verify` 不依赖 Redis；CI 增加独立 Linux Redis 集成任务。
+
+Redis 发现只解决服务定位。示例玩家状态和 session 所有权仍保存在进程内存；多网关竞争与交接需要后续 Redis 所有权实现。
+生产发现继续按 Kubernetes 设计推进。
+
 ## 客户端 TCP 与玩家 session
 
 运行 `just client-smoke` 会启动示例，完成真实 TCP 登录、状态读取、写入、再次读取及 player 调用 guild，然后退出并清理监听。
@@ -295,7 +363,7 @@ renew_interval_ms = 10000
 | [`observability`] | 日志、指标与追踪 |
 
 目前示例监听共享内部 gRPC 和客户端 TCP 端点，已接通注入认证、有界串行 session、状态读写及服务组合。
-timer 调度、恢复、Redis 和 NATS 尚未接通。
+Redis 开发发现已接通；timer 调度、恢复、Redis 所有权和 NATS 尚未接通。
 配置端点地址本身不启动监听，内部端点需显式注册 RpcEndpoint，TCP 由网关工厂绑定。
 Kubernetes 配置可校验，运行该发现后端仍会明确报错。
 游戏业务协议和 handler 由游戏定义，框架组件不反向依赖具体游戏。

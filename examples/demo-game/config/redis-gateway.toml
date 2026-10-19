@@ -1,0 +1,17 @@
+# 开发网关进程：Redis 只用于发现，session 所有权仍限此进程。
+node_id = "dev-gateway-1"
+discovery = "redis"
+
+[redis_discovery]
+url = "redis://127.0.0.1:6379/"
+namespace = "demo-dev"
+
+[[endpoints]]
+name = "client"
+protocol = "tcp"
+address = "0.0.0.0:7000"
+advertise_address = "127.0.0.1:7000"
+
+[[services]]
+service_name = "player-gateway"
+endpoint = "client"

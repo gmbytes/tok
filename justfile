@@ -45,6 +45,14 @@ rpc-smoke:
 client-smoke:
     cargo run -p demo-game --locked -- --config examples/demo-game/config/local.toml --client-smoke
 
+# Redis 集成测试需要真实 Redis，TOK_TEST_REDIS_URL 默认 redis://127.0.0.1:6379/
+redis-test:
+    cargo test -p tok-infra --test redis_discovery --locked -- --ignored
+
+# 启动独立游戏和网关进程验证跨进程调用、注销、重启与崩溃过期
+redis-smoke:
+    cargo test -p demo-game --test redis_discovery --locked -- --ignored
+
 # 验证指定服务配置
 config-check config="examples/demo-game/config/local.toml":
     cargo run -p demo-game --locked -- --config "{{config}}" --check-config

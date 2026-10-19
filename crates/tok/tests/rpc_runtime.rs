@@ -19,6 +19,45 @@ struct Factory {
     fail: bool,
     starts: Arc<AtomicUsize>,
 }
+
+#[tokio::test]
+async fn redis_startup_timeout_does_not_start_or_publish_business() {
+    // TCP 可连接但不返回 Redis 协议，覆盖连接建立后的完整操作期限。
+    let silent = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let mut config = config("127.0.0.1:7001".parse().unwrap());
+    config.discovery = tok::DiscoveryBackend::Redis;
+    config.redis_discovery = Some(tok::infra::discovery::redis::RedisDiscoveryConfig {
+        url: format!("redis://{}/", silent.local_addr().unwrap()),
+        lease_ttl_ms: 1000,
+        refresh_interval_ms: 50,
+        operation_timeout_ms: 100,
+        ..Default::default()
+    });
+    let mut app = Application::new(config).unwrap();
+    let starts = Arc::new(AtomicUsize::new(0));
+    for name in ["player", "guild"] {
+        app.register(
+            name,
+            Factory {
+                fail: false,
+                starts: starts.clone(),
+            },
+        )
+        .unwrap();
+    }
+    let local = app.directory();
+    let query = app.service_directory();
+    let result = tokio::time::timeout(Duration::from_secs(2), app.run_until(pending()))
+        .await
+        .unwrap();
+    assert!(matches!(
+        result,
+        Err(RuntimeError::Core(tok::core::Error::DiscoveryUnavailable))
+    ));
+    assert_eq!(starts.load(Ordering::SeqCst), 0);
+    assert!(local.snapshot("player").unwrap().is_empty());
+    assert!(query.snapshot("player").is_err());
+}
 impl ServiceFactory for Factory {
     fn start(&self, context: ServiceContext) -> StartTask {
         let fail = self.fail;

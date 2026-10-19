@@ -334,7 +334,7 @@ player 可以使用读缓存。存储层后续单独设计，缓存失效、持�
 
 ## 服务注册与发现
 
-生产环境强依赖 Kubernetes，开发环境采用单二进制、单进程运行多个服务。服务发现分别使用 Kubernetes 后端和简单的内存实现，不引入独立的 etcd 注册中心。
+生产环境强依赖 Kubernetes。开发环境支持单二进制单进程运行多个服务，也支持同一二进制按配置拆分为多个开发进程。服务发现提供单进程 Memory、多进程开发 Redis 和生产 Kubernetes 后端，不引入独立的 etcd 注册中心。
 
 ### 生产环境
 
@@ -356,11 +356,13 @@ player 可以使用读缓存。存储层后续单独设计，缓存失效、持�
 
 同一进程中的服务共享内存服务目录。服务启动时注册服务信息，停止时移除，调用方通过相同的发现接口获取节点信息，无需依赖 Kubernetes。
 
-该实现仅用于单进程开发与测试。
+Memory 仅用于单进程开发与测试。多进程联调使用 Redis 开发后端：每个进程配置唯一 node_id，共享同一 namespace；服务就绪后发布带 TTL 的节点服务列表，后台续租并刷新本地缓存，正常退出条件注销，崩溃后过期摘除。更新、续租与注销均检查独立实例 token，防止旧进程修改重启后的记录。初期周期扫描，不依赖 Pub/Sub；发现同步或租约失败使应用退出，重新启动后恢复。该后端不承担 session 全局所有权。
+
+端点 address 用于监听，advertise_address 用于发布；省略后者时使用监听地址。Redis 开发发现禁止发布通配地址，跨开发机必须填写可访问的 IP。工厂通过 ServiceContext.listen_address 绑定，ServiceContext.service.address 提供发布地址。完整参数、隔离与错误边界见 Rust 用户指南；redis-game.toml 和 redis-gateway.toml 提供双进程示例，just redis-test 与 just redis-smoke 验证真实 Redis。
 
 ### 发现与路由边界
 
-两种后端提供统一的节点快照和变更通知。服务描述包含 node_id、service_name 及绑定端点的协议、地址（含端口），按服务名查询节点快照；一个进程启用多个服务时，可以提供多条服务描述，共享端点的服务具有相同协议和地址。
+各发现后端提供统一的节点快照和变更通知。ServiceRegistry 负责异步发布和条件撤销，ServiceDirectory 只读取本地缓存。服务描述包含 node_id、service_name 及绑定端点的协议、地址（含端口），按服务名查询节点快照；一个进程启用多个服务时，可以提供多条服务描述，共享端点的服务具有相同协议和地址。
 
 bid 路由独立于发现后端，由路由组件根据节点列表选择目标。session 所有权仍由 Redis 管理。
 
@@ -428,7 +430,7 @@ tok/
 | tok-proto | 框架内部 protobuf 与构建期生成代码，不包含具体游戏消息 |
 | tok-rpc | tonic 与 Tower 接入、共享端点、强类型分发、连接复用、超时和追踪传播 |
 | tok-events | 同步本地事件、跨节点事件、投递策略与去重辅助 |
-| tok-infra | 内存和 Kubernetes 发现、bid 路由、Redis 请求级锁及 session 所有权 |
+| tok-infra | 内存、Redis 开发与 Kubernetes 发现、bid 路由、Redis 请求级锁及 session 所有权 |
 | tok-gateway | 局外 session、timer、下行补发与交接，以及局内场景接入、协议与安全适配 |
 | tok | 对外 API 入口、配置、运行时服务组装与生命周期监督 |
 
@@ -461,7 +463,7 @@ player 模块按玩家逻辑会话、串行执行、timer、下行缓存和重�
 
 workspace 统一 edition、工具链、依赖版本、lint 和 release 配置，共享 Cargo.lock。单元测试靠近实现，集成测试放对应 crate 的 tests 目录。Windows amd64 和 Linux amd64 通过 CI 分别验证；本地检查仅证明当前主机平台。
 
-当前实现包括八个框架 crate、示例游戏、TOML 配置验证、内存目录与合并变更通知、bid 亲和路由、单进程内存所有权、服务生命周期、可观测组件、protobuf 生成、共享内部 RPC、客户端 TCP 分帧与注入认证、有界串行 session、下行通知、rustdoc 用户与 API 文档、just 命令和 CI。示例 player 和 guild 共享内部端点，客户端网关经认证身份完成状态读写和 player 到 guild 的调用。ServiceContext 可注入发现查询后端，生产 Kubernetes 配置可验证但后端运行仍报尚未实现。Redis、NATS、timer 调度、补发及安全适配后续实现；内存所有权不提供跨进程唯一性，内部上下文字段校验不代替调用身份认证。部署目录暂不提供可运行的 Kubernetes 清单。
+当前实现包括八个框架 crate、示例游戏、TOML 配置验证、内存目录、Redis 开发发现与合并变更通知、bid 亲和路由、单进程内存所有权、服务生命周期、可观测组件、protobuf 生成、共享内部 RPC、客户端 TCP 分帧与注入认证、有界串行 session、下行通知、rustdoc 用户与 API 文档、just 命令和 CI。示例 player 和 guild 共享内部端点，客户端网关经认证身份完成状态读写和 player 到 guild 的调用；独立网关与游戏进程可通过 Redis 开发发现联调。ServiceContext 可注入发现查询后端，生产 Kubernetes 配置可验证但后端运行仍报尚未实现。Redis 所有权、NATS、timer 调度、补发及安全适配后续实现；内存所有权不提供跨进程唯一性，内部上下文字段校验不代替调用身份认证。部署目录暂不提供可运行的 Kubernetes 清单。
 
 ## 可观测约定
 
@@ -498,7 +500,7 @@ workspace 统一 edition、工具链、依赖版本、lint 和 release 配置，
 | 客户端加密 | 安全机制可替换，支持 TLS、DTLS 或网关自有消息级加密实现的适配，具体实现后续选型 |
 | 项目命令入口 | 使用 just，由根目录 justfile 统一组织开发任务 |
 | 目标平台 | Windows amd64 和 Linux amd64，分别构建并验证 |
-| 服务发现 | 生产使用 Kubernetes，开发使用单进程内存目录，通过统一接口提供节点信息 |
+| 服务发现 | 生产使用 Kubernetes，开发使用单进程 Memory 或多进程 Redis，通过统一接口读取本地节点快照 |
 | 跨实体一致性 | 业务自行处理，例如按 ID 排序加锁，当前不设计通用框架方案 |
 | 无缝场景切换 | 保留SceneGateway的未来职责，当前不设计具体协议 |
 | 存储细节 | 后续单独设计 |

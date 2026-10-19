@@ -1,0 +1,21 @@
+# 开发游戏进程：与 redis-gateway.toml 使用同一 namespace 和 Redis。
+node_id = "dev-game-1"
+discovery = "redis"
+
+[redis_discovery]
+url = "redis://127.0.0.1:6379/"
+namespace = "demo-dev"
+
+[[endpoints]]
+name = "internal-rpc"
+protocol = "grpc"
+address = "0.0.0.0:7001"
+advertise_address = "127.0.0.1:7001"
+
+[[services]]
+service_name = "player"
+endpoint = "internal-rpc"
+
+[[services]]
+service_name = "guild"
+endpoint = "internal-rpc"

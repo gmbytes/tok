@@ -24,6 +24,9 @@ pub enum Error {
     /// 内存服务目录的同步锁不可用。
     #[error("内存服务目录锁不可用")]
     DirectoryUnavailable,
+    /// 发现后端连接、租约或快照同步失败；不包含连接凭据。
+    #[error("服务发现后端不可用")]
+    DiscoveryUnavailable,
     /// 请求的组件能力尚未实现，附带能力名称。
     #[error("当前工程骨架尚未实现：{0}")]
     NotImplemented(&'static str),

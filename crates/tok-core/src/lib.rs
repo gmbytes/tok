@@ -7,7 +7,7 @@ pub mod execution;
 pub mod routing;
 pub mod service;
 
-pub use discovery::{DirectoryWatch, ServiceDirectory};
+pub use discovery::{DirectoryWatch, ServiceDirectory, ServiceRegistry};
 pub use error::{Error, Result};
 pub use execution::{
     CallContext, LogicalMessage, MessageKind, SessionIdentity, TimerSpec, TimerUpdate,

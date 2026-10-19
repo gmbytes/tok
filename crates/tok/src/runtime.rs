@@ -2,8 +2,9 @@
 
 use std::{collections::BTreeMap, future::Future, pin::Pin, sync::Arc, time::Duration};
 
+use tok_core::discovery::ServiceRegistry;
 use tok_core::{ServiceDescriptor, ServiceDirectory};
-use tok_infra::discovery::MemoryDirectory;
+use tok_infra::discovery::{MemoryDirectory, redis::RedisDirectory};
 use tok_rpc::{RpcEndpoint, RpcReadiness};
 use tokio::task::{JoinError, JoinSet};
 /// 服务协作退出的取消令牌；详细 API 见 tokio-util 上游文档。
@@ -22,6 +23,8 @@ pub type StartTask = Pin<Box<dyn Future<Output = Result<ServiceTask, ServiceErro
 /// 服务初始化时提供的身份、发现后端及退出通知。
 #[derive(Clone)]
 pub struct ServiceContext {
+    /// 本服务端点的本地监听地址，可能与 service 中的发布地址不同。
+    pub listen_address: std::net::SocketAddr,
     /// 本节点服务身份与端点描述。
     pub service: ServiceDescriptor,
     /// 可注入的服务快照和变更订阅来源。
@@ -91,6 +94,8 @@ pub struct Application {
     shutdown_timeout: Duration,
     rpc_endpoints: BTreeMap<String, RpcEndpoint>,
     service_directory: Arc<dyn ServiceDirectory>,
+    registry: Arc<dyn ServiceRegistry>,
+    redis: Option<Arc<RedisDirectory>>,
 }
 
 // 即使调用者丢弃运行 future，也撤销目录并通知服务；JoinSet 随后中止任务。
@@ -118,13 +123,29 @@ impl Drop for Registrations {
 }
 
 impl Application {
-    /// 创建内存发现应用；Kubernetes 后端尚未实现。
+    /// 创建内存或 Redis 开发发现应用，不连接网络；Kubernetes 后端尚未实现。
     pub fn new(config: AppConfig) -> Result<Self, RuntimeError> {
         config.validate()?;
-        if config.discovery != DiscoveryBackend::Memory {
+        if config.discovery == DiscoveryBackend::Kubernetes {
             return Err(tok_core::Error::NotImplemented("Kubernetes 服务发现").into());
         }
         let directory = MemoryDirectory::default();
+        let redis = if config.discovery == DiscoveryBackend::Redis {
+            Some(RedisDirectory::new(
+                config.redis_discovery.clone().expect("配置已校验"),
+                &config.node_id,
+            )?)
+        } else {
+            None
+        };
+        let service_directory: Arc<dyn ServiceDirectory> = redis
+            .as_ref()
+            .map(|r| r.clone() as Arc<dyn ServiceDirectory>)
+            .unwrap_or_else(|| Arc::new(directory.clone()));
+        let registry: Arc<dyn ServiceRegistry> = redis
+            .as_ref()
+            .map(|r| r.clone() as Arc<dyn ServiceRegistry>)
+            .unwrap_or_else(|| Arc::new(directory.clone()));
         Ok(Self {
             config,
             factories: BTreeMap::new(),
@@ -132,7 +153,9 @@ impl Application {
             startup_timeout: Duration::from_secs(30),
             shutdown_timeout: Duration::from_secs(10),
             rpc_endpoints: BTreeMap::new(),
-            service_directory: Arc::new(directory),
+            service_directory,
+            registry,
+            redis,
         })
     }
 
@@ -233,6 +256,18 @@ impl Application {
         };
         tokio::pin!(shutdown);
         let outcome = async {
+            if let Some(redis) = &self.redis {
+                tokio::select! {
+                    biased;
+                    signal = &mut shutdown => return signal.map_err(RuntimeError::Signal),
+                    result = redis.initialize() => result?,
+                }
+                let redis = redis.clone();
+                let discovery_stop = token.child_token();
+                tasks.spawn(async move {
+                    ("redis-discovery".into(), redis.run(discovery_stop).await.map_err(|error| Box::new(error) as ServiceError))
+                });
+            }
             // 端点只监听一次；业务服务初始化前由就绪拦截器阻止调用。
             for (name, endpoint) in std::mem::take(&mut self.rpc_endpoints) {
                 let readiness = endpoint.readiness();
@@ -251,7 +286,10 @@ impl Application {
                 tasks.spawn(async move { (endpoint_name, task.await.map_err(|source| Box::new(source) as ServiceError)) });
             }
             for service in self.config.service_descriptors()? {
+                let binding = self.config.services.iter().find(|entry| entry.service_name == service.service_name).expect("服务来自配置");
+                let listen_address = self.config.endpoints.iter().find(|entry| entry.name == binding.endpoint).expect("端点已验证").address;
                 let context = ServiceContext {
+                    listen_address,
                     service: service.clone(),
                     directory: self.service_directory.clone(),
                     shutdown: token.child_token(),
@@ -276,12 +314,19 @@ impl Application {
                     readiness.set(&service.service_name, true);
                 }
                 // 快照对外可见时对应入口必须已就绪，不能先发布再开启入口。
-                if let Err(error) = self.directory.register(service.clone()) {
+                let publication = tokio::select! {
+                    biased;
+                    signal = &mut shutdown => return signal.map_err(RuntimeError::Signal),
+                    result = tasks.join_next(), if !tasks.is_empty() => return Err(unexpected(result.expect("任务非空"))),
+                    result = self.registry.register(service.clone()) => result,
+                };
+                if let Err(error) = publication {
                     for readiness in &registered.rpc_readiness {
                         readiness.set(&service.service_name, false);
                     }
                     return Err(error.into());
                 }
+                if self.redis.is_some() { self.directory.register(service.clone())?; }
                 metrics::histogram!("tok_service_start_duration_seconds", "service_name" => service.service_name.clone()).record(started.elapsed().as_secs_f64());
                 metrics::counter!("tok_service_starts_total", "service_name" => service.service_name.clone()).increment(1);
                 metrics::gauge!("tok_services_running", "service_name" => service.service_name.clone()).increment(1.0);
@@ -316,6 +361,12 @@ impl Application {
         }
         token.cancel();
         let drain = async {
+            // 停止续租后先撤销远端可见性，再等待业务任务收束；全程受退出期限约束。
+            if let Some(redis) = &self.redis
+                && let Err(error) = redis.withdraw().await
+            {
+                cleanup_error.get_or_insert(RuntimeError::Core(error));
+            }
             while let Some(result) = tasks.join_next().await {
                 let error = match result {
                     Ok((service_name, Err(source))) => Some(RuntimeError::Run {

@@ -3,7 +3,7 @@
 use std::net::SocketAddr;
 
 /// 服务发现信息，地址并不意味着网络监听已经启动。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ServiceDescriptor {
     /// 部署节点身份；服务由 (node_id, service_name) 定位。
     pub node_id: String,

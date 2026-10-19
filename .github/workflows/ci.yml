@@ -37,3 +37,27 @@ jobs:
         run: just client-smoke
       - name: 验证生产服务配置
         run: just config-check examples/demo-game/config/game.toml
+
+  redis-integration:
+    name: Redis 开发发现与双进程集成
+    runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis:7.4-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: 安装 Rust 工具链
+        run: rustup show
+      - name: 安装 just
+        run: cargo install just --version 1.58.0 --locked
+      - name: 验证真实 Redis 租约和目录缓存
+        run: just redis-test
+      - name: 验证游戏与网关双进程
+        run: just redis-smoke

@@ -51,7 +51,7 @@ impl ServiceFactory for GatewayFactory {
             if context.service.protocol != "tcp" {
                 return Err(std::io::Error::other("示例玩家网关要求 tcp 端点").into());
             }
-            let listener = tokio::net::TcpListener::bind(context.service.address).await?;
+            let listener = tokio::net::TcpListener::bind(context.listen_address).await?;
             let clients = Arc::new(RpcClients::new(
                 Duration::from_millis(config.rpc_timeout_ms),
                 64,

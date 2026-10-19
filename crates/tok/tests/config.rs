@@ -3,6 +3,37 @@
 use tok::{AppConfig, DiscoveryBackend};
 
 #[test]
+fn redis_configuration_requires_isolation_lease_bounds_and_reachable_advertisement() {
+    let local = include_str!("../../../examples/demo-game/config/local.toml");
+    let source = local.replace("discovery = \"memory\"", "discovery = \"redis\"")
+        + "\n[redis_discovery]\nnamespace='test-dev'\n";
+    let config = AppConfig::from_toml(&source).unwrap();
+    assert_eq!(config.discovery, DiscoveryBackend::Redis);
+    for invalid in [
+        source.replace("[redis_discovery]\nnamespace='test-dev'", ""),
+        source.replace("test-dev", "dev:*"),
+        source.clone() + "lease_ttl_ms=5000\n",
+        source.clone() + "max_nodes=0\n",
+        source.clone() + "refresh_interva_ms=100\n",
+        source.replace("127.0.0.1:7001", "0.0.0.0:7001"),
+        source.replace("discovery = \"redis\"", "discovery = \"memory\""),
+    ] {
+        assert!(AppConfig::from_toml(&invalid).is_err());
+    }
+    let mut config = config;
+    config.endpoints[1].address = "0.0.0.0:7001".parse().unwrap();
+    config.endpoints[1].advertise_address = Some("192.0.2.10:8001".parse().unwrap());
+    config.validate().unwrap();
+    assert_eq!(
+        config.service_descriptors().unwrap()[1].address.to_string(),
+        "192.0.2.10:8001"
+    );
+    let redis = config.redis_discovery.as_mut().unwrap();
+    redis.url = "redis://user:secret@127.0.0.1:6379/".into();
+    assert!(!format!("{config:?}").contains("secret"));
+}
+
+#[test]
 fn player_gateway_limits_and_lease_coverage_are_validated() {
     let original = AppConfig::from_toml(include_str!(
         "../../../examples/demo-game/config/local.toml"

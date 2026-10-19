@@ -17,7 +17,7 @@ workspace 启用 `missing_docs = "deny"`，对外公开的模块、类型、字�
 
 框架采用 Cargo workspace，库位于 `crates/`，具体游戏组装最终二进制。`examples/demo-game` 展示游戏协议、服务配置和内存服务目录。
 
-当前已提供配置校验、内存目录与变更订阅、bid 路由、单进程内存所有权、protobuf 生成、服务生命周期、可观测组件及共享内部 gRPC 端点。PlayerGateway 提供 TCP 登录、认证扩展点、有界串行 session 和通知入口。示例支持玩家状态读写及 player 调用 guild；按 Ctrl+C 优雅退出。timer、断线恢复、Redis、Kubernetes 发现和 NATS 消费按后续批次推进。
+当前已提供配置校验、内存目录、Redis 开发发现与变更订阅、bid 路由、单进程内存所有权、protobuf 生成、服务生命周期、可观测组件及共享内部 gRPC 端点。PlayerGateway 提供 TCP 登录、认证扩展点、有界串行 session 和通知入口。示例支持玩家状态读写及 player 调用 guild；按 Ctrl+C 优雅退出。timer、断线恢复、Redis 所有权、Kubernetes 发现和 NATS 消费按后续批次推进。
 
 网关统一命名为 `PlayerGateway` 和 `SceneGateway`，分别对接 player 与场景服务。`tok-gateway` 中的 `player/` 放置玩家逻辑 session、timer、下行补发及重连交接，`scene/` 放置场景接入和场景连接 session；`transport/`、`security/`、`codec/` 提供按需组合的接入组件。示例玩家网关服务名为 `player-gateway`。
 
@@ -73,6 +73,32 @@ RPC 使用 `CallContext`、`HandlerRegistry` 和 `RpcService` 分离业务上下
 `just build` 输出当前平台的 `target/release/demo-game.exe` 或 `target/release/demo-game`。同一二进制通过 `--config` 选择服务。当前 Kubernetes 配置仅支持 `--check-config` 校验，实际运行会明确报错。
 
 CI 在 Windows 和 Linux 的 amd64 runner 上分别执行 just 检查、测试及 release 构建。
+
+## Redis 多进程开发
+
+Memory 用于单进程与普通单元测试。多进程开发使用 `discovery = "redis"`，每个进程配置唯一 `node_id`，参与联调的进程使用相同 Redis URL 和 namespace。
+在本机启动 Redis 7.4 后，分别在两个终端运行：
+
+```text
+just run examples/demo-game/config/redis-game.toml
+just run examples/demo-game/config/redis-gateway.toml
+```
+
+也可先启动游戏进程，再运行一次客户端验证：
+
+```text
+cargo run -p demo-game --locked -- --config examples/demo-game/config/redis-gateway.toml --client-smoke
+```
+
+端点 `address` 用于监听，`advertise_address` 用于发布，省略后者时使用监听地址；Redis 发现禁止发布通配地址。跨开发机时把示例发布地址改成其他机器可访问的 IP。
+注册在服务就绪后发布，默认每秒续租和刷新本地缓存，租期 15 秒；进程退出条件注销，崩溃后依赖 TTL 摘除。同名 node_id 的活动实例不能相互覆盖，旧实例不能删除重启后的记录。
+后台发现错误会失效缓存并触发应用退出，重新启动应用后恢复连接；业务路由只读本地缓存，不同步访问 Redis。
+
+`just redis-test` 与 `just redis-smoke` 显式执行真实 Redis 集成测试；后者自动启动独立游戏、网关进程并验证业务、退出、重启和崩溃过期。测试使用独立 namespace，不清空 Redis 数据库。
+测试默认连接 `redis://127.0.0.1:6379/`，可通过环境变量 `TOK_TEST_REDIS_URL` 覆盖；常规 `just verify` 不依赖 Redis。CI 增加独立 Linux Redis 集成任务。
+详细参数及错误边界见 Rust 用户指南中的“Redis 多进程开发发现”。
+
+Redis discovery 只共享服务地址。示例玩家状态和 session 所有权仍是进程内存；多网关玩家竞争与跨网关交接需第三批的共享所有权实现。
 
 ## 日志、指标与追踪
 
