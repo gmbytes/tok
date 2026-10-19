@@ -1,7 +1,6 @@
 //! 使用真实 TCP 与框架信封验证登录、状态读写和公会调用的开发客户端。
 
-use crate::{player, protocol::v1};
-use prost::Message;
+use crate::protocol::{GameMessage, v1};
 use std::time::Duration;
 use tok::{
     gateway::{
@@ -46,8 +45,6 @@ pub async fn smoke(address: std::net::SocketAddr) -> Result<(), Error> {
         &mut stream,
         &codec,
         2,
-        player::GET_PLAYER,
-        player::GET_PLAYER_RESPONSE,
         &v1::GetPlayerRequest { player_id: 9999 },
     )
     .await?;
@@ -58,8 +55,6 @@ pub async fn smoke(address: std::net::SocketAddr) -> Result<(), Error> {
         &mut stream,
         &codec,
         3,
-        player::SET_PLAYER,
-        player::SET_PLAYER_RESPONSE,
         &v1::SetPlayerRequest { value: 123 },
     )
     .await?;
@@ -67,8 +62,6 @@ pub async fn smoke(address: std::net::SocketAddr) -> Result<(), Error> {
         &mut stream,
         &codec,
         4,
-        player::GET_PLAYER,
-        player::GET_PLAYER_RESPONSE,
         &v1::GetPlayerRequest { player_id: 0 },
     )
     .await?;
@@ -79,23 +72,14 @@ pub async fn smoke(address: std::net::SocketAddr) -> Result<(), Error> {
         &mut stream,
         &codec,
         5,
-        player::QUERY_GUILD,
-        player::QUERY_GUILD_RESPONSE,
         &v1::QueryGuildRequest { guild_id: 7 },
     )
     .await?;
     if guild.guild_id != 7 {
         return Err(std::io::Error::other("公会回应不一致").into());
     }
-    call::<_, v1::StartProductionResponse>(
-        &mut stream,
-        &codec,
-        6,
-        player::START_PRODUCTION,
-        player::START_PRODUCTION_RESPONSE,
-        &v1::StartProductionRequest {},
-    )
-    .await?;
+    call::<_, v1::StartProductionResponse>(&mut stream, &codec, 6, &v1::StartProductionRequest {})
+        .await?;
     tokio::time::timeout(Duration::from_secs(3), async {
         let mut request_id = 7;
         loop {
@@ -103,8 +87,6 @@ pub async fn smoke(address: std::net::SocketAddr) -> Result<(), Error> {
                 &mut stream,
                 &codec,
                 request_id,
-                player::GET_PLAYER,
-                player::GET_PLAYER_RESPONSE,
                 &v1::GetPlayerRequest { player_id: 0 },
             )
             .await?;
@@ -120,12 +102,10 @@ pub async fn smoke(address: std::net::SocketAddr) -> Result<(), Error> {
     Ok(())
 }
 
-async fn call<Req: Message, Resp: Message + Default>(
+async fn call<Req: GameMessage, Resp: GameMessage + Default>(
     stream: &mut TcpStream,
     codec: &FrameCodec,
     request_id: u64,
-    message_id: u32,
-    response_id: u32,
     request: &Req,
 ) -> Result<Resp, Error> {
     codec
@@ -135,7 +115,7 @@ async fn call<Req: Message, Resp: Message + Default>(
                 version: VERSION,
                 content: Some(Content::Request(protocol::BusinessRequest {
                     request_id,
-                    message_id,
+                    message_id: Req::MESSAGE_ID,
                     body: request.encode_to_vec(),
                 })),
             },
@@ -149,7 +129,7 @@ async fn call<Req: Message, Resp: Message + Default>(
         return Err(std::io::Error::other("未收到业务回应").into());
     };
     if response.request_id != request_id
-        || response.message_id != response_id
+        || response.message_id != Resp::MESSAGE_ID
         || response.error_code != 0
     {
         return Err(

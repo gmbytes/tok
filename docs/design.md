@@ -274,7 +274,7 @@ Response 始终作为请求的协议回应，非预期错误也通过 Response �
 
 PlayerGateway解析消息外层，根据 session 中的可信 player id 调用 player 的通用 gRPC 入口，传递消息 ID 和 payload。player 侧的注册适配层解码具体 Request、调用强类型业务处理函数，再编码 Response。timerSpec 属于内部返回信息，由 session 消费，不直接包含在客户端业务回应中。
 
-框架提供强类型通知接口，由适配层负责消息 ID、编码及广播事件封装。游戏维护稳定的消息 ID 和 Request 与 Response 的配对关系；初期显式注册，后续可从协议定义生成服务端分发表与客户端映射。
+框架提供强类型通知接口，由适配层负责消息 ID、编码及广播事件封装。游戏维护稳定的消息 ID 和 Request 与 Response 的配对关系，处理函数及请求回应配对仍显式注册。示例将 ID 集中在游戏 proto 的 MessageId 枚举中，按 MESSAGE_ID_<消息类型的 UPPER_SNAKE_CASE> 在构建期关联顶层消息，生成 GameMessage::MESSAGE_ID；数字缺失、重复或名称不匹配时构建失败。零表示未指定，既有编号保持稳定，删除时 reserved 编号与名称。运行时仍按数字分发，ID 名称不决定处理权限、服务归属或请求回应配对；框架本身不依赖游戏枚举。通用分发表生成另行扩展。
 
 登录认证通过业务扩展点验证凭证，网关取得可信 player id 后获取 session 所有权。局内可以复用编解码与消息映射组件，同时保留异步消息模型和独立的协议封装。
 

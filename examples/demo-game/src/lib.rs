@@ -7,6 +7,7 @@ pub mod player;
 pub mod protocol;
 
 use prost::Message;
+use protocol::GameMessage;
 use std::{sync::Arc, time::Duration};
 use tok::{
     AppConfig,
@@ -155,7 +156,7 @@ pub async fn rpc_smoke(directory: &dyn ServiceDirectory) -> Result<(), Error> {
                 }),
             },
             Payload {
-                message_id: player::GET_PLAYER,
+                message_id: protocol::v1::GetPlayerRequest::MESSAGE_ID,
                 body: protocol::v1::GetPlayerRequest { player_id: 9999 }.encode_to_vec(),
             },
         )
@@ -165,7 +166,7 @@ pub async fn rpc_smoke(directory: &dyn ServiceDirectory) -> Result<(), Error> {
         .ok_or_else(|| std::io::Error::other("player 回应缺少 payload"))?;
     let body = protocol::v1::GetPlayerResponse::decode(payload.body.as_slice())?;
     if response.request_id != 1
-        || payload.message_id != player::GET_PLAYER_RESPONSE
+        || payload.message_id != protocol::v1::GetPlayerResponse::MESSAGE_ID
         || body.player_id != 42
     {
         return Err(std::io::Error::other("player 回应与可信上下文不匹配").into());
@@ -182,7 +183,7 @@ pub async fn rpc_smoke(directory: &dyn ServiceDirectory) -> Result<(), Error> {
                 session: None,
             },
             Payload {
-                message_id: guild::GET_GUILD,
+                message_id: protocol::v1::GetGuildRequest::MESSAGE_ID,
                 body: protocol::v1::GetGuildRequest { guild_id: 7 }.encode_to_vec(),
             },
         )
@@ -192,7 +193,7 @@ pub async fn rpc_smoke(directory: &dyn ServiceDirectory) -> Result<(), Error> {
         .ok_or_else(|| std::io::Error::other("guild 回应缺少 payload"))?;
     let body = protocol::v1::GetGuildResponse::decode(payload.body.as_slice())?;
     if response.request_id != 2
-        || payload.message_id != guild::GET_GUILD_RESPONSE
+        || payload.message_id != protocol::v1::GetGuildResponse::MESSAGE_ID
         || body.guild_id != 7
     {
         return Err(std::io::Error::other("guild 回应不匹配").into());

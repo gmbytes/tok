@@ -1,5 +1,6 @@
 //! 显式注册 player 业务消息，身份来自网关调用上下文。
 
+use crate::protocol::GameMessage;
 use crate::protocol::v1::{
     GetGuildRequest, GetGuildResponse, GetPlayerRequest, GetPlayerResponse, ProductionFinished,
     QueryGuildRequest, QueryGuildResponse, SetPlayerRequest, SetPlayerResponse,
@@ -17,25 +18,6 @@ use tok::{
         HandlerRegistry, HandlerReply, RpcClients, protocol::internal::v1::Payload, tonic::Status,
     },
 };
-
-/// 读取玩家信息的请求消息 ID。
-pub const GET_PLAYER: u32 = 1;
-/// 读取玩家信息的回应消息 ID。
-pub const GET_PLAYER_RESPONSE: u32 = 2;
-/// 写入示例玩家状态的请求 ID。
-pub const SET_PLAYER: u32 = 5;
-/// 写入示例玩家状态的回应 ID。
-pub const SET_PLAYER_RESPONSE: u32 = 6;
-/// 由 player 查询公会的请求 ID。
-pub const QUERY_GUILD: u32 = 7;
-/// player 返回公会查询结果的回应 ID。
-pub const QUERY_GUILD_RESPONSE: u32 = 8;
-/// 开始生产的业务请求 ID。
-pub const START_PRODUCTION: u32 = 9;
-/// 开始生产的业务回应 ID。
-pub const START_PRODUCTION_RESPONSE: u32 = 10;
-/// 仅由 session 内部计时来源调用的业务类型。
-pub const FINISH_PRODUCTION: u32 = 11;
 
 const PRODUCTION_TIME_MS: i64 = 50;
 const PRODUCTION_OUTPUT: i64 = 1;
@@ -76,47 +58,55 @@ pub fn handlers(
     directory: Arc<dyn ServiceDirectory>,
 ) -> Result<HandlerRegistry, tok::rpc::Error> {
     let mut registry = HandlerRegistry::new();
-    registry.register(GET_PLAYER, GET_PLAYER_RESPONSE, {
-        let state = state.clone();
-        move |context, _request: GetPlayerRequest| {
+    registry.register(
+        GetPlayerRequest::MESSAGE_ID,
+        GetPlayerResponse::MESSAGE_ID,
+        {
             let state = state.clone();
-            async move {
-                let player_id = player_id(&context)?;
-                let value = state
-                    .values
-                    .lock()
-                    .map_err(|_| Status::internal("示例存储锁不可用"))?
-                    .get(&player_id)
-                    .copied()
-                    .unwrap_or(0);
-                Ok(GetPlayerResponse { player_id, value })
-            }
-        }
-    })?;
-    registry.register(SET_PLAYER, SET_PLAYER_RESPONSE, {
-        let state = state.clone();
-        move |context, request: SetPlayerRequest| {
-            let state = state.clone();
-            async move {
-                let player_id = player_id(&context)?;
-                let mut values = state
-                    .values
-                    .lock()
-                    .map_err(|_| Status::internal("示例存储锁不可用"))?;
-                if !values.contains_key(&player_id) && values.len() >= state.capacity {
-                    return Err(Status::resource_exhausted("示例存储容量已满"));
+            move |context, _request: GetPlayerRequest| {
+                let state = state.clone();
+                async move {
+                    let player_id = player_id(&context)?;
+                    let value = state
+                        .values
+                        .lock()
+                        .map_err(|_| Status::internal("示例存储锁不可用"))?
+                        .get(&player_id)
+                        .copied()
+                        .unwrap_or(0);
+                    Ok(GetPlayerResponse { player_id, value })
                 }
-                values.insert(player_id, request.value);
-                Ok(SetPlayerResponse {
-                    player_id,
-                    value: request.value,
-                })
             }
-        }
-    })?;
+        },
+    )?;
+    registry.register(
+        SetPlayerRequest::MESSAGE_ID,
+        SetPlayerResponse::MESSAGE_ID,
+        {
+            let state = state.clone();
+            move |context, request: SetPlayerRequest| {
+                let state = state.clone();
+                async move {
+                    let player_id = player_id(&context)?;
+                    let mut values = state
+                        .values
+                        .lock()
+                        .map_err(|_| Status::internal("示例存储锁不可用"))?;
+                    if !values.contains_key(&player_id) && values.len() >= state.capacity {
+                        return Err(Status::resource_exhausted("示例存储容量已满"));
+                    }
+                    values.insert(player_id, request.value);
+                    Ok(SetPlayerResponse {
+                        player_id,
+                        value: request.value,
+                    })
+                }
+            }
+        },
+    )?;
     registry.register_with_timers(
-        START_PRODUCTION,
-        START_PRODUCTION_RESPONSE,
+        StartProductionRequest::MESSAGE_ID,
+        StartProductionResponse::MESSAGE_ID,
         |context, _request: StartProductionRequest| async move {
             player_id(&context)?;
             let now = SystemTime::now()
@@ -126,7 +116,7 @@ pub fn handlers(
             let update = TimerUpdate::Patch {
                 upsert: vec![TimerSpec {
                     timer_id: "production".into(),
-                    message_id: FINISH_PRODUCTION,
+                    message_id: ProductionFinished::MESSAGE_ID,
                     body: ProductionFinished {}.encode_to_vec(),
                     due_at_ms: now + PRODUCTION_TIME_MS,
                     interval_ms: None,
@@ -140,7 +130,7 @@ pub fn handlers(
         },
     )?;
     registry.register_timer(
-        FINISH_PRODUCTION,
+        ProductionFinished::MESSAGE_ID,
         move |context, _event: ProductionFinished| {
             let state = state.clone();
             async move {
@@ -165,8 +155,8 @@ pub fn handlers(
     )?;
     let clients = Arc::new(RpcClients::new(Duration::from_secs(2), 16)?);
     registry.register(
-        QUERY_GUILD,
-        QUERY_GUILD_RESPONSE,
+        QueryGuildRequest::MESSAGE_ID,
+        QueryGuildResponse::MESSAGE_ID,
         move |context, request: QueryGuildRequest| {
             let directory = directory.clone();
             let clients = clients.clone();
@@ -189,7 +179,7 @@ pub fn handlers(
                             session: None,
                         },
                         Payload {
-                            message_id: crate::guild::GET_GUILD,
+                            message_id: GetGuildRequest::MESSAGE_ID,
                             body: GetGuildRequest {
                                 guild_id: request.guild_id,
                             }

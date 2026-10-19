@@ -1,5 +1,6 @@
 //! 通过真实客户端与内部 RPC 验证示例业务和客户端错误映射。
 
+use demo_game::protocol::GameMessage;
 use std::time::Duration;
 use tok::{
     AppConfig,
@@ -81,20 +82,20 @@ async fn client_to_rpc_reads_writes_queries_guild_and_maps_errors() {
     for (id, message, body, code) in [
         (
             2,
-            demo_game::player::GET_PLAYER,
+            demo_game::protocol::v1::GetPlayerRequest::MESSAGE_ID,
             vec![0xff],
             ErrorCode::InvalidRequest,
         ),
         (3, 999, Vec::new(), ErrorCode::UnknownMessage),
         (
             4,
-            demo_game::player::FINISH_PRODUCTION,
+            demo_game::protocol::v1::ProductionFinished::MESSAGE_ID,
             Vec::new(),
             ErrorCode::UnknownMessage,
         ),
         (
             5,
-            demo_game::player::QUERY_GUILD,
+            demo_game::protocol::v1::QueryGuildRequest::MESSAGE_ID,
             Vec::new(),
             ErrorCode::Unavailable,
         ),

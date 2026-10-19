@@ -315,6 +315,18 @@ Redis 发现只解决服务定位。玩家状态仍在进程内存，session 所
 
 ## 客户端 TCP 与玩家 session
 
+示例游戏的消息 ID 由 `demo-game/proto/demo/v1/message_id.proto` 的 `MessageId` 枚举统一维护。
+例如 `MESSAGE_ID_GET_PLAYER_REQUEST = 1` 按命名规则对应 `GetPlayerRequest`，
+构建脚本校验 `demo.v1` 的顶层消息并生成 `GameMessage::MESSAGE_ID` 关联。
+枚举项遵循 `MESSAGE_ID_<消息类型的 UPPER_SNAKE_CASE>`，Rust 类型使用 prost 的命名规则。
+未匹配的消息或枚举项、重复名称或数字、非正数 ID 会使构建失败；零仅用于 `MESSAGE_ID_UNSPECIFIED`。
+在 demo 中导入 `protocol::GameMessage` 后使用 `GetPlayerRequest::MESSAGE_ID`，原来的 `player::GET_PLAYER` 等手写常量已移除。
+
+请求与回应的配对仍通过 HandlerRegistry 显式注册；客户端调用辅助函数从请求、回应类型读取 ID。
+名称关联只在构建期生成静态映射，运行时通过数字分发，不按字符串猜测类型或回应。
+数值一经使用保持稳定，不因重排枚举或 Rust 模块而改变；删除消息时将其编号与枚举名称标记为 `reserved`，不能复用。
+这套生成约定属于示例游戏，框架信封和 HandlerRegistry 仍使用 `u32`，不依赖游戏枚举或命名约定。
+
 运行 `just client-smoke` 会启动示例，完成真实 TCP 登录、状态读取、写入、再次读取及 player 调用 guild，然后退出并清理监听。
 运行 `just run` 可持续监听本地客户端端口 `127.0.0.1:7000`。
 示例凭据为 `demo:<正整数玩家 ID>`，如 `demo:42`；该认证器仅供本地开发，状态保存在有界内存中。

@@ -16,11 +16,13 @@ tonic.workspace = true
 tonic-prost.workspace = true
 
 [dev-dependencies]
+heck.workspace = true
 tokio-util.workspace = true
 uuid.workspace = true
 redis.workspace = true
 
 [build-dependencies]
+heck.workspace = true
 prost-build.workspace = true
 protoc-bin-vendored.workspace = true
 tonic-prost-build.workspace = true

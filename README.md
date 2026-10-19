@@ -21,6 +21,8 @@ workspace 启用 `missing_docs = "deny"`，对外公开的模块、类型、字�
 
 网关共用 `Gateway` 运行框架，接入组件负责具体业务语义。当前 `PlayerIngress` 实现 TCP 登录和串行 session，Scene 接入尚未实现；`PlayerGateway` 保留为兼容包装。`player/`、`scene/` 分别组织玩家和场景组件，`transport/`、`security/`、`codec/` 提供传输、安全与编解码适配。示例通过可选的 `factory = "player-ingress"` 选择网关工厂，服务名可自行命名。
 
+示例消息 ID 统一定义在 [message_id.proto](examples/demo-game/proto/demo/v1/message_id.proto) 的 `MessageId` 枚举中。构建脚本按消息名称生成 `GameMessage::MESSAGE_ID`，客户端和服务端共用，不再在业务模块手写数字。请求与回应仍显式配对；已有数值保持不变，零保留为未指定值，删除的编号和名称需在 proto 中 `reserved`。
+
 ## 开发命令
 
 需要安装 rustup 和 just 1.58.0。仓库固定 Rust 1.99.0；protoc 由构建依赖提供，无需额外安装。若 `RUSTUP_TOOLCHAIN` 覆盖为旧版本，启动前应清除覆盖或设为 1.99.0。

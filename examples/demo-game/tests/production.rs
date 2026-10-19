@@ -1,5 +1,6 @@
 //! 生产耗时、内部触发及产出由服务端决定，客户端正文不能覆盖规则。
 
+use demo_game::protocol::GameMessage;
 use demo_game::{player, protocol::v1};
 use prost::Message;
 use std::{
@@ -40,7 +41,7 @@ async fn production_rules_are_not_taken_from_client_timer_or_reward_fields() {
         .call(
             context.clone(),
             Payload {
-                message_id: player::START_PRODUCTION,
+                message_id: v1::StartProductionRequest::MESSAGE_ID,
                 body: vec![0x10, 0, 0x18, 1, 0x20, 127],
             },
         )
@@ -58,12 +59,12 @@ async fn production_rules_are_not_taken_from_client_timer_or_reward_fields() {
     assert_eq!(upsert.len(), 1);
     let spec = &upsert[0];
     assert_eq!(spec.timer_id, "production");
-    assert_eq!(spec.message_id, player::FINISH_PRODUCTION);
+    assert_eq!(spec.message_id, v1::ProductionFinished::MESSAGE_ID);
     assert_eq!(spec.interval_ms, None);
     assert!(spec.body.is_empty());
     assert!((before + 50..=after + 50).contains(&spec.due_at_ms));
     let finish = Payload {
-        message_id: player::FINISH_PRODUCTION,
+        message_id: v1::ProductionFinished::MESSAGE_ID,
         body: vec![8, 127],
     };
     assert_eq!(
@@ -85,7 +86,7 @@ async fn production_rules_are_not_taken_from_client_timer_or_reward_fields() {
         .call(
             context,
             Payload {
-                message_id: player::GET_PLAYER,
+                message_id: v1::GetPlayerRequest::MESSAGE_ID,
                 body: v1::GetPlayerRequest { player_id: 9999 }.encode_to_vec(),
             },
         )
