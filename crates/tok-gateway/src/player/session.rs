@@ -403,7 +403,7 @@ fn actor(
                     request.body.clear();
                     metrics::counter!("tok_session_requests_total", "result" => if response.error_code == 0 { "ok" } else { "error" }).increment(1);
                     if let Some(reply) = job.reply { let _ = reply.send(response); }
-                    else if active.outbound.try_send(Outbound::Message(response)).is_err() { active.cancel.cancel(); }
+                    else if active.outbound.try_send(Outbound::Logical(response)).is_err() { active.cancel.cancel(); }
                 }
             }
         }

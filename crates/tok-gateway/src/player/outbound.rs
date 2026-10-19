@@ -8,15 +8,18 @@ use crate::{
 use tok_core::{LogicalMessage, MessageKind};
 use tokio::sync::{mpsc, oneshot};
 
+/// 按发送前的数据形式区分下行项，不限定消息职责或来源。
 pub(crate) enum Outbound {
-    Control(Frame, Option<oneshot::Sender<()>>),
-    Message(LogicalMessage),
+    /// 已构造的协议帧；可在写出后通知等待方，不代表客户端确认。
+    Frame(Frame, Option<oneshot::Sender<()>>),
+    /// 由连接写循环转换为协议帧的逻辑回应或通知。
+    Logical(LogicalMessage),
 }
 pub(crate) type Sender = mpsc::Sender<Outbound>;
 
 pub(crate) fn send(sender: &Sender, message: LogicalMessage) -> Result<()> {
     sender
-        .try_send(Outbound::Message(message))
+        .try_send(Outbound::Logical(message))
         .map_err(|_| ErrorCode::SessionClosed.into())
 }
 

@@ -180,8 +180,8 @@ async fn connection(
     let writing = async {
         while let Some(outbound) = outgoing.recv().await {
             let (mut frame, written) = match outbound {
-                Outbound::Control(frame, written) => (frame, written),
-                Outbound::Message(message) => (outbound::frame(message)?, None),
+                Outbound::Frame(frame, written) => (frame, written),
+                Outbound::Logical(message) => (outbound::frame(message)?, None),
             };
             if frame.encoded_len() > config.max_frame_size {
                 if let Some(Content::Response(response)) = &frame.content {
@@ -219,7 +219,7 @@ async fn connection(
 
 fn control(sender: &Sender, content: Content) -> Result<()> {
     sender
-        .try_send(Outbound::Control(
+        .try_send(Outbound::Frame(
             Frame {
                 version: VERSION,
                 content: Some(content),
@@ -239,7 +239,7 @@ async fn close_with_error(sender: &Sender, code: ErrorCode, timeout: Duration) {
         })),
     };
     if sender
-        .try_send(Outbound::Control(frame, Some(written)))
+        .try_send(Outbound::Frame(frame, Some(written)))
         .is_ok()
     {
         let _ = tokio::time::timeout(timeout, completed).await;
