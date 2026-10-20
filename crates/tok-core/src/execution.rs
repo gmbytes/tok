@@ -1,5 +1,9 @@
 //! 与传输及游戏 protobuf 无关的逻辑调用类型。
 
+mod context;
+
+pub use context::{Context, Extensions, Source, StopReason};
+
 /// 可恢复的逻辑会话身份；epoch 是所有权代次，不是消息序号。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionIdentity {

@@ -9,6 +9,10 @@ default:
 check:
     cargo check --workspace --all-targets --locked
 
+# 验证 P1 类型化处理链、本地状态借用与最小网关能力组装，不绑定端口
+execution-smoke:
+    cargo run -p demo-game --example execution --locked
+
 # 执行 workspace 测试
 test:
     cargo test --workspace --locked

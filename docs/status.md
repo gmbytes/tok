@@ -1,13 +1,13 @@
 # 当前实现状态
 
-核对日期：2026-10-20。代码基线为 `2dbb2c8`；当前未提交改动为文档校准。本页描述代码现状，目标设计见[总体设计](design.md)与[服务运行模型](service-runtime.md)，迁移顺序见[实施计划](implementation-plan.md)。
+核对日期：2026-10-20。运行基线为 `2dbb2c8`，文档基线为 `2552274`；当前未提交改动包含 P1 原型与其文档。本页描述代码现状，目标设计见[总体设计](design.md)与[服务运行模型](service-runtime.md)，迁移顺序见[实施计划](implementation-plan.md)。
 
 ## 已实现与本轮缺口
 
 | 范围 | 当前能力与代码依据 | 方向校正仍需完成 |
 | --- | --- | --- |
 | 应用组装 | [tok runtime](../crates/tok/src/runtime.rs) 提供 ServiceFactory、启动/退出期限、共享端点、服务就绪与任务监督 | 把可复用构建/运行能力下沉，tok 保留应用组装与门面 |
-| 执行模型 | [CallContext](../crates/tok-core/src/execution.rs)、RPC CallHandler、网关 Executor 和事件 Handler 分别可用 | 统一执行上下文、输入/结果契约和 Layer 协议 |
+| 执行模型 | P1 提供 [execution::Context](../crates/tok-core/src/execution/context.rs) 与 [tok-service](../crates/tok-service/src/lib.rs) 类型化执行 Layer，既有 CallHandler / Executor / Handler 仍分别可用 | P2 下沉构建/生命周期，P3/P4 迁移现有入口 |
 | RPC | [tok-rpc](../crates/tok-rpc/src/lib.rs) 提供共享端点、强类型分发、请求锁、追踪、无自动重试客户端 | 当前 TowerHandler 只适配 call，不等于事件与 timer 已统一执行 |
 | 本地事件 | [local::Dispatcher](../crates/tok-events/src/local.rs) 在当前调用内借用状态、同步执行、首错返回 | 与异步事件 Registry 统一封装、上下文和注册契约 |
 | NATS | [Bus](../crates/tok-events/src/nats.rs) 按固定事件类型订阅，组件选择 group，串行处理及容量/期限有界 | topic 进入路由，订阅描述支持固定与动态兴趣，复用统一处理核心 |
@@ -16,7 +16,7 @@
 | topic | [主题索引](../crates/tok-gateway/src/player/session/subscriptions.rs) 按本地会话成员筛选，支持加入/退出及交接恢复 | 尚无 NATS topic 路由、成员引用合并订阅、聊天/区服自动订阅策略 |
 | 发现与协调 | Memory / Redis 发现、session 所有权及请求级锁；路由读取本地目录 | 本轮沿用既有语义；Redis Cluster 客户端仍待实现 |
 | 可观测 | tracing、动态过滤、Prometheus、OTLP、RPC/NATS 追踪传播 | 在统一执行入口复用现有设施，维持有限指标标签 |
-| 工程 | 八个框架 crate、demo、TOML、protobuf 构建期生成、rustdoc、just、Windows/Linux CI、LF 检查 | 持续验证迁移，不先增加没有实现用途的 crate 或配置 |
+| 工程 | 九个框架 crate（含 P1 新增 tok-service）、demo、TOML、protobuf 构建期生成、rustdoc、just、Windows/Linux CI、LF 检查 | 持续验证迁移，不先增加没有实现用途的 crate 或配置 |
 
 ## 容易混淆的现状
 
@@ -26,7 +26,7 @@ Envelope<E> 是强类型事件封装，Message 是带编码正文的运行时表
 
 发布成功仅表示客户端接受操作，不等待 broker 或业务确认；仅订阅初始化等待有限回环就绪确认。事件 handler 的 Outcome、本地投递 Report、player 执行和客户端 ACK 是不同阶段。
 
-当前 GatewayContext 能监督任务并取得取消信号，SessionHandle 提供部分操作；完整的信息快照、结束等待、统一扩展状态与生命周期接口尚未提供。CallContext 也不是目标 ExecutionContext。
+当前 GatewayContext 能监督任务并取得取消信号，SessionHandle 提供部分操作；完整的信息快照、结束等待、统一扩展状态与生命周期接口尚未提供。CallContext 也不是 P1 的 execution::Context，现有入口尚未使用新的执行 Layer。
 
 ## 现行使用边界
 
@@ -38,9 +38,14 @@ Memory 只用于单进程协调；多进程可选择 Redis。租约与 RPC 的�
 
 ## 未实现的后续能力
 
-统一服务执行/构建设施、完整生命周期上下文、统一事件接口和动态订阅属于本轮校正工作。JetStream、离线玩家加载、跨节点去重辅助、通用玩家归属中继、Kubernetes 发现与部署、生产安全、Redis Cluster 和 Scene 接入属于后续范围。配置可校验或模块已预留不等于后端可运行。
+
+P1 上下文边界校正：移除通用 `target`；`operation` 明确为服务内稳定入口标识，`service` 只标识当前执行服务。实体身份按需通过类型化输入/扩展提供；路由输入、选定端点及熔断状态分离，契约见[服务运行模型](service-runtime.md#操作身份路由与熔断边界)。通用路由器和熔断器尚未实施，本次不扩大 P1 范围。
+
+P1 执行原型已经提供，不代表全部运行模型统一。通用服务构建/生命周期、现有入口迁移、统一事件接口和动态订阅属于 P2–P7 的工作。JetStream、离线玩家加载、跨节点去重辅助、通用玩家归属中继、Kubernetes 发现与部署、生产安全、Redis Cluster 和 Scene 接入属于后续范围。配置可校验或模块已预留不等于后端可运行。
 
 ## 验证记录与复现
+
+P1 本轮已通过 187 项工作区测试（其中新增 11 项原型测试和 1 项指南文档测试）、全目标 Clippy、workspace rustdoc、格式/LF，以及 execution-smoke、rpc-smoke、client-smoke。现有 NATS/Redis 协议和生产执行循环没有迁移，本轮未重复执行外部专项或 release 构建。P2–P7 未实施。
 
 基线此前已通过 175 项工作区测试（含文档测试）及 13 项真实 NATS 专项；后续命名调整另通过网关测试和 Clippy。该记录不是本次文档重构重新运行的结果，也不证明 Linux runner 或生产负载行为。详细历史见[实施历史](implementation-history.md)。
 

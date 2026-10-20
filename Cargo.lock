@@ -387,6 +387,7 @@ dependencies = [
  "tonic",
  "tonic-prost",
  "tonic-prost-build",
+ "tower",
  "uuid",
 ]
 
@@ -1979,9 +1980,11 @@ dependencies = [
  "tok-infra",
  "tok-observability",
  "tok-rpc",
+ "tok-service",
  "tokio",
  "tokio-util",
  "toml",
+ "tower",
  "tracing",
 ]
 
@@ -1991,6 +1994,8 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "thiserror",
+ "tokio-util",
+ "tracing",
 ]
 
 [[package]]
@@ -2102,6 +2107,19 @@ dependencies = [
  "tower",
  "tracing",
  "tracing-opentelemetry",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "tok-service"
+version = "0.1.0"
+dependencies = [
+ "thiserror",
+ "tok-core",
+ "tokio",
+ "tokio-util",
+ "tower",
+ "tracing",
  "tracing-subscriber",
 ]
 

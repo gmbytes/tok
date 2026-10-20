@@ -2,6 +2,15 @@
 
 use std::net::SocketAddr;
 
+/// 与监听端点无关的服务身份；同一身份可安装多种业务入口。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Identity {
+    /// 部署节点身份。
+    pub node_id: String,
+    /// 节点内的业务服务名。
+    pub service_name: String,
+}
+
 /// 服务发现信息，地址并不意味着网络监听已经启动。
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[expect(

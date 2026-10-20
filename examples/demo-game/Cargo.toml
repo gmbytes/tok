@@ -17,6 +17,7 @@ tonic-prost.workspace = true
 
 [dev-dependencies]
 heck.workspace = true
+tower.workspace = true
 tokio-util.workspace = true
 uuid.workspace = true
 redis.workspace = true

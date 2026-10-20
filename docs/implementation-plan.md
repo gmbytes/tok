@@ -1,6 +1,6 @@
 # 服务与处理链方向校正实施计划
 
-本计划替代旧的阶段零至八推进顺序，是当前重构与实施的唯一批次入口。基线为 `2dbb2c8`，七个批次均未开始代码实施；当前工作是文档整理。旧阶段与验收见[实施历史](implementation-history.md)，代码现状见[实现状态](status.md)。
+本计划替代旧的阶段零至八推进顺序，是当前重构与实施的唯一批次入口。运行基线为 `2dbb2c8`，文档校准已提交为 `2552274`；P1 最小执行模型已完成并通过验收，P2–P7 尚未实施。旧阶段与验收见[实施历史](implementation-history.md)，代码现状见[实现状态](status.md)。
 
 目标：框架提供“服务 = 状态 + 入口路由 + 处理链”，处理链由中间件与 handler 组成；tok-gateway 成为共同设施的内置扩展，tok crate 保持门面与应用组装入口。[总体设计](design.md)规定边界，[服务运行模型](service-runtime.md)规定目标契约。
 
@@ -8,8 +8,8 @@
 
 | 批次 | 内容 | 前置 | 状态 |
 | --- | --- | --- | --- |
-| P1 | 验证统一执行抽象 | 已确认的设计 | 未实施，下一步 |
-| P2 | 下沉服务构建与运行设施 | P1 契约成立 | 未实施 |
+| P1 | 验证统一执行抽象 | 已确认的设计 | 已完成最小模型验收 |
+| P2 | 下沉服务构建与运行设施 | P1 契约成立 | 未实施，下一步 |
 | P3 | 统一 RPC 与事件执行入口 | P1、P2 | 未实施 |
 | P4 | gateway 迁移为服务扩展 | P2、P3 | 未实施 |
 | P5 | 实现传输 topic 路由 | P3 统一事件契约 | 未实施 |
@@ -32,7 +32,24 @@
 
 **验收：** 同一个日志/预算 Layer 在 RPC 形态、事件和 timer 调用上工作；本地借用保持有效，业务错误可辨认，取消和预算不被重置；例子没有 gateway → tok 门面依赖。记录不适用于借用调用的 Layer（如要求静态后台执行者）的边界。
 
-**边界：** 本批不搬迁 Application/Gateway，不改客户端协议、subject 或动态订阅，不要求提前实现全部服务 API。下一步只实施本批，不自动扩张到 P2。
+**边界：** 本批不搬迁 Application/Gateway，不改客户端协议、subject 或动态订阅，不要求提前实现全部服务 API。本批只完成原型验证，不自动扩张到 P2。
+
+### P1 已形成的落点
+
+- tok-core 的 execution::Context / Source / Extensions 与 service::Identity 提供通用契约，不依赖协议或 gateway。
+- 新增 tok-service 承载实际的 Request<T>、Tower Layer/Service 与受预算和取消保护的调用 future；tok 门面通过 service 导出，tok-service 的正常依赖不包含 gateway、RPC、事件或 NATS。
+- 本地异步 handler 可借用状态，普通调用、事件与 timer 保留不同输入/结果类型；最小 gateway 示例只安装查询/任务句柄能力，没有迁移生产 worker。
+- 公共构建、ServiceFactory 和生命周期监督在 P2 继续放入 tok-service；当前 Application/Gateway 结构不变。
+- 独立示例为 `examples/demo-game/examples/execution.rs`，命令为 `just execution-smoke`。Layer 的克隆、readiness 预算和借用/静态任务兼容限制在用户指南记录。
+
+
+P1 上下文边界校正：移除通用 `target`；`operation` 明确为服务内稳定入口标识，`service` 只标识当前执行服务。实体身份按需通过类型化输入/扩展提供；路由输入、选定端点及熔断状态分离，契约见[服务运行模型](service-runtime.md#操作身份路由与熔断边界)。通用路由器和熔断器尚未实施，本次不扩大 P1 范围。
+
+### P1 验收记录（2026-10-20 Windows）
+
+新增 11 项执行/上下文测试与 1 项 rustdoc 示例，工作区共 187 项测试通过。覆盖 RPC/客户端请求/事件/timer 的类型化结果、同一 Layer、跨 await 本地状态借用、同步适配、首错停止及原错误、readiness 预算、超时/取消/Drop、非协作式迟到结果、父子取消、能力隔离及追踪跨 await 关联。
+
+全目标 Clippy、workspace rustdoc、格式和 LF 检查通过；execution-smoke、原有 rpc-smoke 和 client-smoke 通过。未改变 NATS/Redis/session 协议路径，本批不重复运行真实 NATS/Redis 专项或 release 构建，不将旧结果记作本批验证，也不声称已完成生产入口或生命周期迁移。
 
 ## P2 下沉服务构建与运行设施
 

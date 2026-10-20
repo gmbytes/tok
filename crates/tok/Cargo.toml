@@ -8,6 +8,7 @@ license.workspace = true
 
 [dependencies]
 tok-core.workspace = true
+tok-service.workspace = true
 tok-events.workspace = true
 tok-gateway.workspace = true
 tok-infra.workspace = true
@@ -23,6 +24,7 @@ thiserror.workspace = true
 
 [dev-dependencies]
 prost.workspace = true
+tower.workspace = true
 
 [lints]
 workspace = true

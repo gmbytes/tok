@@ -30,7 +30,7 @@ RPC 返回回应，事件返回当前处理阶段的结果，不自动生成客�
 | tok-gateway | 连接、认证、session、FIFO、timer、下行恢复与交接 | 通用服务的内置扩展，不是普通服务的必选基类 |
 | tok 门面及应用组装 | 统一导出、节点配置、端点和整应用组装 | 可以依赖上述组件，供游戏便捷使用 |
 
-依赖方向为“门面/游戏组装 → 扩展与适配 → 共同设施 → 基础契约”。实际依赖允许按用途引用更下层组件，禁止形成循环或反向依赖具体游戏。共同设施不能长期留在门面，再由 gateway 复制实现；也不为分层图预先增加空 crate。
+依赖方向为“门面/游戏组装 → 扩展与适配 → 共同设施 → 基础契约”。实际依赖允许按用途引用更下层组件，禁止形成循环或反向依赖具体游戏。P1 已采用 tok-core 放通用上下文，tok-service 放类型化执行与 Layer；后续公共构建与生命周期沿这一落点下沉。共同设施不能长期留在门面，再由 gateway 复制实现；也不为分层图预先增加空 crate。
 
 Gateway 复用构建、上下文、Layer、任务监督和退出设施；监听、session 调度、恢复与交接保留各自状态机，不强制合并成一个循环。通用设施不能到处判断 player/scene。游戏自定义服务与内置 gateway 使用相同扩展契约。
 
@@ -117,7 +117,7 @@ Kubernetes 配置可校验但后端未实现，部署目录尚无可运行清单
 
 ## 工程与可观测
 
-现有 workspace 包括 tok-core、tok-proto、tok-rpc、tok-events、tok-gateway、tok-infra、tok-observability 和 tok。游戏协议属于 demo/game；框架协议属于 tok-proto。protobuf 构建期生成到 Cargo OUT_DIR，不提交生成的 Rust 文件。
+现有 workspace 包括 tok-core、P1 新增的 tok-service、tok-proto、tok-rpc、tok-events、tok-gateway、tok-infra、tok-observability 和 tok。游戏协议属于 demo/game；框架协议属于 tok-proto。protobuf 构建期生成到 Cargo OUT_DIR，不提交生成的 Rust 文件。
 
 游戏消息 ID 可由 proto 枚举在构建期按名字生成关联，运行时仍按数字分发，配对与权限显式注册。未发布 API/协议直接校正，不增加开发中间状态兼容别名；正式发布后的破坏性变更再按版本策略处理。
 

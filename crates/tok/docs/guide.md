@@ -9,12 +9,12 @@ tok 是实验性的 Rust 游戏服务器框架。游戏通过本 crate 组装组
 | 目标 | 当前使用方式 | 状态 |
 | --- | --- | --- |
 | 服务与处理链共同构建 | Application / ServiceFactory 与 Gateway 分别组装 | P1/P2/P4 待实施 |
-| 消息、事件、timer 共用上下文与 Layer | RPC CallContext、事件 Handler、网关 Executor 分别使用 | P1/P3/P4 待实施 |
+| 消息、事件、timer 共用上下文与 Layer | P1 原型可用，既有 RPC/事件/Executor 尚未迁移 | P1 原型验收通过，P3/P4 待实施 |
 | 本地与远程共用事件接口 | local::Dispatcher 与 Registry / Subscriber 为两套契约 | P3 待实施 |
 | topic 参与传输并动态聚合 | join_topic / leave_topic 为同步本地成员操作 | P5/P6 待实施 |
 | 完整生命周期、查询和状态扩展 | 当前句柄只提供已公开的有限操作 | P2/P4 待实施 |
 
-下文示例保持可编译，不使用尚未提供的统一 Builder、ExecutionContext 或异步主题接口。实际迁移后再按对应批次替换示例；不靠兼容别名长期维护两套模型。
+下文示例保持可编译，不使用尚未提供的统一 Builder 或异步主题接口。实际迁移后再按对应批次替换示例；不靠兼容别名长期维护两套模型。
 
 ## 生成和阅读文档
 
@@ -36,6 +36,58 @@ workspace 同时禁止持有同步锁或 RefCell 借用跨越 await、丢弃未�
 tok-gateway 是这套基础设施的内置扩展，增加连接、认证、session、串行调度、补发与交接能力。游戏自定义服务和 gateway 应使用相同的构建与扩展机制。
 
 本 crate 是统一导出与应用组装门面。共同契约和运行能力应由下层提供，gateway 不反向依赖本 crate；使用端可以继续从 tok 取得便捷接口。当前 Application 与 Gateway 等执行设施尚未完成目标统一，下文示例仍以已实现 API 为准，不代表统一构建接口已经提供。
+
+## P1 通用执行原型
+
+P1 已提供 [`core::execution::Context`]、类型化 [`service::Request`] 与共同的 [`service::Layer`]。
+上下文的 `service()` 表示当前执行所属服务，`operation()` 是入口适配器填写的稳定操作标识，不拼接实体或请求 ID。业务实体身份、路由输入等按需使用类型化输入或扩展携带；当前原型没有通用路由器或熔断器。
+原型位于 tok-core / tok-service，构建普通调用与 gateway 能力时共用；现有 Application、Gateway、RPC 和事件注册表尚未迁移。
+
+以下普通 Rust 输入不要求 protobuf，本地状态直接借用，经过 await 后仍在当前任务中修改：
+
+```rust
+use std::{io, time::Duration};
+use tok::{
+    core::{execution::{Context, Source}, service::Identity},
+    runtime::CancellationToken,
+    service::{Layer as ExecutionLayer, Request},
+};
+use tower::{Layer, ServiceExt, service_fn};
+
+async fn update(request: Request<&mut u64>) -> io::Result<u64> {
+    tokio::task::yield_now().await;
+    *request.input = request.input.checked_add(1).ok_or_else(|| io::Error::other("计数溢出"))?;
+    Ok(*request.input)
+}
+
+# async fn example() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+let context = Context::new(
+    Identity { node_id: "local".into(), service_name: "counter".into() },
+    "counter.changed", Source::Event { event_id: "example:1".into() },
+    Duration::from_secs(2), CancellationToken::new(),
+)?;
+let mut value = 0;
+let result = ExecutionLayer.layer(service_fn(update))
+    .oneshot(Request::new(context, &mut value)).await?;
+assert_eq!((result, value), (1, 1));
+# Ok(())
+# }
+# #[tokio::main]
+# async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> { example().await }
+```
+
+Context::child 继承原截止点、目标、追踪和能力，父取消向子传播，子取消不关闭父调用。
+Extensions 共享类型化能力；插入 Arc 状态等能力由游戏明确选择，不强制把本地 &mut 状态转换为共享锁。
+Source 是可信入口的关联信息，构造这个类型本身不构成认证；远程适配仍需验证元数据。
+
+ExecutionLayer 将内层就绪与执行放入同一预算，执行前后检查取消和截止点，丢弃 future 会停止本地等待，不回滚副作用。
+外层 poll_ready 立即就绪，内层 readiness 在调用 future 内等待；它不承诺内层立即可执行。
+调用会克隆内层 Service，共享限流状态应由对应 Layer 共享。需要预算保护的 readiness 等待应放在 ExecutionLayer 内侧。
+
+借用输入没有静态生命周期要求，可用于直接执行的 Layer；要求后台任务为静态生命周期的 Buffer、spawn 等不能直接接受该借用。
+owned 输入满足相应 Send 条件时仍可交给运行时。P1 不增加隐式队列，也不改变现有 session FIFO 或协议。
+
+运行 `just execution-smoke` 验证 RPC 形态、事件、timer 和 gateway/session manager 能力的组合；示例不绑定端口，也不代表生产 RPC/事件适配已迁移。
 
 ## 配置一个服务
 
@@ -960,7 +1012,8 @@ Scene 目前仅预留模块，不套用 Player 的串行与所有权语义。
 | --- | --- |
 | [`config`] | TOML 加载、校验与端点引用 |
 | [`runtime`] | 服务工厂、启动监督与退出 |
-| [`core`] | 共享类型、错误和组件契约 |
+| [`core`] | 共享类型、错误、执行上下文和组件契约 |
+| [`service`] | P1 类型化执行与预算/取消 Layer 原型，未迁移已有运行时 |
 | [`infra`] | 服务目录、路由及协调后端 |
 | [`rpc`] | 内部 RPC 与 Tower 组装 |
 | [`gateway`] | 统一 Gateway 运行框架与 Player、Scene 接入组件 |

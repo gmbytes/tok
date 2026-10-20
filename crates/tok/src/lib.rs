@@ -11,3 +11,6 @@ pub use tok_gateway as gateway;
 pub use tok_infra as infra;
 pub use tok_observability as observability;
 pub use tok_rpc as rpc;
+
+/// 通用服务执行与处理链原型；既有运行时及网关尚未迁移。
+pub use tok_service as service;
