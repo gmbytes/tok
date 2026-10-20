@@ -57,6 +57,10 @@ redis-smoke:
 ownership-test:
     cargo test -p tok-infra --test redis_ownership --locked -- --ignored
 
+# 验证真实 Redis 请求锁的跨进程竞争、过期及条件释放
+locks-test:
+    cargo test -p tok-infra --test redis_locks --locked -- --ignored
+
 # 验证独立网关进程共享所有权、租约丢失和崩溃过期
 ownership-smoke:
     cargo test -p demo-game --test redis_discovery --locked -- --ignored ownership

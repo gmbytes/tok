@@ -9,6 +9,7 @@
 mod client;
 mod endpoint;
 mod handler;
+pub mod lock;
 mod propagation;
 pub mod timer;
 

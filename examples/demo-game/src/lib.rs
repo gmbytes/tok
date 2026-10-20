@@ -31,8 +31,16 @@ impl ServiceFactory for LifecycleService {
     }
 }
 
-/// 组装客户端 TCP 网关和共享内部 gRPC 服务，按配置选择内存或 Redis 所有权。
+/// 组装 TCP 网关与内部 RPC；所有权按配置选择，公会请求锁默认使用 Memory。
 pub fn application(config: AppConfig) -> Result<Application, Error> {
+    application_with_locks(config, Arc::new(tok::infra::locks::Memory::new(1024)?))
+}
+
+/// 显式注入独立的公会请求锁后端；多进程共享业务须使用 Redis 等共享后端。
+pub fn application_with_locks(
+    config: AppConfig,
+    locks: Arc<dyn tok::core::coordination::LockBackend>,
+) -> Result<Application, Error> {
     let mut app = Application::new(config.clone())?;
     let ownership: Arc<dyn tok::core::coordination::OwnershipStore> = match config.ownership {
         tok::OwnershipBackend::Memory => Arc::new(tok::infra::ownership::MemoryOwnership::new(
@@ -152,7 +160,7 @@ pub fn application(config: AppConfig) -> Result<Application, Error> {
                     RpcService::new(
                         &config.node_id,
                         &service.service_name,
-                        Arc::new(guild::handlers()?),
+                        guild::locked_handler(&service.service_name, Arc::clone(&locks))?,
                     )?
                     .into_business(),
                 )?,

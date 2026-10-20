@@ -18,6 +18,12 @@ pub enum Error {
     /// 协调后端无法完成操作，附带原因。
     #[error("协调后端不可用：{0}")]
     CoordinationUnavailable(String),
+    /// 请求级锁在等待期限内未能获取。
+    #[error("请求级锁获取超时")]
+    LockTimeout,
+    /// 锁后端的本地容量或并发操作容量已满。
+    #[error("请求级锁容量已满")]
+    LockCapacity,
     /// 配置校验失败，附带原因。
     #[error("配置错误：{0}")]
     InvalidConfig(String),

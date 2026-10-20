@@ -74,7 +74,7 @@ service_name = "guild"
 endpoint = "internal-rpc"
 ```
 
-RPC 使用 `CallContext`、`HandlerRegistry` 和 `RpcService` 分离业务上下文、强类型分发与 gRPC 接入。`RpcClients` 有界复用 Channel，设置调用超时且不重试；通过 metadata 传播 W3C TraceContext。用户可用 `TowerHandler` 接入代码组装的中间件链，决定选择、顺序和作用范围。请求级锁契约已定义，Redis 后端、锁 Layer 和中间件配置表达后续实现，普通业务入口不自动加锁。
+RPC 使用 `CallContext`、`HandlerRegistry` 和 `RpcService` 分离业务上下文、强类型分发与 gRPC 接入。`RpcClients` 有界复用 Channel，设置调用超时且不重试；通过 metadata 传播 W3C TraceContext。用户可用 `TowerHandler` 接入代码组装的中间件链，决定选择、顺序和作用范围。请求级锁提供独立的 Memory / Redis 后端与 `rpc::lock::Layer`，按逻辑服务名和 bid 互斥；由 Rust 代码显式安装，普通业务入口不自动加锁。示例 guild 默认安装 Memory 锁，多进程通过 `application_with_locks` 注入共享后端。配置式中间件链仍待后续实现。
 
 `just build` 输出当前平台的 `target/release/demo-game.exe` 或 `target/release/demo-game`。同一二进制通过 `--config` 选择服务。当前 Kubernetes 配置仅支持 `--check-config` 校验，实际运行会明确报错。
 
@@ -108,6 +108,8 @@ Redis discovery 只共享服务地址。session 所有权独立选择 `ownership
 redis-gateway.toml 已配置 `ownership = "redis"` 及 `[redis_ownership]`；多个网关共享相同 Redis URL、数据库和 namespace，节点身份及监听端口各不相同。
 Redis 所有权提供原子获取、epoch 更新、条件续租和释放；活动租约被其他网关持有时拒绝登录，释放或过期后才能建立新会话。携带共享恢复凭证的 Resume 可通过旧网关协作完成交接，保留 session_id 和下行序列并增加 epoch。
 `just ownership-test` 验证竞争、旧身份拒绝、过期与 epoch 精度；`just ownership-smoke` 使用两个独立网关进程验证共享所有权和失效收束。
+
+`just locks-test` 单独验证请求级 Redis 锁的跨进程竞争、租期兜底、旧持有者条件释放和断线释放失败；使用 TOK_TEST_REDIS_URL，默认本机 6379。常规锁与 Layer 测试不依赖 Redis。
 
 租约和 RPC 均有期限且不自动重试。发起业务前根据续租开始时刻检查剩余租期，Redis 获取与续租也拒绝明显超过租期的迟到回应。
 超时不表示远端业务停止或回滚，系统接受检查后暂停、延迟导致的竞态窗口，不默认对每次写入增加远程校验或 fencing。

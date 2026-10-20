@@ -185,6 +185,58 @@ Channel 缓存有界，节点和地址相同的服务复用连接；节点变更
 运行 `just rpc-smoke` 可以验证示例 player 与 guild 的内部调用并退出。
 此检查使用构造的内部会话上下文；登录认证和客户端 session 由 `just client-smoke` 单独验证。
 
+## 请求级锁
+
+[`infra::locks::Memory`] 提供有界单进程请求锁，克隆共享状态；
+[`infra::locks::Redis`] 提供跨进程请求锁，配置为 [`infra::locks::RedisConfig`]。
+两者实现 [`core::coordination::LockBackend`]，返回显式释放的 [`core::coordination::LockLease`]。
+Redis 后端使用有限 TTL 和唯一持有者标识，Lua 比较身份后释放；旧租约不能删除新锁。
+后端不续租，取消后不在 Drop 中异步释放，依靠 TTL 兜底。
+
+[`rpc::lock::Layer`] 通过 [`rpc::TowerHandler`] 在普通业务 RPC 的上下文校验之后包住 handler。
+按逻辑服务名与上下文 bid 加锁，空 bid 拒绝执行，不同服务隔离；节点名不进入锁键。
+由 Rust 组装代码按服务显式安装，不需要 `ServiceConfig` 开关：
+
+```rust
+use std::sync::Arc;
+use tok::{
+    core::coordination::LockBackend,
+    infra::locks,
+    rpc::{CallHandler, HandlerRegistry, RpcService, TowerHandler, lock, tower::{self, Layer}},
+};
+
+# fn example() -> Result<(), Box<dyn std::error::Error>> {
+let backend: Arc<dyn LockBackend> = Arc::new(locks::Memory::new(1024)?);
+let registry = Arc::new(HandlerRegistry::new()); // 在此注册业务 handler。
+let service = tower::service_fn(move |(context, payload)| {
+    let registry = Arc::clone(&registry);
+    async move { registry.call(context, payload).await }
+});
+let layer = lock::Layer::new(backend, lock::Config::new("guild"))?;
+let rpc = RpcService::new("node-a", "guild", Arc::new(TowerHandler(layer.layer(service))))?
+    .into_business();
+# drop(rpc);
+# Ok(())
+# }
+```
+
+多进程时将后端替换为 `Arc::new(locks::Redis::new(locks::RedisConfig { namespace: "dev".into(), ..Default::default() })?)`，
+所有节点须使用相同 Redis 与环境命名空间。请求级锁与 session 所有权独立注入，不从 ownership 配置推导。
+示例 `demo_game::application` 默认给 guild 安装 Memory 锁；多进程共享业务使用
+`demo_game::application_with_locks` 显式注入共享后端。player 仍由 session 串行执行，网关交接接口不安装此 Layer。
+
+[`rpc::lock::Config`] 默认竞争等待 100ms、整体获取期限 500ms、租期 3s、业务执行期限 1s、释放期限 100ms。
+从获取开始按单调时钟扣除耗时，剩余租期必须容纳完整执行预算和释放余量，否则拒绝执行。
+内部 Service 的 readiness 等待也计入执行预算；需要整体并发限制时在锁 Layer 外侧组装共享限流器。
+`Memory::new(capacity)` 分别限制活动键和并发获取数量，Redis 的 `max_pending` 限制本地并发获取，超限快速拒绝。
+获取竞争可在等待期限内尝试，业务调用不重试；后端操作结果不确定时不重试写操作。
+
+正常结束或 Layer 内部超时后显式等待有界条件释放，外层丢弃整个调用 future 时由 TTL 兜底。
+获取/执行超时返回 `DeadlineExceeded`，容量不足返回 `ResourceExhausted`，后端故障返回 `Unavailable`。
+释放失败会记录系统错误：原 handler Status 或非零 RpcError 保留，业务成功则返回 `Unavailable`，结果不能视作回滚。
+这遵循既定超时与租约竞态边界，不保证异常路径下的绝对互斥，也不强制存储使用 fencing。
+`just locks-test` 显式验证真实 Redis 的跨进程竞争、过期、旧租约条件释放及释放断线；常规测试无需 Redis。
+
 ## 服务发现与内存所有权
 
 [`core::ServiceDirectory`] 提供快照和变更订阅。先订阅再读取初始快照，每次通知后重新读取需要的服务。
@@ -246,7 +298,7 @@ RPC 超时不表示远端 handler 已停止或写入已回滚。时间检查通�
 `just ownership-test` 显式验证真实 Redis 竞争、完整身份校验、过期、重启代次、2^53 相邻整数和计数器耗尽。
 `just ownership-smoke` 启动独立游戏及两个网关进程，验证竞争拒绝、释放后登录、租约丢失关闭、崩溃后过期和旧代次失效。
 测试使用 TOK_TEST_REDIS_URL，默认本机 6379；常规测试不依赖 Redis。
-timer 与同网关恢复已接通；跨网关交接和请求级 LockBackend 实现仍按后续阶段推进。
+timer、同网关恢复、可选的跨网关交接和请求级锁均已接通；Redis Cluster 客户端仍待实现。
 
 ## Redis 多进程开发发现
 

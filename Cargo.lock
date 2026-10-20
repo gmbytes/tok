@@ -1835,6 +1835,7 @@ dependencies = [
  "prost",
  "thiserror",
  "tok-core",
+ "tok-infra",
  "tok-proto",
  "tokio",
  "tokio-stream",
