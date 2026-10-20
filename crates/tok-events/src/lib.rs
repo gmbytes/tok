@@ -1,9 +1,9 @@
-//! 强类型事件契约与同步本地分发；Core NATS 即时投递；JetStream 与离线加载尚未实现。
+//! 统一强类型事件注册和异步执行，本地借用与远程解码共用 Tower 处理链。
+//! Core NATS 即时投递；JetStream 与离线加载尚未实现。
 
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
 
 mod contract;
-pub mod local;
 mod message;
 pub mod nats;
 mod registry;
@@ -11,7 +11,7 @@ mod subscriber;
 
 pub use contract::{Envelope, Event, EventId, TraceContext, validate_name};
 pub use message::Message;
-pub use registry::{Handler, Outcome, Registry, Task};
+pub use registry::{Callback, DispatchError, Handler, Input, Outcome, Registry, Task, handler};
 pub use subscriber::Subscriber;
 
 /// 通用服务器事件的投递策略，与业务目标和处理方式无关。
@@ -26,6 +26,9 @@ pub enum DeliveryPolicy {
 /// 事件契约、分发组装和传输错误；本地订阅者的业务错误仍原样返回。
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum Error {
+    /// 执行范围已取消或期限耗尽。
+    #[error(transparent)]
+    Stopped(tok_core::execution::StopReason),
     /// 后端连接、订阅或发布失败；不包含凭据和消息正文。
     #[error("事件后端不可用：{0}")]
     Unavailable(&'static str),

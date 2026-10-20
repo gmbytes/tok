@@ -411,3 +411,9 @@ Core NATS、JetStream、网关事件入口、主题订阅、离线加载及交�
 不增加并发工作池、跨订阅排序、批量发布协议、自动重试、通用去重、离线加载、自动 bid 路由或任意游戏状态的自动迁移。JetStream 留待后续批次，必须先定义业务完成后的消费确认，不能直接把网关入队当作持久化处理完成。Redis Cluster 客户端仍为阶段五剩余项。
 
 已通过 168 项常规测试和 7 项文档测试（合计 175 项），另通过 13 项真实 NATS 专项，覆盖同组分担/跨组独立/无组广播、类型过滤、伪造类型拒绝、缓冲预算释放、独立退订、超时不重试、断线/坏包/过载、无回环发布与订阅就绪、双网关分发与追踪。常规测试同时验证原始编码共享、会话 FIFO、主题索引生命周期、分批调度、交接和客户端入口隔离。组件校准后全目标 Clippy、rustdoc、格式及 NATS smoke 通过。此前 RPC / 客户端 smoke 和 release 构建已通过，本轮未重复执行。真实 Redis 专项未重复执行，未提供吞吐或延迟压测结论。
+
+## P3 统一执行入口迁移（2026-10-20 Windows）
+
+以 P2 提交 `c6ffdc3` 为基线，移除同步 local::Dispatcher，统一事件 Envelope、Registry 与 Tower 处理链；RPC、事件接收及 RPC timer 路由使用共同 Request / execution::Context。远程适配显式安装 protobuf 解码器，保留原始 Arc<Message>，本地可跨 await 借用状态。通过 rpc::Binding 在服务工厂中初始化并安装实际处理链，demo player/guild 已迁移；客户端 Frame 和 NATS subject 未改变。
+
+本批工作区 214 项测试、全目标 Clippy、rustdoc、六个 smoke、13 项真实 NATS 及 5 项 Redis 发现/多进程专项通过。该记录仅覆盖 Windows 本地验证；release 和 Linux 未在本批运行。P3 已完成本批验收，P4–P7 仍按当前实施计划推进。

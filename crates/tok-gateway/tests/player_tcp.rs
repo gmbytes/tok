@@ -190,6 +190,10 @@ impl Fixture {
             let subscription = events
                 .subscribe(
                     tok_events::Subscriber::new(
+                        tok_core::service::Identity {
+                            node_id: "test".into(),
+                            service_name: "events".into(),
+                        },
                         Arc::new(game_subscriber(gateway.ingress().sessions())),
                         None,
                     )
@@ -1487,23 +1491,24 @@ fn publication(delivery: tok_gateway::player::events::Delivery) -> tok_events::M
         Target::Topic(topic) => game.topic = Some(topic),
     }
     tok_events::Message::new(
-        tok_events::Envelope::new(tok_events::EventId::generate(), game).unwrap(),
+        &tok_events::Envelope::new(tok_events::EventId::generate(), game).unwrap(),
     )
     .unwrap()
 }
 fn game_subscriber(sessions: SessionManager) -> tok_events::Registry {
     let mut handlers = tok_events::Registry::new(1).unwrap();
     handlers
-        .register::<GameEvent, _, _>(move |_, event| {
+        .register::<GameEvent, _>(move |request| {
+            let event = &request.input.event.payload;
             let sessions = sessions.clone();
-            async move {
+            Box::pin(async move {
                 use tok_gateway::player::events::Target;
-                let target = if let Some(topic) = event.topic {
+                let target = if let Some(topic) = event.topic.clone() {
                     Target::Topic(topic)
                 } else if event.players.is_empty() {
                     Target::All
                 } else {
-                    Target::Players(event.players)
+                    Target::Players(event.players.clone())
                 };
                 let kind = if event.notify {
                     TestKind::Broadcast
@@ -1515,9 +1520,10 @@ fn game_subscriber(sessions: SessionManager) -> tok_events::Registry {
                     .await
                     .map_err(|_| tok_events::Error::Unavailable("游戏事件准入失败"))?;
                 Ok(report.into())
-            }
+            })
         })
         .unwrap();
+    handlers.enable_protobuf::<GameEvent>().unwrap();
     handlers
 }
 
@@ -1834,22 +1840,37 @@ async fn built_in_event_handlers_and_custom_components_compose_independently() {
         Arc::new(forward::<GameEvent, _>(fixture.sessions.clone(), |_| Ok(Target::All)).unwrap());
     let notifying = Arc::new(
         notify::<GameEvent, _>(fixture.sessions.clone(), 12, |event| {
-            Ok((Target::All, event.body))
+            Ok((Target::All, event.body.clone()))
         })
         .unwrap(),
     );
     let components = [
         Subscriber::new(
+            tok_core::service::Identity {
+                node_id: "test".into(),
+                service_name: "events".into(),
+            },
             Arc::clone(&forwarding) as Arc<dyn Handler>,
             Some("game.forward"),
         )
         .unwrap(),
-        Subscriber::new(Arc::clone(&notifying) as Arc<dyn Handler>, None).unwrap(),
+        Subscriber::new(
+            tok_core::service::Identity {
+                node_id: "test".into(),
+                service_name: "events".into(),
+            },
+            Arc::clone(&notifying) as Arc<dyn Handler>,
+            None,
+        )
+        .unwrap(),
     ];
     assert_eq!(components[0].group(), Some("game.forward"));
     assert_eq!(components[1].group(), None);
     assert_eq!(
-        forwarding.handle(Arc::clone(&message)).await.unwrap(),
+        forwarding
+            .handle(event_request(Arc::clone(&message)))
+            .await
+            .unwrap(),
         Outcome::Handled
     );
     // 请求作为 FIFO 屏障，确保之前入队的事件已经执行；事件本身不生成客户端回应。
@@ -1858,27 +1879,74 @@ async fn built_in_event_handlers_and_custom_components_compose_independently() {
     assert_eq!(*fixture.tracker.events.lock().unwrap(), vec![1]);
     let calls = fixture.tracker.calls.load(Ordering::SeqCst);
     assert_eq!(
-        notifying.handle(Arc::clone(&message)).await.unwrap(),
+        notifying
+            .handle(event_request(Arc::clone(&message)))
+            .await
+            .unwrap(),
         Outcome::Handled
     );
     assert!(
         matches!(client.read().await, Content::Notify(notice) if notice.message_id == 12 && notice.body == b"value")
     );
     assert_eq!(fixture.tracker.calls.load(Ordering::SeqCst), calls);
+    // 本地强类型事件也复用同一转发链，只在进入需要编码的 session 边界时编码。
+    let local = tok_events::Envelope::new(
+        tok_events::EventId::new("local-forward").unwrap(),
+        GameEvent::decode(message.body.as_slice()).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        forwarding
+            .dispatch(&mut (), event_request(&local))
+            .await
+            .unwrap(),
+        vec![Outcome::Handled]
+    );
+    client.request(3, 1, b"local-barrier").await;
+    assert!(matches!(client.read().await,Content::Response(response) if response.request_id==3));
+    assert_eq!(*fixture.tracker.events.lock().unwrap(), vec![1, 2]);
+    let calls = fixture.tracker.calls.load(Ordering::SeqCst);
     // 同一事件还可交给完全自定义的处理者，不需要进入转发或通知分支。
     let count = Arc::new(AtomicUsize::new(0));
     let captured = Arc::clone(&count);
     let mut custom = tok_events::Registry::new(1).unwrap();
     custom
-        .register::<GameEvent, _, _>(move |_, _| {
+        .register::<GameEvent, _>(move |_request| {
             captured.fetch_add(1, Ordering::SeqCst);
-            async { Ok(Outcome::Handled) }
+            Box::pin(async { Ok(Outcome::Handled) })
         })
         .unwrap();
-    assert_eq!(custom.handle(message).await.unwrap(), Outcome::Handled);
-    let custom = Subscriber::new(Arc::new(custom), Some("game.custom")).unwrap();
+    custom.enable_protobuf::<GameEvent>().unwrap();
+    assert_eq!(
+        custom.handle(event_request(message)).await.unwrap(),
+        Outcome::Handled
+    );
+    let custom = Subscriber::new(
+        tok_core::service::Identity {
+            node_id: "test".into(),
+            service_name: "events".into(),
+        },
+        Arc::new(custom),
+        Some("game.custom"),
+    )
+    .unwrap();
     assert_eq!(custom.group(), Some("game.custom"));
     assert_eq!(count.load(Ordering::SeqCst), 1);
     assert_eq!(fixture.tracker.calls.load(Ordering::SeqCst), calls);
     fixture.finish().await;
+}
+
+fn event_request<T>(input: T) -> tok_service::Request<T> {
+    let context = tok_core::execution::Context::new(
+        tok_core::service::Identity {
+            node_id: "test".into(),
+            service_name: "gateway".into(),
+        },
+        "test",
+        tok_core::execution::Source::Rpc { request_id: 1 },
+        Duration::from_secs(5),
+        CancellationToken::new(),
+    )
+    .unwrap();
+    tok_service::Request::new(context, input)
 }

@@ -1,128 +1,215 @@
-//! 本地分发的执行顺序、容量、错误及当前调用边界。
-use std::{
-    sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
-    },
-    thread,
-};
-use tok_events::{Error, Event, local::Dispatcher};
-
+//! 本地与远程共用注册表；直接借用、顺序、预算和错误边界。
+mod support;
+use std::sync::Arc;
+use tok_events::{DispatchError, Envelope, Error, Event, EventId, Input, Registry};
+use tok_service::{Request, sync_handler};
 struct Changed(i32);
 impl Event for Changed {
     const NAME: &'static str = "test.changed.v1";
 }
-
-#[test]
-fn listeners_run_in_registration_order_with_shared_mutable_state() {
-    let mut dispatcher = Dispatcher::<Changed, Vec<i32>, ()>::new(3).unwrap();
-    dispatcher
-        .register(|state, event| {
-            state.push(event.0);
-            Ok(())
-        })
-        .unwrap();
-    dispatcher
-        .register(|state, _| {
-            state.push(state[0] + 1);
-            Ok(())
-        })
-        .unwrap();
-    let mut state = vec![];
-    assert_eq!(dispatcher.dispatch(&mut state, &Changed(7)), Ok(2));
-    assert_eq!(state, [7, 8]);
+struct Other;
+impl Event for Other {
+    const NAME: &'static str = "test.other.v1";
 }
-
-#[test]
-fn first_error_is_preserved_and_partial_updates_are_not_rolled_back_or_retried() {
-    let original = Arc::new(String::from("业务失败"));
-    let mut dispatcher = Dispatcher::<Changed, Vec<i32>, Arc<String>>::new(3).unwrap();
-    dispatcher
-        .register(|state, event| {
-            state.push(event.0);
-            Ok(())
-        })
-        .unwrap();
-    let failure = Arc::clone(&original);
-    dispatcher
-        .register(move |_, _| Err(Arc::clone(&failure)))
-        .unwrap();
-    dispatcher
-        .register(|_, _| panic!("首错后不得执行"))
-        .unwrap();
-    let mut state = vec![];
-    let returned = dispatcher.dispatch(&mut state, &Changed(1)).unwrap_err();
-    assert!(Arc::ptr_eq(&returned, &original));
-    assert_eq!(state, [1]);
-    // 调用方再次分发就是再次执行业务，分发器不去重。
-    assert!(dispatcher.dispatch(&mut state, &Changed(1)).is_err());
-    assert_eq!(state, [1, 1]);
+struct Collision;
+impl Event for Collision {
+    const NAME: &'static str = Changed::NAME;
 }
-
-#[test]
-fn registration_is_bounded_and_rejection_keeps_existing_handlers() {
-    assert!(matches!(
-        Dispatcher::<Changed, i32, ()>::new(0),
-        Err(Error::InvalidCapacity)
-    ));
-    let mut dispatcher = Dispatcher::<Changed, i32, ()>::new(1).unwrap();
-    dispatcher
-        .register(|state, _| {
-            *state += 1;
-            Ok(())
-        })
-        .unwrap();
-    assert_eq!(
-        dispatcher.register(|_, _| panic!("超限订阅者不得注册")),
-        Err(Error::CapacityExceeded)
-    );
-    let mut state = 0;
-    assert_eq!(dispatcher.dispatch(&mut state, &Changed(0)), Ok(1));
-    assert_eq!(state, 1);
-}
-
-#[test]
-fn no_subscribers_is_a_successful_noop() {
-    let dispatcher = Dispatcher::<Changed, i32, ()>::new(1).unwrap();
-    let mut state = 5;
-    assert_eq!(dispatcher.dispatch(&mut state, &Changed(1)), Ok(0));
-    assert_eq!(state, 5);
-}
-
-#[test]
-fn immutable_dispatcher_is_shared_but_execution_stays_on_each_callers_thread() {
-    let calls = Arc::new(AtomicUsize::new(0));
-    let mut dispatcher = Dispatcher::<Changed, (thread::ThreadId, i32), ()>::new(1).unwrap();
-    let seen = Arc::clone(&calls);
-    dispatcher
-        .register(move |state, event| {
-            assert_eq!(thread::current().id(), state.0);
-            state.1 += event.0;
-            seen.fetch_add(1, Ordering::SeqCst);
-            Ok(())
-        })
-        .unwrap();
-    thread::scope(|scope| {
-        for _ in 0..4 {
-            let dispatcher = &dispatcher;
-            scope.spawn(move || {
-                let mut state = (thread::current().id(), 0);
-                dispatcher.dispatch(&mut state, &Changed(3)).unwrap();
-                assert_eq!(state.1, 3);
-            });
-        }
-    });
-    assert_eq!(calls.load(Ordering::SeqCst), 4);
-}
-
 struct Invalid;
 impl Event for Invalid {
     const NAME: &'static str = "test..invalid";
 }
-#[test]
-fn invalid_event_name_is_rejected_before_registration() {
+fn changed(value: i32) -> Envelope<Changed> {
+    Envelope::new(EventId::generate(), Changed(value)).unwrap()
+}
+
+#[tokio::test]
+async fn async_handlers_borrow_current_state_in_order_and_support_multiple_types() {
+    let mut registry = Registry::<Vec<i32>, (), Error>::new(3).unwrap();
+    registry
+        .register::<Changed, _>(|request| {
+            Box::pin(async move {
+                request.input.state.push(request.input.event.payload.0);
+                tokio::task::yield_now().await;
+                request.input.state.push(2);
+                Ok(())
+            })
+        })
+        .unwrap();
+    registry
+        .register_service::<Changed, _>(sync_handler(
+            |request: Request<Input<'_, Vec<i32>, Changed>>| {
+                request.input.state.push(request.input.state[0] + 1);
+                Ok(())
+            },
+        ))
+        .unwrap();
+    registry
+        .register::<Other, _>(|request| {
+            Box::pin(async move {
+                request.input.state.push(9);
+                Ok(())
+            })
+        })
+        .unwrap();
+    let mut state = vec![];
+    assert_eq!(
+        registry
+            .dispatch(&mut state, support::request(&changed(7)))
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
+    let other = Envelope::new(EventId::generate(), Other).unwrap();
+    registry
+        .dispatch(&mut state, support::request(&other))
+        .await
+        .unwrap();
+    assert_eq!(state, [7, 2, 8, 9]);
+}
+#[tokio::test]
+async fn first_error_preserves_original_identity_and_keeps_prior_changes() {
+    let original = Arc::new(String::from("业务失败"));
+    let mut registry = Registry::<Vec<i32>, (), Arc<String>>::new(3).unwrap();
+    registry
+        .register::<Changed, _>(|request| {
+            Box::pin(async move {
+                request.input.state.push(request.input.event.payload.0);
+                Ok(())
+            })
+        })
+        .unwrap();
+    let failure = Arc::clone(&original);
+    registry
+        .register::<Changed, _>(move |_| {
+            let failure = Arc::clone(&failure);
+            Box::pin(async { Err(failure) })
+        })
+        .unwrap();
+    registry
+        .register::<Changed, _>(|_| panic!("首错后不得执行"))
+        .unwrap();
+    let mut state = vec![];
+    let error = registry
+        .dispatch(&mut state, support::request(&changed(1)))
+        .await
+        .unwrap_err();
+    assert!(matches!(error,DispatchError::Handler(returned) if Arc::ptr_eq(&returned,&original)));
+    assert_eq!(state, [1]);
+    assert!(
+        registry
+            .dispatch(&mut state, support::request(&changed(1)))
+            .await
+            .is_err()
+    );
+    assert_eq!(state, [1, 1]);
+}
+#[tokio::test]
+async fn registration_bounds_type_collisions_and_empty_dispatch_are_explicit() {
     assert!(matches!(
-        Dispatcher::<Invalid, (), ()>::new(1),
+        Registry::<(), (), Error>::new(0),
+        Err(Error::InvalidCapacity)
+    ));
+    let mut registry = Registry::<(), (), Error>::new(1).unwrap();
+    assert!(
+        registry
+            .register::<Invalid, _>(|_| Box::pin(async { Ok(()) }))
+            .is_err()
+    );
+    registry
+        .register::<Changed, _>(|_| Box::pin(async { Ok(()) }))
+        .unwrap();
+    assert!(matches!(
+        registry.register::<Changed, _>(|_| Box::pin(async { Ok(()) })),
+        Err(Error::CapacityExceeded)
+    ));
+    assert!(matches!(
+        registry.register::<Collision, _>(|_| Box::pin(async { Ok(()) })),
         Err(Error::InvalidInput(_))
     ));
+    let other = Envelope::new(EventId::generate(), Other).unwrap();
+    assert!(
+        registry
+            .dispatch(&mut (), support::request(&other))
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let collision = Envelope::new(EventId::generate(), Collision).unwrap();
+    assert!(matches!(
+        registry
+            .dispatch(&mut (), support::request(&collision))
+            .await,
+        Err(DispatchError::Invalid(_))
+    ));
+}
+#[tokio::test]
+async fn cancellation_and_deadline_are_not_renewed_for_nested_events() {
+    let mut registry = Registry::<(), (), Error>::new(1).unwrap();
+    registry
+        .register::<Changed, _>(|request| {
+            Box::pin(async move {
+                request.context.check().unwrap();
+                std::future::pending().await
+            })
+        })
+        .unwrap();
+    let context = support::context();
+    let deadline = context.deadline();
+    let cancel = context.cancellation();
+    cancel.cancel();
+    assert!(matches!(
+        registry
+            .dispatch(&mut (), Request::new(context, &changed(1)))
+            .await,
+        Err(DispatchError::Stopped(
+            tok_core::execution::StopReason::Cancelled
+        ))
+    ));
+    let context = tok_core::execution::Context::new(
+        tok_core::service::Identity {
+            node_id: "n".into(),
+            service_name: "s".into(),
+        },
+        "parent",
+        tok_core::execution::Source::Rpc { request_id: 1 },
+        std::time::Duration::ZERO,
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .unwrap();
+    assert!(context.deadline() <= deadline);
+    assert!(matches!(
+        registry
+            .dispatch(&mut (), Request::new(context, &changed(1)))
+            .await,
+        Err(DispatchError::Stopped(
+            tok_core::execution::StopReason::DeadlineExceeded
+        ))
+    ));
+}
+#[tokio::test]
+async fn local_execution_stays_on_callers_thread_and_carries_capabilities() {
+    let thread = std::thread::current().id();
+    let mut registry = Registry::<usize, (), Error>::new(1).unwrap();
+    registry
+        .register::<Changed, _>(move |request| {
+            Box::pin(async move {
+                assert_eq!(std::thread::current().id(), thread);
+                tokio::task::yield_now().await;
+                assert_eq!(std::thread::current().id(), thread);
+                assert_eq!(request.context.extensions().get::<u32>(), Some(&42));
+                *request.input.state += 1;
+                Ok(())
+            })
+        })
+        .unwrap();
+    let mut context = support::context();
+    context.extensions_mut().insert(42u32);
+    let mut state = 0;
+    registry
+        .dispatch(&mut state, Request::new(context, &changed(1)))
+        .await
+        .unwrap();
+    assert_eq!(state, 1);
 }

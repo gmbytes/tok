@@ -2,7 +2,7 @@
 
 实验性的 Rust 游戏服务器框架，目标平台为 Windows amd64 和 Linux amd64。
 
-框架以“服务 + 处理链”为核心：服务由状态、入口路由和中间件/handler 组成，运行设施管理生命周期与任务。tok-gateway 是连接/session 能力的内置扩展；tok crate 提供统一导出与应用组装入口。P1 已提供统一执行原型，P2 已让 Application/Gateway 复用公共工厂与任务生命周期；业务入口迁移和动态订阅仍待实施。
+框架以“服务 + 处理链”为核心：服务由状态、入口路由和中间件/handler 组成，运行设施管理生命周期与任务。tok-gateway 是连接/session 能力的内置扩展；tok crate 提供统一导出与应用组装入口。P1 已提供统一执行原型，P2 已让 Application/Gateway 复用公共工厂与任务生命周期；P3 已统一 RPC/事件/timer 处理链及事件表，gateway/session 完整扩展和动态订阅仍待实施。
 
 ## 文档入口
 
@@ -22,7 +22,7 @@
 
 已接通配置与服务工厂、共享 gRPC 端点、强类型 RPC、Memory/Redis 发现与所有权、请求级锁、TCP 认证与串行 session、timer、下行序号与 ACK 缓存、同网关恢复、可选跨网关交接、本地事件及 Core NATS 即时事件。示例 player 和 guild 共用内部端点，可验证客户端状态读写及服务调用。
 
-当前 RPC、事件和 gateway 的执行接口仍分离，TowerHandler 只覆盖 RPC call；topic 仅维护本地会话成员，不参与 NATS 路由。P1 的 execution::Context、类型化 Request 与共同 Layer 原型可用，命令 `just execution-smoke`；P2 的 task 任务监督及 lifecycle 消费式服务生命周期可通过 `just lifecycle-smoke` 验证；现有入口迁移及聊天/区服动态订阅仍按 P3–P7 推进。
+RPC、事件和 RPC timer 路由已使用共同 execution::Context、类型化 Request 和 Tower Layer；本地事件与远程解码共用 Registry。`just execution-smoke`、`just lifecycle-smoke`、`just events-smoke` 分别验证执行、生命周期及统一事件链。gateway/session 完整扩展、新下行链和聊天/区服动态订阅按 P4–P7 推进；topic 目前仍只维护本地会话成员，不参与 NATS 路由。
 
 发布成功只表示 NATS 客户端接受操作，不等于远端业务完成；仅订阅建立确认就绪。客户端不能发布服务器事件，所有 player 执行经 session FIFO。Memory 只用于单进程，跨网关需共享所有权和明确配置的签名密钥/内部端点。生产安全、Kubernetes、Scene、JetStream、离线加载及 Redis Cluster 尚未完成。
 

@@ -200,7 +200,7 @@ impl Bus {
             .publishing
             .try_acquire()
             .map_err(|_| Error::CapacityExceeded)?;
-        self.send(&Message::new(envelope)?).await
+        self.send(&Message::new(&envelope)?).await
     }
     /// 发布已有编码事件；成功仅表示客户端接受发布操作，不等待 broker 或订阅者确认。
     /// 断线仍可能丢失事件，不自动重试。
@@ -259,7 +259,12 @@ impl Bus {
     /// 返回前确认该连接上的订阅命令已被 broker 处理，不等待 handler 执行。
     /// 相同 group 的实例分担匹配事件，不提供 bid 路由或业务去重。
     pub async fn subscribe(&self, subscriber: crate::Subscriber) -> Result<Subscription, Error> {
-        let crate::Subscriber { handler, group } = subscriber;
+        let crate::Subscriber {
+            service,
+            extensions,
+            handler,
+            group,
+        } = subscriber;
         let group = group.as_deref();
         self.healthy()?;
         if self.consumers_failed.is_cancelled() {
@@ -311,6 +316,8 @@ impl Bus {
         .await
         .map_err(|_| Error::Unavailable("NATS 订阅超时"))??;
         Ok(Subscription {
+            service,
+            extensions,
             bus: self.clone(),
             subscribers,
             handler,
@@ -329,6 +336,8 @@ impl Bus {
 }
 /// 已完成当前连接订阅就绪确认的独立订阅；必须交给运行时监督，不自行 spawn。
 pub struct Subscription {
+    service: tok_core::service::Identity,
+    extensions: tok_core::execution::Extensions,
     bus: Bus,
     subscribers: SelectAll<Subscriber>,
     handler: Arc<dyn Handler>,
@@ -381,12 +390,19 @@ impl Subscription {
                         #[expect(clippy::let_underscore_must_use, reason="追踪关联失败不能阻断有效业务事件。")]
                         let _ = span.set_parent(parent);
                     }
+                    let mut context = tok_core::execution::Context::new(
+                        self.service.clone(), format!("event/{}", message.event_type),
+                        tok_core::execution::Source::Event { event_id: message.event_id.to_string() },
+                        Duration::from_millis(self.bus.config.handler_timeout_ms), shutdown.child_token(),
+                    ).map_err(|_| Error::InvalidInput("事件执行上下文无效"))?.with_span(span.clone());
+                    *context.extensions_mut() = self.extensions.clone();
+                    let request = tok_service::Request::new(context, message);
                     let result = tokio::select! {
                         biased;
                         () = shutdown.cancelled() => break Ok(()),
                         () = self.bus.failed.cancelled() => break Err(Error::Unavailable("NATS 连接失效")),
                         () = self.bus.consumers_failed.cancelled() => break Err(Error::Unavailable("NATS 消费缓冲溢出")),
-                        result = tokio::time::timeout(Duration::from_millis(self.bus.config.handler_timeout_ms), self.handler.handle(message)).instrument(span.clone()) => result,
+                        result = tokio::time::timeout(Duration::from_millis(self.bus.config.handler_timeout_ms), self.handler.handle(request)).instrument(span.clone()) => result,
                     };
                     let outcome = match result {
                         Ok(Ok(outcome)) => outcome.label(),

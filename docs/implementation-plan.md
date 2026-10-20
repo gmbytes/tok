@@ -1,6 +1,6 @@
 # 服务与处理链方向校正实施计划
 
-本计划替代旧的阶段零至八推进顺序，是当前重构与实施的唯一批次入口。P1 已提交为 `f54b545`，文档校准为 `2552274`；P2 公共工厂与生命周期已实施，P3–P7 尚未实施。旧阶段与验收见[实施历史](implementation-history.md)，代码现状见[实现状态](status.md)。
+本计划替代旧的阶段零至八推进顺序，是当前重构与实施的唯一批次入口。P1 已提交为 `f54b545`，文档校准为 `2552274`；P2 公共工厂与生命周期已提交为 `c6ffdc3`；P3 统一入口已实施，P4–P7 尚未实施。旧阶段与验收见[实施历史](implementation-history.md)，代码现状见[实现状态](status.md)。
 
 目标：框架提供“服务 = 状态 + 入口路由 + 处理链”，处理链由中间件与 handler 组成；tok-gateway 成为共同设施的内置扩展，tok crate 保持门面与应用组装入口。[总体设计](design.md)规定边界，[服务运行模型](service-runtime.md)规定目标契约。
 
@@ -10,8 +10,8 @@
 | --- | --- | --- | --- |
 | P1 | 验证统一执行抽象 | 已确认的设计 | 已完成最小模型验收 |
 | P2 | 下沉服务构建与运行设施 | P1 契约成立 | 已实施，验收见下文 |
-| P3 | 统一 RPC 与事件执行入口 | P1、P2 | 未实施，下一步 |
-| P4 | gateway 迁移为服务扩展 | P2、P3 | 未实施 |
+| P3 | 统一 RPC 与事件执行入口 | P1、P2 | 已实施，验收见下文 |
+| P4 | gateway 迁移为服务扩展 | P2、P3 | 未实施，下一步 |
 | P5 | 实现传输 topic 路由 | P3 统一事件契约 | 未实施 |
 | P6 | 动态兴趣与主题策略 | P4 生命周期、P5 路由 | 未实施 |
 | P7 | 全面迁移、旧接口清理与验收 | P1 至 P6 | 未实施 |
@@ -74,7 +74,7 @@ P1 上下文边界校正：移除通用 `target`；`operation` 明确为服务�
 - 服务主任务在发现发布前交给监督，避免发布失败或取消时漏掉主任务清理；共享端点仍只绑定一次，初始化成功才开启入口并发布。
 - `just lifecycle-smoke` 同时验证无端点普通服务（状态 + 请求/本地事件类型化链）与 TCP Gateway 的初始化、停止、异步清理和结束等待。
 
-任务范围可读性收敛：ScopeState 维护共享状态与活动计数，ActivityGuard 通过 Drop 维护活动生命周期，Pending 的容量/活动守卫均说明持有和释放作用。lifecycle::Handle 保留服务阶段、停止和结束等待，任务提交、预留及容量查询统一经 tasks()。本次不改变任务调度或退出策略，外部专项沿用本批此前记录。
+任务范围可读性收敛：ScopeState 维护共享状态与活动计数，ActivityGuard 通过 Drop 维护活动生命周期，Submission 的容量/活动守卫均说明持有和释放作用。lifecycle::Handle 保留服务阶段、停止和结束等待，任务提交、预留及容量查询统一经 tasks()。本次不改变任务调度或退出策略，外部专项沿用本批此前记录。
 
 ### P2 验收记录（2026-10-20 Windows）
 
@@ -82,7 +82,7 @@ P1 上下文边界校正：移除通用 `target`；`operation` 明确为服务�
 
 全目标 Clippy、workspace rustdoc、格式/LF、84 处 Markdown 仓库内链接检查通过；execution-smoke、lifecycle-smoke、rpc-smoke、client-smoke、nats-smoke 通过。真实 NATS 13 项测试通过；Redis 发现 2 项测试及发现双进程、共享所有权、三进程交接 3 项集成均通过。本次外部回归串行运行，避免 Windows 示例 exe 占用影响构建。
 
-本批未执行 release 构建或 Linux 本地验证，不将 Windows 结果代替 CI。P3–P7 未实施，代码等待审阅，不自动提交。
+本批未执行 release 构建或 Linux 本地验证，不将 Windows 结果代替 CI。P2 验收时 P3–P7 尚未实施；P2 现已提交为 `c6ffdc3`。
 
 ## P3 统一 RPC 与事件执行入口
 
@@ -97,6 +97,27 @@ P1 上下文边界校正：移除通用 `target`；`operation` 明确为服务�
 - 示例同时演示同一回调的本地执行与远程接收，不增加仅名字相同、类型与调用方式不同的平行注册表。
 
 **验收：** 同一注册和 Layer 可服务不同入口；本地无序列化、无隐式队列，首错规则成立；RPC 只生成对应回应，事件不能生成客户端 Response；未知类型、坏包、业务错误和系统错误分别处理，追踪不丢失。
+
+### P3 已形成的落点
+
+- CallHandler / TowerHandler 改用共同 `Request<(CallContext, Payload)>`；RPC 方法和 timer 注册仍负责各自编解码，但 `register_service` / `register_timer_service` 与事件使用同一 Tower 协议和执行 Layer。
+- 删除同步 local::Dispatcher。统一 `Registry<C, O, F>` 按稳定事件名与 Rust 类型注册多个有序处理者；`register` 支持跨 await 借用状态，`register_service` 安装类型化处理链，`sync_handler` 适配同步处理。
+- 本地 dispatch 与远程 receive 使用同一 Envelope 和处理者，默认不安装解码器；enable_protobuf 为已注册类型安装显式远程适配，接收时解码一次。泛型业务错误、协议/类型错误及取消/预算分别表达。
+- 事件上下文由稳定名称及原事件 ID 派生，继承期限、取消、追踪和能力；远程原始 Arc<Message> 保存在扩展中，网关转发不重新编码。本地事件仅在需要编码的会话/传输边界编码，不继承父事件的原始正文。
+- Subscriber 声明当前执行服务身份，可安装本地能力；NATS 接收适配建立有限预算和追踪上下文。发布仍只表示接受发布，分发结果表示当前处理链完成，不混为远端业务确认。
+- RPC 边界按来源和注册 ID 建立稳定 operation；服务默认执行上限 30 秒，grpc-timeout 只缩短预算。请求、timer、事件结果保持分离，事件没有客户端 Response。
+- RpcService::deferred / rpc::Binding 将共享端点与工厂安装的实际处理链衔接，绑定校验身份及一次安装；demo 的 player/guild 状态和处理链移入工厂初始化，不再使用空生命周期工厂替代业务初始化。
+- 新增 `just events-smoke`，验证同一回调本地借用与远程解码执行；保留 execution/lifecycle 示例，用户指南已迁移真实接口。
+
+本批不迁移 gateway/session 业务准入、连接/会话状态扩展或新下行 Layer，也不改变客户端 Frame、NATS subject、topic 路由或订阅聚合；这些仍由 P4–P6 完成。Application 仍显式组装端点及工厂，完整便捷服务装配入口在 P7 汇总迁移，不能把本批的绑定槽等同于全部应用 API 已收敛。
+
+### P3 验收记录（2026-10-20 Windows）
+
+工作区 214 项测试通过（含 10 项指南示例及 2 项编译失败文档测试）。覆盖同一 Layer 处理 RPC、timer、本地及解码事件，同一事件表的多类型/有序多处理者、跨 await 状态借用、原始错误、坏包/未知类型、容量/类型冲突、原始 Arc 与 ID 保留、本地子事件不继承父正文、取消/预算，以及初始化绑定的身份/重复安装/停止行为。网关测试还验证本地与远程事件共用转发链，timer 效果按序合成且没有客户端 payload。
+
+全目标 Clippy、workspace rustdoc、格式、UTF-8/LF 和 84 处 Markdown 仓库内链接/锚点检查通过。events-smoke、execution-smoke、lifecycle-smoke、rpc-smoke、client-smoke、nats-smoke 六个示例通过；真实 NATS 13 项、Redis 发现 2 项及发现双进程/共享所有权/三进程交接 3 项集成均通过。外部回归串行运行，使用测试独立命名空间。
+
+本批未运行 release 构建或 Linux 本地验证，不将 Windows 结果替代 CI。P3 已完成本批验收，下一批为 P4；P4–P7 尚未实施。
 
 ## P4 gateway 迁移为服务扩展
 

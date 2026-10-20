@@ -108,3 +108,7 @@ nats-test:
 # 使用真实 NATS、TCP 与内部 RPC 验证转发与广播
 nats-smoke:
     cargo run -p demo-game --locked -- --config examples/demo-game/config/events.toml --event-smoke
+
+# 验证本地与远程解码共用事件注册链，不依赖外部服务
+events-smoke:
+    cargo run -p demo-game --example events --locked

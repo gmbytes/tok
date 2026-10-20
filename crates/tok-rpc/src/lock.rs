@@ -100,10 +100,13 @@ pub struct Service<S> {
     inner: S,
     layer: Layer,
 }
-impl<S> tower::Service<(CallContext, Payload)> for Service<S>
+impl<S> tower::Service<tok_service::Request<(CallContext, Payload)>> for Service<S>
 where
-    S: tower::Service<(CallContext, Payload), Response = CallResponse, Error = Status>
-        + Clone
+    S: tower::Service<
+            tok_service::Request<(CallContext, Payload)>,
+            Response = CallResponse,
+            Error = Status,
+        > + Clone
         + Send
         + 'static,
     S::Future: Send + 'static,
@@ -115,7 +118,9 @@ where
         // 不预占租约；内部 readiness 由 call 中的 oneshot 驱动，受执行预算约束。
         Poll::Ready(Ok(()))
     }
-    fn call(&mut self, (context, payload): (CallContext, Payload)) -> Self::Future {
+    fn call(&mut self, request: tok_service::Request<(CallContext, Payload)>) -> Self::Future {
+        let execution = request.context;
+        let (context, payload) = request.input;
         let layer = self.layer.clone();
         let inner = self.inner.clone();
         Box::pin(async move {
@@ -154,9 +159,12 @@ where
                 Err(Status::deadline_exceeded("请求锁剩余租期不足"))
             } else {
                 let execution_started = Instant::now();
-                let result = timeout(config.execution_timeout, inner.oneshot((context, payload)))
-                    .await
-                    .unwrap_or_else(|_| Err(Status::deadline_exceeded("持锁业务执行超时")));
+                let result = timeout(
+                    config.execution_timeout,
+                    inner.oneshot(tok_service::Request::new(execution, (context, payload))),
+                )
+                .await
+                .unwrap_or_else(|_| Err(Status::deadline_exceeded("持锁业务执行超时")));
                 // timeout 不能抢占不让出执行权的 future；返回后仍须检查实际耗时。
                 if execution_started.elapsed() >= config.execution_timeout {
                     Err(Status::deadline_exceeded("持锁业务执行超时"))

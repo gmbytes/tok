@@ -20,7 +20,7 @@ fn envelope() -> Envelope<Changed> {
 }
 #[test]
 fn immediate_messages_round_trip_without_changing_event_identity_or_body() {
-    let message = Message::new(envelope()).unwrap();
+    let message = Message::new(&envelope()).unwrap();
     {
         let decoded = Message::decode(&message.encode(4096).unwrap(), 4096).unwrap();
         assert_eq!(decoded.event_id, message.event_id);
@@ -30,13 +30,13 @@ fn immediate_messages_round_trip_without_changing_event_identity_or_body() {
 #[test]
 fn persistent_policy_is_rejected_before_publication() {
     assert!(matches!(
-        Message::new(Envelope::<Persistent>::new(EventId::generate(), Persistent {}).unwrap()),
+        Message::new(&Envelope::<Persistent>::new(EventId::generate(), Persistent {}).unwrap()),
         Err(tok_events::Error::Unsupported(_))
     ));
 }
 #[test]
 fn bounded_decode_rejects_unknown_versions_and_invalid_payloads() {
-    let valid = Message::new(envelope()).unwrap().encode(4096).unwrap();
+    let valid = Message::new(&envelope()).unwrap().encode(4096).unwrap();
     let original = tok_proto::internal::v1::EventEnvelope::decode(valid.as_slice()).unwrap();
     let wire = tok_proto::internal::v1::EventEnvelope {
         version: 0,
@@ -45,7 +45,7 @@ fn bounded_decode_rejects_unknown_versions_and_invalid_payloads() {
     assert!(Message::decode(&wire.encode_to_vec(), 4096).is_err());
     assert!(Message::decode(&valid, valid.len() - 1).is_err());
     assert!(Message::decode(&[255], 4096).is_err());
-    assert!(Message::new(envelope()).unwrap().encode(1).is_err());
+    assert!(Message::new(&envelope()).unwrap().encode(1).is_err());
 }
 
 #[derive(Clone, PartialEq, prost::Message)]
@@ -66,7 +66,7 @@ fn typed_constructor_rejects_oversized_protobuf_payloads() {
     )
     .unwrap();
     assert!(matches!(
-        Message::new(envelope),
+        Message::new(&envelope),
         Err(tok_events::Error::InvalidInput(_))
     ));
 }

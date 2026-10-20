@@ -11,7 +11,7 @@ use crate::protocol::v1::{
 use prost::Message;
 use std::{
     collections::BTreeMap,
-    sync::{Arc, Mutex},
+    sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tok::{
@@ -20,6 +20,7 @@ use tok::{
         HandlerRegistry, HandlerReply, RpcClients, protocol::internal::v1::Payload, tonic::Status,
     },
 };
+use tokio::sync::Mutex;
 
 const PRODUCTION_TIME_MS: i64 = 50;
 
@@ -87,7 +88,7 @@ pub fn handlers(
                     let stored = state
                         .values
                         .lock()
-                        .map_err(|_| Status::internal("示例存储锁不可用"))?
+                        .await
                         .get(&player_id)
                         .copied()
                         .unwrap_or_default();
@@ -117,10 +118,7 @@ pub fn handlers(
                 let state = Arc::clone(&state);
                 async move {
                     let player_id = player_id(&context)?;
-                    let mut values = state
-                        .values
-                        .lock()
-                        .map_err(|_| Status::internal("示例存储锁不可用"))?;
+                    let mut values = state.values.lock().await;
                     if !values.contains_key(&player_id) && values.len() >= state.capacity {
                         return Err(Status::resource_exhausted("示例存储容量已满"));
                     }
@@ -147,10 +145,7 @@ pub fn handlers(
                         .map_err(|_| Status::internal("系统时钟无效"))?
                         .as_millis() as i64;
                     let due = now + PRODUCTION_TIME_MS;
-                    let mut values = state
-                        .values
-                        .lock()
-                        .map_err(|_| Status::internal("示例存储锁不可用"))?;
+                    let mut values = state.values.lock().await;
                     if !values.contains_key(&id) && values.len() >= state.capacity {
                         return Err(Status::resource_exhausted("示例存储容量已满"));
                     }
@@ -171,57 +166,63 @@ pub fn handlers(
             .map_err(|error| tok::rpc::Error::Configuration(error.to_string()))?,
     );
     let events_state = Arc::clone(&state);
-    registry.register_timer(
+    registry.register_timer_service(
         ProductionFinished::MESSAGE_ID,
-        move |context, _event: ProductionFinished| {
-            let state = Arc::clone(&state);
-            let production = Arc::clone(&production);
-            async move {
-                let id = player_id(&context)?;
-                let mut values = state
-                    .values
-                    .lock()
-                    .map_err(|_| Status::internal("示例存储锁不可用"))?;
-                if !values.contains_key(&id) && values.len() >= state.capacity {
-                    return Err(Status::resource_exhausted("示例存储容量已满"));
+        tok::rpc::tower::service_fn(
+            move |request: tok::service::Request<(CallContext, ProductionFinished)>| {
+                let execution = request.context;
+                let context = request.input.0;
+                let state = Arc::clone(&state);
+                let production = Arc::clone(&production);
+                async move {
+                    let id = player_id(&context)?;
+                    let mut values = state.values.lock().await;
+                    if !values.contains_key(&id) && values.len() >= state.capacity {
+                        return Err(Status::resource_exhausted("示例存储容量已满"));
+                    }
+                    let scheduled = context
+                        .timer
+                        .as_ref()
+                        .ok_or_else(|| Status::invalid_argument("缺少内部计时来源"))?
+                        .scheduled_at_ms;
+                    let stored = values.entry(id).or_default();
+                    let event = tok::events::Envelope::new(
+                        tok::events::EventId::generate(),
+                        production::Completed {
+                            scheduled_at_ms: scheduled,
+                        },
+                    )
+                    .map_err(|error| Status::internal(error.to_string()))?;
+                    production
+                        .dispatch(stored, tok::service::Request::new(execution, &event))
+                        .await
+                        .map_err(|error| match error {
+                            tok::events::DispatchError::Handler(error) => error,
+                            other => Status::internal(other.to_string()),
+                        })?;
+                    Ok(None)
                 }
-                let scheduled = context
-                    .timer
-                    .as_ref()
-                    .ok_or_else(|| Status::invalid_argument("缺少内部计时来源"))?
-                    .scheduled_at_ms;
-                let stored = values.entry(id).or_default();
-                production.dispatch(
-                    stored,
-                    &production::Completed {
-                        scheduled_at_ms: scheduled,
-                    },
-                )?;
-                Ok(None)
-            }
-        },
+            },
+        ),
     )?;
-    registry.register_event::<crate::events::AddValue, _, _>(
-        move |context, _event_id, event| {
-            let state = Arc::clone(&events_state);
-            async move {
-                let id = player_id(&context)?;
-                let mut values = state
-                    .values
-                    .lock()
-                    .map_err(|_| Status::internal("示例存储锁不可用"))?;
-                if !values.contains_key(&id) && values.len() >= state.capacity {
-                    return Err(Status::resource_exhausted("示例存储容量已满"));
-                }
-                let stored = values.entry(id).or_default();
-                stored.value = stored
-                    .value
-                    .checked_add(event.delta)
-                    .ok_or_else(|| Status::out_of_range("事件产出溢出"))?;
-                Ok(None)
+    registry.register_event::<crate::events::AddValue, _>(move |request| {
+        let context = request.input.state;
+        let event = &request.input.event.payload;
+        let state = Arc::clone(&events_state);
+        Box::pin(async move {
+            let id = player_id(context)?;
+            let mut values = state.values.lock().await;
+            if !values.contains_key(&id) && values.len() >= state.capacity {
+                return Err(Status::resource_exhausted("示例存储容量已满"));
             }
-        },
-    )?;
+            let stored = values.entry(id).or_default();
+            stored.value = stored
+                .value
+                .checked_add(event.delta)
+                .ok_or_else(|| Status::out_of_range("事件产出溢出"))?;
+            Ok(None)
+        })
+    })?;
     let client =
         tok::rpc::business::Client::new(Arc::new(RpcClients::new(Duration::from_secs(2), 16)?));
     registry.register(

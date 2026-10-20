@@ -7,6 +7,7 @@
 
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
 
+mod binding;
 pub mod business;
 mod call;
 mod client;
@@ -17,6 +18,7 @@ pub mod player;
 mod propagation;
 pub mod timer;
 
+pub use binding::Binding;
 pub use client::RpcClients;
 pub use endpoint::{RpcEndpoint, RpcReadiness, RpcServerTask};
 pub use handler::{

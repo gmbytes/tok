@@ -1,4 +1,5 @@
 //! 事件 ID、类型声明和追踪载体的契约校验。
+mod support;
 use tok_events::{DeliveryPolicy, Envelope, Event, EventId, TraceContext};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -76,16 +77,22 @@ fn trace_carrier_is_bounded_and_revalidated_after_public_field_updates() {
     .validate()
     .unwrap();
 }
-#[test]
-fn local_dispatch_does_not_apply_remote_delivery_policy() {
-    let mut dispatcher = tok_events::local::Dispatcher::<Reward, u64, ()>::new(1).unwrap();
-    dispatcher
-        .register(|value, reward| {
-            *value += reward.0;
-            Ok(())
+#[tokio::test]
+async fn local_dispatch_does_not_apply_remote_delivery_policy() {
+    let mut registry = tok_events::Registry::<u64, (), tok_events::Error>::new(1).unwrap();
+    registry
+        .register::<Reward, _>(|request| {
+            Box::pin(async move {
+                *request.input.state += request.input.event.payload.0;
+                Ok(())
+            })
         })
         .unwrap();
+    let event = Envelope::new(EventId::generate(), Reward(3)).unwrap();
     let mut value = 0;
-    dispatcher.dispatch(&mut value, &Reward(3)).unwrap();
+    registry
+        .dispatch(&mut value, support::request(&event))
+        .await
+        .unwrap();
     assert_eq!(value, 3);
 }

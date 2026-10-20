@@ -8,9 +8,9 @@ tok 是实验性的 Rust 游戏服务器框架。游戏通过本 crate 组装组
 
 | 目标 | 当前使用方式 | 状态 |
 | --- | --- | --- |
-| 服务与处理链共同构建 | 通用 Factory / Supervisor 已被 Application 与 Gateway 复用 | P2 已实施，P3/P4 继续迁移入口与扩展 |
-| 消息、事件、timer 共用上下文与 Layer | P1 原型可用，既有 RPC/事件/Executor 尚未迁移 | P1 原型验收通过，P3/P4 待实施 |
-| 本地与远程共用事件接口 | local::Dispatcher 与 Registry / Subscriber 为两套契约 | P3 待实施 |
+| 服务与处理链共同构建 | 通用 Factory / Supervisor 已被 Application 与 Gateway 复用 | P2/P3 已实施，P4 继续迁移 gateway 扩展 |
+| 消息、事件、timer 共用上下文与 Layer | RPC、事件及 RPC timer 路由使用共同 Request / Layer | P3 已接通，P4 迁移 gateway/session 扩展 |
+| 本地与远程共用事件接口 | 同一 Registry、Envelope 与类型化 Tower 链；解码器显式安装 | P3 已实施 |
 | topic 参与传输并动态聚合 | join_topic / leave_topic 为同步本地成员操作 | P5/P6 待实施 |
 | 完整生命周期、查询和状态扩展 | 通用任务阶段/停止/结束等待可用，session 查询仍有限 | P2 已实施，完整业务扩展待 P4 |
 
@@ -41,7 +41,7 @@ tok-gateway 是这套基础设施的内置扩展，增加连接、认证、sessi
 
 P1 已提供 [`core::execution::Context`]、类型化 [`service::Request`] 与共同的 [`service::Layer`]。
 上下文的 `service()` 表示当前执行所属服务，`operation()` 是入口适配器填写的稳定操作标识，不拼接实体或请求 ID。业务实体身份、路由输入等按需使用类型化输入或扩展携带；当前原型没有通用路由器或熔断器。
-原型位于 tok-core / tok-service，构建普通调用与 gateway 能力时共用；Application/Gateway 已复用 P2 生命周期；RPC 和事件注册表尚未迁移至共同执行核心。
+原型位于 tok-core / tok-service，构建普通调用与 gateway 能力时共用；Application/Gateway 已复用 P2 生命周期；P3 已将 RPC/事件及 RPC timer 路由迁移到共同执行核心，gateway/session 的业务扩展留在 P4。
 
 以下普通 Rust 输入不要求 protobuf，本地状态直接借用，经过 await 后仍在当前任务中修改：
 
@@ -157,7 +157,7 @@ assert!(directory.snapshot("guild")?.is_empty());
 
 [`service::lifecycle::Factory`] 是公共构建契约，可实现 trait 或使用返回 InitTask 的闭包。
 工厂创建状态、入口和 Tower 链，返回主任务；普通服务不要求网络端点或 session。
-Application 通过类型化 [`application::Binding`] 扩展注入端点和发现查询；RPC/事件注册表统一仍属 P3。
+Application 通过类型化 [`application::Binding`] 扩展注入端点和发现查询；RPC 入口可通过 RpcService::deferred 创建绑定槽，再在工厂中使用 rpc::Binding::install 安装实际处理链；示例 player/guild 已按此方式初始化状态。端点仍由 Application 共享监听，就绪后才接受调用。
 
 任务范围与服务生命周期分别管理：
 
@@ -370,9 +370,9 @@ use tok::{
 # fn example() -> Result<(), Box<dyn std::error::Error>> {
 let backend: Arc<dyn LockBackend> = Arc::new(locks::Memory::new(1024)?);
 let registry = Arc::new(HandlerRegistry::new()); // 在此注册业务 handler。
-let service = tower::service_fn(move |(context, payload)| {
+let service = tower::service_fn(move |request| {
     let registry = Arc::clone(&registry);
-    async move { registry.call(context, payload).await }
+    async move { registry.call(request).await }
 });
 let layer = lock::Layer::new(backend, lock::Config::new("guild"))?;
 let rpc = RpcService::new("node-a", "guild", Arc::new(TowerHandler(layer.layer(service))))?
@@ -865,50 +865,82 @@ timer 失败或超时只记录本次失败，不重试；周期的后续触发�
 请求中没有 timer 配置或产出参数，`just client-smoke` 验证完整 TCP 与 RPC 链路。
 当前由业务响应安装 spec，未增加隐式的 player 登录调用。断线宽限期内 timer 继续运行；到期、显式关闭或租约失效时清理。快速重登通过游戏初始化请求重新安装完整集合。
 
-## 同步本地事件
+## 在工厂中安装 RPC 处理链
 
-此处为当前同步 API；P3 将迁移到共同事件处理契约，本地仍在当前任务执行，目标异步借用接口尚未提供。
-
-[`events::Event`] 由游戏声明稳定的 `NAME`，使用 1 到 128 字节的 ASCII 字母、数字、点、短横线或下划线，点分段不能为空。
-不要用 Rust 类型名作为跨节点事件标识；事件定义与客户端消息 ID 分开。
-`DELIVERY` 默认 [`events::DeliveryPolicy::Immediate`]；Core NATS 只接受即时投递，本地分发不使用该选项。离线加载是后续会话适配能力，不是通用事件字段。
-
-[`events::local::Dispatcher`] 为一种事件保存有界数量的同步订阅者。
-组装时按顺序注册，通过显式借用当前业务状态进行分发；不进入 session 队列，不产生后台任务，也不内部获取锁或所有权。
-player 应在原有 session 驱动的业务调用中使用它。不同状态可以共享同一个只读分发器，通常用 Arc 共享。
+[`rpc::RpcService::deferred`] 返回端点服务和一次性 [`rpc::Binding`]。将端点交给 Application 组装，在所属工厂中初始化业务状态并安装处理链。
+绑定校验服务身份、拒绝重复安装；安装前调用返回 Unavailable，服务停止后拒绝继续执行业务。共享端点的就绪门控仍由 Application 管理。
 
 ```rust
-use tok::events::{Event, local::Dispatcher};
-
-struct Changed { delta: i64 }
-impl Event for Changed {
-    const NAME: &'static str = "game.value.changed.v1";
-}
-
+use std::sync::Arc;
+use tok::{rpc::{RpcService, HandlerRegistry}, service::{lifecycle::{Factory, Init, InitTask}, task::Task}};
 # fn example() -> Result<(), Box<dyn std::error::Error>> {
-let mut events = Dispatcher::<Changed, i64, std::io::Error>::new(4)?;
-events.register(|value, event| {
-    let next = value.checked_add(event.delta)
+let (endpoint, binding) = RpcService::deferred("node-a", "guild")?;
+let factory = move |init: Init| -> InitTask {
+    let binding = binding.clone();
+    Box::pin(async move {
+        let registry = HandlerRegistry::new(); // 在此创建状态、注册路由和安装 Layer。
+        binding.install(&init, Arc::new(registry))?;
+        Ok(Box::pin(async move {
+            init.service.cancellation().cancelled().await;
+            Ok(())
+        }) as Task)
+    })
+};
+# fn assert_factory(_: impl Factory) {}
+# assert_factory(factory);
+# drop(endpoint);
+# Ok(())
+# }
+```
+
+RPC、timer 的 `register_service` / `register_timer_service` 接收 `Request<(CallContext, Req)>`；事件路由使用 `Request<events::Input<...>>`。
+同一个泛型 Layer 可以读取共同的 `request.context`，正文和结果保持各自类型。`HandlerRegistry::events_mut()` 配置事件链，`events()` 读取同一表供本地执行。
+RPC 默认服务执行上限为 30 秒，可用 `with_execution` 显式设置；有效 grpc-timeout 只会缩短上限。停止和期限错误只在 RPC 边界映射为 Status。
+事件多个处理者的 timer 更新按注册顺序合成，后续 ReplaceAll 覆盖之前更新；最终更新仍由 session 校验和应用，不产生客户端回应。
+
+## 统一事件注册与本地执行
+
+[`events::Event`] 声明稳定的 `NAME`，使用 1 到 128 字节的 ASCII 字母、数字、点、短横线或下划线，点分段不能为空。
+`DELIVERY` 默认 Immediate；本地执行不应用传输投递策略。普通 Rust 事件无需 prost。
+
+[`events::Registry`] 同时保存多种事件，每种事件可按顺序注册多个处理者。容量按处理者总数计算。
+`register` 接收可跨 await 借用状态和事件的回调；`register_service` 安装相同输入的 Tower 链；同步回调通过 [`service::sync_handler`] 适配。
+`dispatch(...).await` 直接在当前任务执行，不 spawn、不进入 session 队列，不内部获取实体锁。
+
+```rust
+use std::time::Duration;
+use tok::{core::{execution::{Context, Source}, service::Identity}, events::{Event, Envelope, EventId, Registry}, service::Request};
+use tokio_util::sync::CancellationToken;
+struct Changed { delta: i64 }
+impl Event for Changed { const NAME: &'static str = "game.value.changed.v1"; }
+# async fn example() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+let mut events = Registry::<i64, (), std::io::Error>::new(4)?;
+events.register::<Changed, _>(|request| Box::pin(async move {
+    tokio::task::yield_now().await;
+    *request.input.state = request.input.state.checked_add(request.input.event.payload.delta)
         .ok_or_else(|| std::io::Error::other("数值溢出"))?;
-    *value = next;
     Ok(())
-})?;
+}))?;
+let parent = Context::new(Identity { node_id: "node-a".into(), service_name: "player".into() },
+    "update", Source::Rpc { request_id: 1 }, Duration::from_secs(1), CancellationToken::new())?;
+let event = Envelope::new(EventId::generate(), Changed { delta: 3 })?;
 let mut value = 0;
-let handled = events.dispatch(&mut value, &Changed { delta: 3 })?;
-assert_eq!(handled, 1);
+let results = events.dispatch(&mut value, Request::new(parent, &event)).await?;
+assert_eq!(results.len(), 1);
 assert_eq!(value, 3);
 # Ok(())
 # }
 ```
 
-订阅者在当前线程、当前调用栈中按注册顺序执行，首个错误原样返回并停止后续处理。
-没有订阅者时成功返回零；超过注册容量返回 [`events::Error::CapacityExceeded`]，原注册保持有效。
-分发器不重试、不去重、不回滚已经执行的修改，也不截获 panic。业务应避免循环分发，按自身规则保持状态一致。
-同步订阅者不能 await；异步 RPC、持久化等操作仍由外层业务调用编排，不通过订阅者启动脱离当前调用的任务。
+事件上下文由注册表派生为 `event/<NAME>`，继承原期限、取消、追踪和本地能力；同一次分发中的处理者共享期限，不逐个重置预算。
+首错停止，`DispatchError::Handler` 保留原业务错误；协议/解码失败、未知类型和取消/超时分别表达。
+零订阅者返回空结果。已执行的状态修改不回滚，不自动重试或去重，也不截获 panic。
+异步回调可以借用 `&mut` 状态，调用方必须保障状态的串行访问；不应持有标准互斥锁跨 await。
 
-示例 `player::production` 将生产完成处理注册为本地订阅者，timer 入口同步分发。
-业务通过保存的生产时刻跳过过时与重复触发，先检查产出溢出再写状态；这是示例业务保护，并非分发器提供幂等或事务。
-订阅者错误沿原 RPC 调用返回，不为本地事件单独生成客户端 Response，也不生成或缓存 event_id。
+远程接收通过 `enable_protobuf::<E>()` 给同一类型安装解码器，再调用 `receive(...).await` 执行同一组处理者。
+正文只解码一次，原始 `Arc<Message>` 保留在执行扩展中；本地 `dispatch` 清除继承的原始编码，避免把父事件误当成当前事件转发。
+`just events-smoke` 演示同一回调在本地和解码接收时执行。示例 player 的生产完成处理也已使用此注册表，timer 入口派生原执行上下文后 await 分发。
+事件结果只用于当前服务端处理，不单独生成客户端 Response。
 
 [`events::Envelope`] 保存稳定 [`events::EventId`]、强类型正文及 [`events::TraceContext`]，不携带玩家目标或客户端消息 ID。
 业务侧使用强类型 `Envelope<E>`，运行时使用正文已编码的 `Message`，网络协议使用 `tok_proto::internal::v1::EventEnvelope`；追踪信息通过 NATS headers 传输。
@@ -918,7 +950,7 @@ ID 限制为 1 到 128 个可打印 ASCII 非空白字节，追踪头每字段�
 
 ## Core NATS 即时事件
 
-本节介绍当前固定类型订阅 API。topic 暂仅用于本地会话筛选，动态聊天/区服订阅、统一本地与远程注册表以及完整生命周期/消息 Layer 扩展仍待按 P1–P6 实施，不能按已实现能力使用。
+本节介绍当前固定类型订阅 API。topic 暂仅用于本地会话筛选，本地与远程注册表已统一；动态聊天/区服订阅及完整 gateway/session 生命周期/消息 Layer 扩展仍待按 P4–P6 实施，不能按已实现能力使用。
 
 任何服务都可以使用 [`events::nats::Bus::publish_event`] 发布，用 [`events::Registry`] 订阅自己关心的类型。
 目标由业务正文表达，订阅者自行解释；总线不要求 player、session 或 RPC。
@@ -937,12 +969,14 @@ impl Event for GuildChanged { const NAME: &'static str = "game.guild.changed.v1"
 # async fn example(stop: CancellationToken) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 let bus = events::nats::Bus::connect(events::nats::Config::default()).await?;
 let mut handlers = events::Registry::new(16)?;
-handlers.register::<GuildChanged, _, _>(|message, event| async move {
+handlers.register::<GuildChanged, _>(|request| Box::pin(async move {
+    let event = &request.input.event.payload;
     // 这里可以更新公会状态、处理邮件或编排其他服务器操作。
-    println!("{}: {}", message.event_id, event.guild_id);
+    println!("{}: {}", request.input.event.event_id, event.guild_id);
     Ok(events::Outcome::Handled)
-})?;
-let subscription = bus.subscribe(tok::events::Subscriber::new(Arc::new(handlers), None)?).await?;
+}))?;
+handlers.enable_protobuf::<GuildChanged>()?;
+let subscription = bus.subscribe(tok::events::Subscriber::new(tok::core::service::Identity { node_id: "node-a".into(), service_name: "guild".into() }, Arc::new(handlers), None)?).await?;
 bus.publish_event(Envelope::new(EventId::generate(), GuildChanged { guild_id: 7 })?).await?;
 // 将此 future 交给服务运行时监督；生产代码不能遗留脱管任务。
 subscription.run(stop).await?;
@@ -951,7 +985,7 @@ subscription.run(stop).await?;
 ```
 
 订阅的 subject 为 `tok.events.<namespace>.<event_type>`，从 Handler::event_types 声明的类型集合构造，不订阅无关事件。
-`Subscriber::new(handler, None)` 组装独立接收的组件；`Some("mail.reward")` 让同名 group 内的实例分担同类事件。
+`Subscriber::new(identity, handler, None)` 组装独立接收的组件；`Some("mail.reward")` 让同名 group 内的实例分担同类事件。
 不同 group 分别得到一份；group 属于订阅配置，不属于 Event，不从服务名推导，也不提供 bid 归属路由、持久化或去重。
 按 bid 持有状态的服务仍需自行路由到对应实例。group 属于每个订阅组件的组装选择，网关不固定消费策略。仅查询本地会话的组件在多网关部署中需要各节点独立接收；若采用同组消费，组件必须保证事件能够路由到目标会话所在节点。
 
@@ -961,7 +995,7 @@ handler 有有限等待期限，退出或超时会取消在途 future，已产�
 取消、退出或丢弃一个订阅只退订自身，不关闭共享连接；Bus::close 由连接持有者显式调用。
 断线、发布入队失败或取消会保守停用连接；SDK 报告慢消费者时停止本连接上的所有消费任务并上报，发布仍可使用。需要消费故障隔离时使用独立 Bus。
 
-回调收到原始 `Arc<Message>` 及已解码 E。转发直接共享原始 Message，不重新编码，也不重新采集追踪头。
+回调收到 `Request<Input<...>>`，包含当前状态借用、强类型 Envelope 及执行上下文；原始编码可用 `context.extensions().get::<Arc<Message>>()` 取得。转发直接共享原始 Message，不重新编码，也不重新采集追踪头。
 `Outcome` 区分 Ignored、Handled、Rejected、Partial，表示当前 handler 阶段的处理结果；日志/指标另列错误与超时。
 网关可把 deliver 的 Report 转为 Outcome，Handled 只表示完成本地准入，不表示后续 player 执行完成。
 内部 Executor::execute_event 只返回可选 TimerUpdate，类型上不包含客户端回应；业务执行结果由会话处理，不返回 NATS 发布者。
@@ -973,7 +1007,7 @@ Core NATS 拒绝 Persistent，不静默降级；JetStream、离线加载和去�
 
 ### 游戏自定义网关处理
 
-以下是当前闭包捕获句柄的组装方式；统一上下文、生命周期扩展和消息/事件 Layer 属于 P3/P4，不代表仅捕获 SessionManager 已满足完整目标。
+以下是当前闭包捕获句柄的组装方式；共同事件上下文和 Layer 已接通，完整 gateway/session 生命周期及消息 Layer 属于 P4，不代表仅捕获 SessionManager 已满足完整目标。
 
 [`events::Subscriber`] 将 Handler 与可选 group 组合为独立订阅组件；同一网关可安装多个组件，各自选择类型、消费组和处理行为。
 [`gateway::player::events::forward`] 提供基本的玩家转发处理者，游戏负责从强类型正文选择 Target，原始事件进入 session FIFO。
@@ -981,9 +1015,9 @@ Core NATS 拒绝 Persistent，不静默降级；JetStream、离线加载和去�
 这两个内置处理者返回 Registry，可交给 Subscriber 组装；自定义 Registry 或 Handler 使用同一抽象，没有固定的组件种类枚举。
 示例将玩家转发与通知分别组装为两个组件；None 只是该示例本地筛选方式的选择，不是网关限制。
 
-事件订阅由游戏服务工厂组装。取得 Gateway::context()，显式预留后台任务容量，再把 subscription.run(stop) 交给该运行时监督。
+事件订阅由游戏服务工厂组装。取得 Gateway::tasks()，显式预留后台任务容量，再把 subscription.run(stop) 交给该运行时监督。
 Ingress 不依赖 NATS，也不限制只能安装一个事件消费任务；可在 `serve` 前确认订阅并提交任务。发布/订阅连接的关闭由持有者负责。
-用 ingress.sessions() 捕获会话目录并注册游戏处理者；普通服务则通过 `Init.service.launch` 提交同一个消费 future。
+用 ingress.sessions() 捕获会话目录并注册游戏处理者；普通服务则通过 `Init.service.tasks().launch` 提交同一个消费 future。
 处理函数可执行自定义网关操作，也可创建 [`gateway::player::events::Delivery`] 交给 SessionManager::deliver：
 
 - `Action::Notify { message_id, body }`：显式转换为客户端协议通知，不执行 player；成功准入后沿 server_seq 进入补发缓存。
@@ -1001,7 +1035,7 @@ Ingress 不依赖 NATS，也不限制只能安装一个事件消费任务；可�
 
 需要会话内定制处理时，注入自己的 [`gateway::player::Executor`]，实现 execute_event 并委托其他来源给 RpcExecutor。
 事件仍先进入会话 FIFO，续租并检查所有权后执行；默认 RPC 适配调用 PlayerRpc.HandleEvent，返回独立 EventResponse（序号、错误、timer 更新），类型上没有客户端 payload。
-[`rpc::HandlerRegistry::register_event`] 与普通请求、timer 表隔离；自定义 CallHandler 可实现 event，TowerHandler 只适配原 Call 输入。
+[`rpc::HandlerRegistry::register_event`] 与普通请求、timer 表隔离；自定义 CallHandler 可实现 event，TowerHandler 适配携带共同 Request 的 Call 输入，事件路由通过同一事件 Registry 安装 Layer。
 GatewayIngress、Handler、SessionManager 服务器 API、Executor 分别覆盖接入、网关事件编排、会话筛选和串行执行扩展。
 游戏附加内存状态不会自动迁移，若需跨网关恢复，应另外设计快照与恢复规则。
 
@@ -1101,7 +1135,7 @@ Scene 目前仅预留模块，不套用 Player 的串行与所有权语义。
 | [`infra`] | 服务目录、路由及协调后端 |
 | [`rpc`] | 内部 RPC 与 Tower 组装 |
 | [`gateway`] | 统一 Gateway 运行框架与 Player、Scene 接入组件 |
-| [`events`] | 同步本地事件、Core NATS 即时投递及网关广播/转发 |
+| [`events`] | 统一异步事件、本地状态借用、Core NATS 即时投递及网关广播/转发 |
 | [`observability`] | 日志、指标与追踪 |
 
 目前示例监听共享内部 gRPC 和客户端 TCP 端点，已接通注入认证、有界串行 session、状态读写及服务组合。

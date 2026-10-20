@@ -19,7 +19,11 @@ use tracing_subscriber::layer::SubscriberExt;
 
 struct Capture(Arc<Mutex<Option<opentelemetry::trace::TraceId>>>);
 impl CallHandler for Capture {
-    fn event(&self, context: CallContext, _: Arc<tok_events::Message>) -> tok_rpc::EventTask<'_> {
+    fn event(
+        &self,
+        request: tok_service::Request<(CallContext, Arc<tok_events::Message>)>,
+    ) -> tok_rpc::EventTask<'_> {
+        let context = request.input.0;
         Box::pin(async move {
             *self.0.lock().unwrap() = Some(
                 tracing::Span::current()
@@ -35,7 +39,8 @@ impl CallHandler for Capture {
         })
     }
 
-    fn call(&self, context: CallContext, payload: Payload) -> CallTask<'_> {
+    fn call(&self, request: tok_service::Request<(CallContext, Payload)>) -> CallTask<'_> {
+        let (context, payload) = request.input;
         Box::pin(async move {
             *self.0.lock().unwrap() = Some(
                 tracing::Span::current()

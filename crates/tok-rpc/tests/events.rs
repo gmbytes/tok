@@ -26,23 +26,24 @@ async fn event_handlers_are_inaccessible_to_requests_and_timers_and_require_sess
     let seen = Arc::clone(&calls);
     let mut registry = HandlerRegistry::new();
     registry
-        .register_event::<Update, _, _>(move |context, id, event| {
+        .register_event::<Update, _>(move |request| {
+            let context = request.input.state;
+            let id = &request.input.event.event_id;
+            let event = &request.input.event.payload;
             let seen = Arc::clone(&seen);
-            async move {
-                assert_eq!(context.session.unwrap().player_id, "42");
+            Box::pin(async move {
+                assert_eq!(context.session.as_ref().unwrap().player_id, "42");
                 assert_eq!(id.as_str(), "operation-1");
                 assert_eq!(event.value, 7);
                 assert!(context.timer.is_none());
                 seen.fetch_add(1, Ordering::SeqCst);
                 Ok(Some(TimerUpdate::ReplaceAll(vec![])))
-            }
+            })
         })
         .unwrap();
-    assert!(
-        registry
-            .register_event::<Update, _, _>(|_, _, _| async { Ok(None) })
-            .is_err()
-    );
+    registry
+        .register_event::<Update, _>(|_| Box::pin(async { Ok(None) }))
+        .unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let endpoint = RpcEndpoint::new()
@@ -161,4 +162,98 @@ async fn event_handlers_are_inaccessible_to_requests_and_timers_and_require_sess
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     stop.cancel();
     server.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn ordered_event_handlers_compose_timer_effects_without_client_payloads() {
+    fn spec(id: &str) -> tok_core::TimerSpec {
+        tok_core::TimerSpec {
+            timer_id: id.into(),
+            message_id: 1,
+            body: vec![],
+            due_at_ms: 1,
+            interval_ms: None,
+        }
+    }
+    let cases = vec![
+        (
+            vec![
+                TimerUpdate::Patch {
+                    upsert: vec![spec("a")],
+                    cancel: vec!["b".into()],
+                },
+                TimerUpdate::Patch {
+                    upsert: vec![spec("b")],
+                    cancel: vec!["a".into()],
+                },
+            ],
+            TimerUpdate::Patch {
+                upsert: vec![spec("b")],
+                cancel: vec!["a".into()],
+            },
+        ),
+        (
+            vec![
+                TimerUpdate::Patch {
+                    upsert: vec![spec("a")],
+                    cancel: vec![],
+                },
+                TimerUpdate::ReplaceAll(vec![spec("c")]),
+                TimerUpdate::Patch {
+                    upsert: vec![spec("d")],
+                    cancel: vec!["c".into()],
+                },
+            ],
+            TimerUpdate::ReplaceAll(vec![spec("d")]),
+        ),
+    ];
+    for (effects, expected) in cases {
+        let mut registry = HandlerRegistry::new();
+        for effect in effects {
+            registry
+                .register_event::<Update, _>(move |_| {
+                    let effect = effect.clone();
+                    Box::pin(async move { Ok(Some(effect)) })
+                })
+                .unwrap();
+        }
+        let id = EventId::generate();
+        let event = Arc::new(
+            tok_events::Message::new(
+                &tok_events::Envelope::new(id.clone(), Update { value: 7 }).unwrap(),
+            )
+            .unwrap(),
+        );
+        let execution = tok_core::execution::Context::new(
+            tok_core::service::Identity {
+                node_id: "node".into(),
+                service_name: "player".into(),
+            },
+            "event",
+            tok_core::execution::Source::Event {
+                event_id: id.to_string(),
+            },
+            Duration::from_secs(1),
+            CancellationToken::new(),
+        )
+        .unwrap();
+        let call = CallContext {
+            node_id: "node".into(),
+            service_name: "player".into(),
+            bid: None,
+            request_id: 1,
+            session: None,
+            timer: None,
+        };
+        let response = tok_rpc::CallHandler::event(
+            &registry,
+            tok_service::Request::new(execution, (call, event)),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            tok_rpc::timer::decode_update(response.timers.unwrap()).unwrap(),
+            expected
+        );
+    }
 }

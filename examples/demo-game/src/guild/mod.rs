@@ -33,9 +33,9 @@ pub fn locked_handler(
         tower::{self, Layer},
     };
     let registry = Arc::new(handlers()?);
-    let service = tower::service_fn(move |(context, payload)| {
+    let service = tower::service_fn(move |request| {
         let registry = Arc::clone(&registry);
-        async move { registry.call(context, payload).await }
+        async move { registry.call(request).await }
     });
     let layer = lock::Layer::new(backend, lock::Config::new(namespace))?;
     Ok(Arc::new(TowerHandler(layer.layer(service))))

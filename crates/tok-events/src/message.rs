@@ -25,7 +25,7 @@ impl Message {
     }
 
     /// 编码强类型即时事件；不支持的持久化策略直接拒绝。
-    pub fn new<E: Event + prost::Message>(envelope: Envelope<E>) -> Result<Self, Error> {
+    pub fn new<E: Event + prost::Message>(envelope: &Envelope<E>) -> Result<Self, Error> {
         envelope.validate()?;
         if E::DELIVERY != DeliveryPolicy::Immediate {
             return Err(Error::Unsupported("Core NATS 不支持持久化"));
@@ -36,10 +36,10 @@ impl Message {
         let trace_context = if envelope.trace_context == TraceContext::default() {
             TraceContext::capture()
         } else {
-            envelope.trace_context
+            envelope.trace_context.clone()
         };
         let result = Self {
-            event_id: envelope.event_id,
+            event_id: envelope.event_id.clone(),
             event_type: E::NAME.into(),
             body: envelope.payload.encode_to_vec(),
             trace_context,

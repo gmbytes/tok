@@ -32,28 +32,31 @@ impl Event for ValueChanged {
 
 /// 独立的玩家转发组件；消费组由部署组装显式选择。
 pub fn player_forwarder(
+    identity: tok::core::service::Identity,
     sessions: tok::gateway::player::SessionManager,
     group: Option<&str>,
 ) -> Result<tok::events::Subscriber, tok::events::Error> {
     use tok::gateway::player::events::{Target, forward};
-    let handler =
-        forward::<AddValue, _>(sessions, |event| Ok(Target::Players(vec![event.player_id])))?;
-    tok::events::Subscriber::new(std::sync::Arc::new(handler), group)
+    let handler = forward::<AddValue, _>(sessions, |event| {
+        Ok(Target::Players(vec![event.player_id.clone()]))
+    })?;
+    tok::events::Subscriber::new(identity, std::sync::Arc::new(handler), group)
 }
 
 /// 独立的通知组件；可与转发组件分别启停、选择消费组或替换处理逻辑。
 pub fn value_notifier(
+    identity: tok::core::service::Identity,
     sessions: tok::gateway::player::SessionManager,
     group: Option<&str>,
 ) -> Result<tok::events::Subscriber, tok::events::Error> {
     use tok::gateway::player::events::{Target, notify};
     let handler = notify::<ValueChanged, _>(sessions, v1::ValueNotice::MESSAGE_ID, |event| {
         Ok((
-            Target::Players(vec![event.player_id]),
+            Target::Players(vec![event.player_id.clone()]),
             v1::ValueNotice { value: event.value }.encode_to_vec(),
         ))
     })?;
-    tok::events::Subscriber::new(std::sync::Arc::new(handler), group)
+    tok::events::Subscriber::new(identity, std::sync::Arc::new(handler), group)
 }
 
 /// 真实 TCP + NATS + RPC 验证：内部事件修改状态，广播进入客户端 Notify。
@@ -92,7 +95,7 @@ pub async fn smoke(
     if login.error_code != 0 {
         return Err(std::io::Error::other("登录失败").into());
     }
-    bus.publish(&EventMessage::new(Envelope::new(
+    bus.publish(&EventMessage::new(&Envelope::new(
         EventId::generate(),
         AddValue {
             delta: 7,
@@ -131,7 +134,7 @@ pub async fn smoke(
         }
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
-    bus.publish(&EventMessage::new(Envelope::new(
+    bus.publish(&EventMessage::new(&Envelope::new(
         EventId::generate(),
         ValueChanged {
             player_id: "4242".into(),

@@ -55,6 +55,21 @@ impl Extensions {
             .insert(TypeId::of::<T>(), Arc::new(value))
             .and_then(|old| old.downcast::<T>().ok())
     }
+    /// 合并本进程能力，同类型由传入集合覆盖；不修改其他克隆的集合。
+    pub fn extend(&mut self, other: &Self) {
+        self.values.extend(
+            other
+                .values
+                .iter()
+                .map(|(key, value)| (*key, Arc::clone(value))),
+        );
+    }
+    /// 移除当前上下文的指定能力；不修改其他上下文克隆中的集合。
+    pub fn remove<T: Any + Send + Sync>(&mut self) -> Option<Arc<T>> {
+        self.values
+            .remove(&TypeId::of::<T>())
+            .and_then(|value| value.downcast::<T>().ok())
+    }
     /// 查询能力；可变状态应由能力自身的类型与并发规则表达。
     pub fn get<T: Any + Send + Sync>(&self) -> Option<&T> {
         self.values
@@ -70,7 +85,7 @@ impl std::fmt::Debug for Extensions {
     }
 }
 
-/// 与 RPC、事件编码和网关无关的执行上下文；目前用于 P1 最小执行模型。
+/// 与 RPC、事件编码和网关无关的执行上下文；由 RPC、事件及类型化本地执行共用。
 ///
 /// 入口适配器负责认证、来源与关联字段校验。本结构不构成调用者认证，
 /// 不能直接反序列化不可信正文作为上下文。跨进程只传播允许的元数据。

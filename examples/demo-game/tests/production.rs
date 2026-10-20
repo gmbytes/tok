@@ -42,13 +42,13 @@ async fn production_rules_are_not_taken_from_client_timer_or_reward_fields() {
         .as_millis() as i64;
     // 试图夹带 delay=0、interval=1、delta=127；空业务请求没有这些字段。
     let result = registry
-        .call(
+        .call(execution((
             context.clone(),
             Payload {
                 message_id: v1::StartProductionRequest::MESSAGE_ID,
                 body: vec![0x10, 0, 0x18, 1, 0x20, 127],
             },
-        )
+        )))
         .await
         .unwrap();
     let after = SystemTime::now()
@@ -71,13 +71,13 @@ async fn production_rules_are_not_taken_from_client_timer_or_reward_fields() {
     let mut reloaded = context.clone();
     reloaded.session.as_mut().unwrap().session_id = "new-session".into();
     let initialized = registry
-        .call(
+        .call(execution((
             reloaded,
             Payload {
                 message_id: v1::GetPlayerRequest::MESSAGE_ID,
                 body: vec![],
             },
-        )
+        )))
         .await
         .unwrap();
     let TimerUpdate::ReplaceAll(restored) = decode_update(initialized.timers.unwrap()).unwrap()
@@ -93,7 +93,7 @@ async fn production_rules_are_not_taken_from_client_timer_or_reward_fields() {
     };
     assert_eq!(
         registry
-            .call(context.clone(), finish.clone())
+            .call(execution((context.clone(), finish.clone())))
             .await
             .unwrap_err()
             .code(),
@@ -109,15 +109,18 @@ async fn production_rules_are_not_taken_from_client_timer_or_reward_fields() {
     let stale_timer = stale.timer.as_mut().unwrap();
     stale_timer.scheduled_at_ms += 1;
     stale_timer.fired_at_ms += 1;
-    registry.call(stale, finish.clone()).await.unwrap();
+    registry
+        .call(execution((stale, finish.clone())))
+        .await
+        .unwrap();
     let unchanged = registry
-        .call(
+        .call(execution((
             context.clone(),
             Payload {
                 message_id: v1::GetPlayerRequest::MESSAGE_ID,
                 body: vec![],
             },
-        )
+        )))
         .await
         .unwrap();
     assert_eq!(
@@ -131,19 +134,19 @@ async fn production_rules_are_not_taken_from_client_timer_or_reward_fields() {
     };
     assert_eq!(pending[0].due_at_ms, spec.due_at_ms);
     registry
-        .call(internal.clone(), finish.clone())
+        .call(execution((internal.clone(), finish.clone())))
         .await
         .unwrap();
     // 重复 timer 仍经过本地分发，但业务根据保存的生产时刻避免重复产出。
-    registry.call(internal, finish).await.unwrap();
+    registry.call(execution((internal, finish))).await.unwrap();
     let result = registry
-        .call(
+        .call(execution((
             context,
             Payload {
                 message_id: v1::GetPlayerRequest::MESSAGE_ID,
                 body: v1::GetPlayerRequest { player_id: 9999 }.encode_to_vec(),
             },
-        )
+        )))
         .await
         .unwrap();
     let player = v1::GetPlayerResponse::decode(result.payload.unwrap().body.as_slice()).unwrap();
@@ -160,23 +163,23 @@ async fn local_production_error_reaches_the_original_call_without_partial_state_
     .unwrap();
     let context = context();
     registry
-        .call(
+        .call(execution((
             context.clone(),
             Payload {
                 message_id: v1::SetPlayerRequest::MESSAGE_ID,
                 body: v1::SetPlayerRequest { value: i64::MAX }.encode_to_vec(),
             },
-        )
+        )))
         .await
         .unwrap();
     let started = registry
-        .call(
+        .call(execution((
             context.clone(),
             Payload {
                 message_id: v1::StartProductionRequest::MESSAGE_ID,
                 body: vec![],
             },
-        )
+        )))
         .await
         .unwrap();
     let TimerUpdate::Patch { upsert, .. } = decode_update(started.timers.unwrap()).unwrap() else {
@@ -190,24 +193,24 @@ async fn local_production_error_reaches_the_original_call_without_partial_state_
         fired_at_ms: due,
     });
     let error = registry
-        .call(
+        .call(execution((
             internal,
             Payload {
                 message_id: v1::ProductionFinished::MESSAGE_ID,
                 body: vec![],
             },
-        )
+        )))
         .await
         .unwrap_err();
     assert_eq!(error.code(), Code::OutOfRange);
     let result = registry
-        .call(
+        .call(execution((
             context,
             Payload {
                 message_id: v1::GetPlayerRequest::MESSAGE_ID,
                 body: vec![],
             },
-        )
+        )))
         .await
         .unwrap();
     assert_eq!(
@@ -221,4 +224,19 @@ async fn local_production_error_reaches_the_original_call_without_partial_state_
     };
     assert_eq!(pending.len(), 1);
     assert_eq!(pending[0].due_at_ms, due);
+}
+
+fn execution<T>(input: T) -> tok::service::Request<T> {
+    let context = tok::core::execution::Context::new(
+        tok::core::service::Identity {
+            node_id: "node".into(),
+            service_name: "player".into(),
+        },
+        "test",
+        tok::core::execution::Source::Rpc { request_id: 1 },
+        std::time::Duration::from_secs(5),
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .unwrap();
+    tok::service::Request::new(context, input)
 }

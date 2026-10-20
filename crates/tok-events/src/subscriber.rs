@@ -7,19 +7,35 @@ use std::sync::Arc;
 /// group 不提供玩家归属路由；组件必须保证消息能够到达真正的目标。
 #[derive(Clone)]
 pub struct Subscriber {
+    pub(crate) service: tok_core::service::Identity,
+    pub(crate) extensions: tok_core::execution::Extensions,
     pub(crate) handler: Arc<dyn Handler>,
     pub(crate) group: Option<String>,
 }
 impl Subscriber {
     /// 组合处理者与消费组；None 表示每个实例独立接收。
-    pub fn new(handler: Arc<dyn Handler>, group: Option<&str>) -> Result<Self, Error> {
+    pub fn new(
+        service: tok_core::service::Identity,
+        handler: Arc<dyn Handler>,
+        group: Option<&str>,
+    ) -> Result<Self, Error> {
+        if service.node_id.trim().is_empty() || service.service_name.trim().is_empty() {
+            return Err(Error::InvalidInput("订阅服务身份不能为空"));
+        }
         if let Some(group) = group {
             validate_name(group)?;
         }
         Ok(Self {
+            service,
+            extensions: tok_core::execution::Extensions::default(),
             handler,
             group: group.map(str::to_owned),
         })
+    }
+    /// 安装本服务的本地能力，接收时复制到执行上下文，不向远端传播。
+    pub fn with_extensions(mut self, extensions: tok_core::execution::Extensions) -> Self {
+        self.extensions = extensions;
+        self
     }
     /// 此组件声明的消费组；不从网关身份或服务名称推导。
     pub fn group(&self) -> Option<&str> {

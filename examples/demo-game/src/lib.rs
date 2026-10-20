@@ -130,10 +130,9 @@ pub fn application_with_locks(
         ingress = ingress.with_events(events);
     }
     app.register_factory("player-ingress", ingress)?;
-    app.register_factory("player", LifecycleService)?;
-    app.register_factory("guild", LifecycleService)?;
+
     app.register_factory("gateway-rpc", LifecycleService)?;
-    let state = Arc::new(player::State::new(config.player_gateway.max_sessions)?);
+    let mut rpc_bindings = std::collections::BTreeMap::new();
     for endpoint in &config.endpoints {
         if endpoint.protocol != "grpc" {
             continue;
@@ -149,27 +148,16 @@ pub fn application_with_locks(
                 "gateway-rpc" => {
                     rpc.add_service(&service.service_name, gateway_rpc.clone().into_rpc())?
                 }
-                "player" => rpc.add_service(
-                    &service.service_name,
-                    RpcService::new(
-                        &config.node_id,
-                        &service.service_name,
-                        Arc::new(player::handlers(
-                            Arc::clone(&state),
-                            app.service_directory(),
-                        )?),
-                    )?
-                    .into_player(),
-                )?,
-                "guild" => rpc.add_service(
-                    &service.service_name,
-                    RpcService::new(
-                        &config.node_id,
-                        &service.service_name,
-                        guild::locked_handler(&service.service_name, Arc::clone(&locks))?,
-                    )?
-                    .into_business(),
-                )?,
+                "player" | "guild" => {
+                    let (rpc_service, binding) =
+                        RpcService::deferred(&config.node_id, &service.service_name)?;
+                    rpc_bindings.insert(service.service_name.clone(), binding);
+                    if service.factory_name() == "player" {
+                        rpc.add_service(&service.service_name, rpc_service.into_player())?
+                    } else {
+                        rpc.add_service(&service.service_name, rpc_service.into_business())?
+                    }
+                }
                 other => {
                     return Err(
                         std::io::Error::other(format!("示例尚未提供 RPC 服务：{other}")).into(),
@@ -181,6 +169,38 @@ pub fn application_with_locks(
         if count > 0 {
             app.register_rpc_endpoint(&endpoint.name, rpc)?;
         }
+    }
+    let bindings = Arc::new(rpc_bindings);
+    let capacity = config.player_gateway.max_sessions;
+    for factory in ["player", "guild"] {
+        let bindings = Arc::clone(&bindings);
+        let locks = Arc::clone(&locks);
+        app.register_factory(factory, move |init: Init| -> InitTask {
+            let bindings = Arc::clone(&bindings);
+            let locks = Arc::clone(&locks);
+            Box::pin(async move {
+                let binding = bindings
+                    .get(&init.identity.service_name)
+                    .ok_or_else(|| std::io::Error::other("服务缺少 RPC 绑定"))?;
+                let handler: Arc<dyn tok::rpc::CallHandler> = if factory == "player" {
+                    let endpoints = init
+                        .extensions
+                        .get::<tok::application::Binding>()
+                        .ok_or_else(|| std::io::Error::other("服务缺少发现能力"))?;
+                    Arc::new(player::handlers(
+                        Arc::new(player::State::new(capacity)?),
+                        Arc::clone(&endpoints.directory),
+                    )?)
+                } else {
+                    guild::locked_handler(&init.identity.service_name, locks)?
+                };
+                binding.install(&init, handler)?;
+                Ok(Box::pin(async move {
+                    init.service.cancellation().cancelled().await;
+                    Ok(())
+                }) as Task)
+            })
+        })?;
     }
     Ok(app)
 }

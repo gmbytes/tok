@@ -25,7 +25,7 @@ fn config() -> Config {
     }
 }
 fn message() -> Message {
-    Message::new(Envelope::new(EventId::generate(), Changed { value: 7 }).unwrap()).unwrap()
+    Message::new(&Envelope::new(EventId::generate(), Changed { value: 7 }).unwrap()).unwrap()
 }
 #[derive(Default)]
 struct Capture(Mutex<Vec<Arc<Message>>>);
@@ -33,9 +33,9 @@ impl Handler for Capture {
     fn event_types(&self) -> Vec<&str> {
         vec![Changed::NAME]
     }
-    fn handle(&self, message: Arc<Message>) -> Task<'_> {
+    fn handle(&self, request: tok_service::Request<Arc<Message>>) -> Task<'_> {
         Box::pin(async move {
-            self.0.lock().unwrap().push(message);
+            self.0.lock().unwrap().push(request.input);
             Ok(Outcome::Handled)
         })
     }
@@ -46,8 +46,8 @@ impl Handler for Interest {
     fn event_types(&self) -> Vec<&str> {
         vec![self.0]
     }
-    fn handle(&self, message: Arc<Message>) -> Task<'_> {
-        self.1.handle(message)
+    fn handle(&self, request: tok_service::Request<Arc<Message>>) -> Task<'_> {
+        self.1.handle(request)
     }
 }
 
@@ -71,8 +71,15 @@ async fn groups_share_within_each_group_and_independent_subscribers_receive_ever
     let tasks = [
         tokio::spawn(
             bus.subscribe(
-                tok_events::Subscriber::new(Arc::<Capture>::clone(&a), Some("mail.reward"))
-                    .unwrap(),
+                tok_events::Subscriber::new(
+                    tok_core::service::Identity {
+                        node_id: "test".into(),
+                        service_name: "events".into(),
+                    },
+                    Arc::<Capture>::clone(&a),
+                    Some("mail.reward"),
+                )
+                .unwrap(),
             )
             .await
             .unwrap()
@@ -80,8 +87,15 @@ async fn groups_share_within_each_group_and_independent_subscribers_receive_ever
         ),
         tokio::spawn(
             bus.subscribe(
-                tok_events::Subscriber::new(Arc::<Capture>::clone(&b), Some("mail.reward"))
-                    .unwrap(),
+                tok_events::Subscriber::new(
+                    tok_core::service::Identity {
+                        node_id: "test".into(),
+                        service_name: "events".into(),
+                    },
+                    Arc::<Capture>::clone(&b),
+                    Some("mail.reward"),
+                )
+                .unwrap(),
             )
             .await
             .unwrap()
@@ -89,17 +103,35 @@ async fn groups_share_within_each_group_and_independent_subscribers_receive_ever
         ),
         tokio::spawn(
             bus.subscribe(
-                tok_events::Subscriber::new(Arc::<Capture>::clone(&c), Some("statistics")).unwrap(),
+                tok_events::Subscriber::new(
+                    tok_core::service::Identity {
+                        node_id: "test".into(),
+                        service_name: "events".into(),
+                    },
+                    Arc::<Capture>::clone(&c),
+                    Some("statistics"),
+                )
+                .unwrap(),
             )
             .await
             .unwrap()
             .run(stop_c.clone()),
         ),
         tokio::spawn(
-            bus.subscribe(tok_events::Subscriber::new(Arc::<Capture>::clone(&d), None).unwrap())
-                .await
-                .unwrap()
-                .run(stop_d.clone()),
+            bus.subscribe(
+                tok_events::Subscriber::new(
+                    tok_core::service::Identity {
+                        node_id: "test".into(),
+                        service_name: "events".into(),
+                    },
+                    Arc::<Capture>::clone(&d),
+                    None,
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap()
+            .run(stop_d.clone()),
         ),
     ];
     for value in 0..20 {
@@ -165,6 +197,10 @@ async fn subject_interest_filters_unrelated_traffic_and_rejects_forged_body_type
     let task = tokio::spawn(
         bus.subscribe(
             tok_events::Subscriber::new(
+                tok_core::service::Identity {
+                    node_id: "test".into(),
+                    service_name: "events".into(),
+                },
                 Arc::new(Interest(Recorded::NAME, Arc::clone(&capture))),
                 None,
             )
@@ -218,12 +254,30 @@ async fn subscription_buffer_reservations_are_bounded_and_returned_on_drop() {
     .await
     .unwrap();
     let first = bus
-        .subscribe(tok_events::Subscriber::new(Arc::new(Capture::default()), None).unwrap())
+        .subscribe(
+            tok_events::Subscriber::new(
+                tok_core::service::Identity {
+                    node_id: "test".into(),
+                    service_name: "events".into(),
+                },
+                Arc::new(Capture::default()),
+                None,
+            )
+            .unwrap(),
+        )
         .await
         .unwrap();
     assert!(matches!(
         bus.subscribe(
-            tok_events::Subscriber::new(Arc::new(Capture::default()), Some("other")).unwrap()
+            tok_events::Subscriber::new(
+                tok_core::service::Identity {
+                    node_id: "test".into(),
+                    service_name: "events".into()
+                },
+                Arc::new(Capture::default()),
+                Some("other")
+            )
+            .unwrap()
         )
         .await,
         Err(tok_events::Error::CapacityExceeded)
@@ -231,7 +285,15 @@ async fn subscription_buffer_reservations_are_bounded_and_returned_on_drop() {
     drop(first);
     let second = bus
         .subscribe(
-            tok_events::Subscriber::new(Arc::new(Capture::default()), Some("other")).unwrap(),
+            tok_events::Subscriber::new(
+                tok_core::service::Identity {
+                    node_id: "test".into(),
+                    service_name: "events".into(),
+                },
+                Arc::new(Capture::default()),
+                Some("other"),
+            )
+            .unwrap(),
         )
         .await
         .unwrap();
@@ -256,24 +318,36 @@ async fn handler_timeout_does_not_retry_or_block_later_events() {
     let called = Arc::clone(&calls);
     let completed = Arc::clone(&done);
     handlers
-        .register::<Changed, _, _>(move |_, event| {
+        .register::<Changed, _>(move |request| {
+            let event = &request.input.event.payload;
             called.fetch_add(1, Ordering::SeqCst);
             let done = Arc::clone(&completed);
-            async move {
+            Box::pin(async move {
                 if event.value == 7 {
                     std::future::pending::<()>().await;
                 }
                 done.notify_one();
                 Ok(Outcome::Handled)
-            }
+            })
         })
         .unwrap();
+    handlers.enable_protobuf::<Changed>().unwrap();
     let stop = CancellationToken::new();
     let task = tokio::spawn(
-        bus.subscribe(tok_events::Subscriber::new(Arc::new(handlers), None).unwrap())
-            .await
-            .unwrap()
-            .run(stop.clone()),
+        bus.subscribe(
+            tok_events::Subscriber::new(
+                tok_core::service::Identity {
+                    node_id: "test".into(),
+                    service_name: "events".into(),
+                },
+                Arc::new(handlers),
+                None,
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap()
+        .run(stop.clone()),
     );
     bus.publish(&message()).await.unwrap();
     bus.publish_event(Envelope::new(EventId::generate(), Changed { value: 8 }).unwrap())
@@ -316,9 +390,10 @@ async fn ordinary_service_can_subscribe_handle_and_publish_another_event() {
     let mut handlers = tok_events::Registry::new(1).unwrap();
     let output = service.clone();
     handlers
-        .register::<Changed, _, _>(move |_, event| {
+        .register::<Changed, _>(move |request| {
+            let event = &request.input.event.payload;
             let output = output.clone();
-            async move {
+            Box::pin(async move {
                 output
                     .publish_event(Envelope::new(
                         EventId::generate(),
@@ -326,32 +401,55 @@ async fn ordinary_service_can_subscribe_handle_and_publish_another_event() {
                     )?)
                     .await
                     .map(|()| Outcome::Handled)
-            }
+            })
         })
         .unwrap();
+    handlers.enable_protobuf::<Changed>().unwrap();
     let captured = Arc::new(Mutex::new(Vec::new()));
     let result = Arc::clone(&captured);
     let mut audit_handlers = tok_events::Registry::new(1).unwrap();
     audit_handlers
-        .register::<Recorded, _, _>(move |_, event| {
+        .register::<Recorded, _>(move |request| {
+            let event = &request.input.event.payload;
             let result = Arc::clone(&result);
-            async move {
+            Box::pin(async move {
                 result.lock().unwrap().push(event.value);
                 Ok(Outcome::Handled)
-            }
+            })
         })
         .unwrap();
+    audit_handlers.enable_protobuf::<Recorded>().unwrap();
     let stop = CancellationToken::new();
     let service_task = tokio::spawn(
         service
-            .subscribe(tok_events::Subscriber::new(Arc::new(handlers), None).unwrap())
+            .subscribe(
+                tok_events::Subscriber::new(
+                    tok_core::service::Identity {
+                        node_id: "test".into(),
+                        service_name: "events".into(),
+                    },
+                    Arc::new(handlers),
+                    None,
+                )
+                .unwrap(),
+            )
             .await
             .unwrap()
             .run(stop.clone()),
     );
     let audit_task = tokio::spawn(
         audit
-            .subscribe(tok_events::Subscriber::new(Arc::new(audit_handlers), None).unwrap())
+            .subscribe(
+                tok_events::Subscriber::new(
+                    tok_core::service::Identity {
+                        node_id: "test".into(),
+                        service_name: "events".into(),
+                    },
+                    Arc::new(audit_handlers),
+                    None,
+                )
+                .unwrap(),
+            )
             .await
             .unwrap()
             .run(stop.clone()),
@@ -384,15 +482,26 @@ async fn shutdown_cancels_inflight_async_handler() {
     let captured = Arc::clone(&started);
     let mut handlers = tok_events::Registry::new(1).unwrap();
     handlers
-        .register::<Changed, _, _>(move |_, _| {
+        .register::<Changed, _>(move |_request| {
             captured.notify_one();
-            std::future::pending()
+            Box::pin(std::future::pending())
         })
         .unwrap();
+    handlers.enable_protobuf::<Changed>().unwrap();
     let stop = CancellationToken::new();
     let task = tokio::spawn(
         subscriber
-            .subscribe(tok_events::Subscriber::new(Arc::new(handlers), None).unwrap())
+            .subscribe(
+                tok_events::Subscriber::new(
+                    tok_core::service::Identity {
+                        node_id: "test".into(),
+                        service_name: "events".into(),
+                    },
+                    Arc::new(handlers),
+                    None,
+                )
+                .unwrap(),
+            )
             .await
             .unwrap()
             .run(stop.clone()),
@@ -432,27 +541,67 @@ async fn independent_subscriptions_receive_same_event_and_namespaces_are_isolate
     let cb = Arc::new(Capture::default());
     let cc = Arc::new(Capture::default());
     let sa = a
-        .subscribe(tok_events::Subscriber::new(Arc::<Capture>::clone(&ca), None).unwrap())
+        .subscribe(
+            tok_events::Subscriber::new(
+                tok_core::service::Identity {
+                    node_id: "test".into(),
+                    service_name: "events".into(),
+                },
+                Arc::<Capture>::clone(&ca),
+                None,
+            )
+            .unwrap(),
+        )
         .await
         .unwrap();
     assert!(matches!(
-        a.subscribe(tok_events::Subscriber::new(Arc::new(Capture::default()), None).unwrap())
-            .await,
+        a.subscribe(
+            tok_events::Subscriber::new(
+                tok_core::service::Identity {
+                    node_id: "test".into(),
+                    service_name: "events".into()
+                },
+                Arc::new(Capture::default()),
+                None
+            )
+            .unwrap()
+        )
+        .await,
         Err(tok_events::Error::CapacityExceeded)
     ));
     let tasks = [
         tokio::spawn(sa.run(stop.clone())),
         tokio::spawn(
-            b.subscribe(tok_events::Subscriber::new(Arc::<Capture>::clone(&cb), None).unwrap())
-                .await
-                .unwrap()
-                .run(stop.clone()),
+            b.subscribe(
+                tok_events::Subscriber::new(
+                    tok_core::service::Identity {
+                        node_id: "test".into(),
+                        service_name: "events".into(),
+                    },
+                    Arc::<Capture>::clone(&cb),
+                    None,
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap()
+            .run(stop.clone()),
         ),
         tokio::spawn(
-            c.subscribe(tok_events::Subscriber::new(Arc::<Capture>::clone(&cc), None).unwrap())
-                .await
-                .unwrap()
-                .run(stop.clone()),
+            c.subscribe(
+                tok_events::Subscriber::new(
+                    tok_core::service::Identity {
+                        node_id: "test".into(),
+                        service_name: "events".into(),
+                    },
+                    Arc::<Capture>::clone(&cc),
+                    None,
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap()
+            .run(stop.clone()),
         ),
     ];
     let mut message = message();
@@ -488,10 +637,20 @@ async fn invalid_and_oversized_packets_do_not_reach_sink_or_stop_later_events() 
     let capture = Arc::new(Capture::default());
     let stop = CancellationToken::new();
     let task = tokio::spawn(
-        bus.subscribe(tok_events::Subscriber::new(Arc::<Capture>::clone(&capture), None).unwrap())
-            .await
-            .unwrap()
-            .run(stop.clone()),
+        bus.subscribe(
+            tok_events::Subscriber::new(
+                tok_core::service::Identity {
+                    node_id: "test".into(),
+                    service_name: "events".into(),
+                },
+                Arc::<Capture>::clone(&capture),
+                None,
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap()
+        .run(stop.clone()),
     );
     let raw = async_nats::connect(config.url.as_str()).await.unwrap();
     let subject = format!("tok.events.{}.{}", config.namespace, Changed::NAME);
@@ -551,7 +710,17 @@ async fn invalid_configuration_is_rejected_without_a_connection() {
 async fn dropping_consumer_future_keeps_shared_connection_usable() {
     let bus = Bus::connect(config()).await.unwrap();
     let subscription = bus
-        .subscribe(tok_events::Subscriber::new(Arc::new(Capture::default()), None).unwrap())
+        .subscribe(
+            tok_events::Subscriber::new(
+                tok_core::service::Identity {
+                    node_id: "test".into(),
+                    service_name: "events".into(),
+                },
+                Arc::new(Capture::default()),
+                None,
+            )
+            .unwrap(),
+        )
         .await
         .unwrap();
     let task = tokio::spawn(subscription.run(CancellationToken::new()));
@@ -571,7 +740,17 @@ async fn subscription_overflow_is_reported_without_disabling_publishing() {
     };
     let bus = Bus::connect(config.clone()).await.unwrap();
     let subscription = bus
-        .subscribe(tok_events::Subscriber::new(Arc::new(Capture::default()), None).unwrap())
+        .subscribe(
+            tok_events::Subscriber::new(
+                tok_core::service::Identity {
+                    node_id: "test".into(),
+                    service_name: "events".into(),
+                },
+                Arc::new(Capture::default()),
+                None,
+            )
+            .unwrap(),
+        )
         .await
         .unwrap();
     let publisher = Bus::connect(config).await.unwrap();
@@ -619,10 +798,20 @@ async fn transport_disconnect_fails_consumer_and_stops_new_publications() {
     .await
     .unwrap();
     let task = tokio::spawn(
-        bus.subscribe(tok_events::Subscriber::new(Arc::new(Capture::default()), None).unwrap())
-            .await
-            .unwrap()
-            .run(CancellationToken::new()),
+        bus.subscribe(
+            tok_events::Subscriber::new(
+                tok_core::service::Identity {
+                    node_id: "test".into(),
+                    service_name: "events".into(),
+                },
+                Arc::new(Capture::default()),
+                None,
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap()
+        .run(CancellationToken::new()),
     );
     stop.cancel();
     proxy.await.unwrap();
@@ -736,7 +925,17 @@ async fn publishing_needs_no_reply_but_subscription_setup_requires_broker_readin
     );
     // 订阅初始化先完成回环确认；之后屏蔽所有服务器回应，但保留上行连接。
     let ready = bus
-        .subscribe(tok_events::Subscriber::new(Arc::new(Capture::default()), None).unwrap())
+        .subscribe(
+            tok_events::Subscriber::new(
+                tok_core::service::Identity {
+                    node_id: "test".into(),
+                    service_name: "events".into(),
+                },
+                Arc::new(Capture::default()),
+                None,
+            )
+            .unwrap(),
+        )
         .await
         .unwrap();
     let before = subscriptions.load(Ordering::SeqCst);
@@ -756,8 +955,18 @@ async fn publishing_needs_no_reply_but_subscription_setup_requires_broker_readin
     );
     // 同样的网络条件下，新订阅必须等待 broker 就绪确认，最终按预算失败。
     assert!(matches!(
-        bus.subscribe(tok_events::Subscriber::new(Arc::new(Capture::default()), None).unwrap())
-            .await,
+        bus.subscribe(
+            tok_events::Subscriber::new(
+                tok_core::service::Identity {
+                    node_id: "test".into(),
+                    service_name: "events".into()
+                },
+                Arc::new(Capture::default()),
+                None
+            )
+            .unwrap()
+        )
+        .await,
         Err(tok_events::Error::Unavailable("NATS 订阅超时"))
     ));
     // 订阅初始化失败不影响客户端继续接受发布，也不重发之前的事件。

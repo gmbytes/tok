@@ -84,23 +84,31 @@ pub fn forward<E, F>(
 ) -> Result<tok_events::Registry, Error>
 where
     E: tok_events::Event + prost::Message + Default,
-    F: Fn(E) -> Result<Target, Error> + Send + Sync + 'static,
+    F: Fn(&E) -> Result<Target, Error> + Send + Sync + 'static,
 {
     let mut handlers = tok_events::Registry::new(1)?;
-    handlers.register::<E, _, _>(move |message, event| {
-        let target = select(event);
+    handlers.register::<E, _>(move |request| {
+        let message = request
+            .context
+            .extensions()
+            .get::<Arc<Message>>()
+            .cloned()
+            .map(Ok)
+            .unwrap_or_else(|| Message::new(request.input.event).map(Arc::new));
+        let target = select(&request.input.event.payload);
         let sessions = sessions.clone();
-        async move {
+        Box::pin(async move {
             let report = sessions
                 .deliver(&Delivery {
                     target: target?,
-                    action: Action::Forward(message),
+                    action: Action::Forward(message?),
                 })
                 .await
                 .map_err(|_| Error::Unavailable("玩家事件准入失败"))?;
             Ok(report.into())
-        }
+        })
     })?;
+    handlers.enable_protobuf::<E>()?;
     Ok(handlers)
 }
 
@@ -115,16 +123,16 @@ pub fn notify<E, F>(
 ) -> Result<tok_events::Registry, Error>
 where
     E: tok_events::Event + prost::Message + Default,
-    F: Fn(E) -> Result<(Target, Vec<u8>), Error> + Send + Sync + 'static,
+    F: Fn(&E) -> Result<(Target, Vec<u8>), Error> + Send + Sync + 'static,
 {
     if message_id == 0 {
         return Err(Error::InvalidInput("通知消息 ID 必须非零"));
     }
     let mut handlers = tok_events::Registry::new(1)?;
-    handlers.register::<E, _, _>(move |_, event| {
-        let notification = map(event);
+    handlers.register::<E, _>(move |request| {
+        let notification = map(&request.input.event.payload);
         let sessions = sessions.clone();
-        async move {
+        Box::pin(async move {
             let (target, body) = notification?;
             let report = sessions
                 .deliver(&Delivery {
@@ -134,7 +142,8 @@ where
                 .await
                 .map_err(|_| Error::Unavailable("通知准入失败"))?;
             Ok(report.into())
-        }
+        })
     })?;
+    handlers.enable_protobuf::<E>()?;
     Ok(handlers)
 }

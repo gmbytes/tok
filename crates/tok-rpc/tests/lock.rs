@@ -31,8 +31,12 @@ fn handler(
     calls: Arc<AtomicUsize>,
     delay: Duration,
     fail: bool,
-) -> impl tower::Service<(CallContext, Payload), Response = CallResponse, Error = Status, Future: Send>
-+ Clone
+) -> impl tower::Service<
+    tok_service::Request<(CallContext, Payload)>,
+    Response = CallResponse,
+    Error = Status,
+    Future: Send,
+> + Clone
 + Send
 + Sync {
     tower::service_fn(move |_| {
@@ -48,9 +52,24 @@ fn handler(
         }
     })
 }
-fn request() -> (CallContext, Payload) {
-    (context(), Payload::default())
+fn execution<T>(input: T) -> tok_service::Request<T> {
+    let context = tok_core::execution::Context::new(
+        tok_core::service::Identity {
+            node_id: "node-a".into(),
+            service_name: "guild".into(),
+        },
+        "test",
+        tok_core::execution::Source::Rpc { request_id: 1 },
+        Duration::from_secs(30),
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .unwrap();
+    tok_service::Request::new(context, input)
 }
+fn request() -> tok_service::Request<(CallContext, Payload)> {
+    execution((context(), Payload::default()))
+}
+
 fn layer(backend: Arc<dyn LockBackend>) -> Layer {
     Layer::new(backend, Config::new("guild")).unwrap()
 }
@@ -192,7 +211,7 @@ async fn unresponsive_acquire_is_bounded_and_invalid_context_does_not_execute() 
         assert_eq!(
             service
                 .clone()
-                .oneshot((context, Payload::default()))
+                .oneshot(execution((context, Payload::default())))
                 .await
                 .unwrap_err()
                 .code(),
@@ -203,7 +222,7 @@ async fn unresponsive_acquire_is_bounded_and_invalid_context_does_not_execute() 
     context.service_name = "other".into();
     assert_eq!(
         service
-            .oneshot((context, Payload::default()))
+            .oneshot(execution((context, Payload::default())))
             .await
             .unwrap_err()
             .code(),
@@ -230,7 +249,7 @@ async fn outer_cancellation_leaves_lock_until_ttl_and_capacity_errors_are_distin
     assert_eq!(
         service
             .clone()
-            .oneshot((other, Payload::default()))
+            .oneshot(execution((other, Payload::default())))
             .await
             .unwrap_err()
             .code(),
@@ -286,30 +305,33 @@ async fn business_rpc_on_two_nodes_shares_locks_after_target_validation() {
             Arc::clone(&total),
             Arc::clone(&peak),
         );
-        let handler = tower::service_fn(move |(context, _payload): (CallContext, Payload)| {
-            let (calls, active, total, peak) = (
-                Arc::clone(&calls),
-                Arc::clone(&active),
-                Arc::clone(&total),
-                Arc::clone(&peak),
-            );
-            async move {
-                let bid = context.bid.unwrap();
-                {
-                    let mut active = active.lock().unwrap();
-                    let count = active.entry(bid.clone()).or_default();
-                    *count += 1;
-                    assert_eq!(*count, 1, "相同 bid 不得同时进入 handler");
+        let handler = tower::service_fn(
+            move |request: tok_service::Request<(CallContext, Payload)>| {
+                let (context, _payload) = request.input;
+                let (calls, active, total, peak) = (
+                    Arc::clone(&calls),
+                    Arc::clone(&active),
+                    Arc::clone(&total),
+                    Arc::clone(&peak),
+                );
+                async move {
+                    let bid = context.bid.unwrap();
+                    {
+                        let mut active = active.lock().unwrap();
+                        let count = active.entry(bid.clone()).or_default();
+                        *count += 1;
+                        assert_eq!(*count, 1, "相同 bid 不得同时进入 handler");
+                    }
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    let count = total.fetch_add(1, Ordering::SeqCst) + 1;
+                    peak.fetch_max(count, Ordering::SeqCst);
+                    tokio::time::sleep(Duration::from_millis(30)).await;
+                    *active.lock().unwrap().get_mut(&bid).unwrap() -= 1;
+                    total.fetch_sub(1, Ordering::SeqCst);
+                    Ok(CallResponse::default())
                 }
-                calls.fetch_add(1, Ordering::SeqCst);
-                let count = total.fetch_add(1, Ordering::SeqCst) + 1;
-                peak.fetch_max(count, Ordering::SeqCst);
-                tokio::time::sleep(Duration::from_millis(30)).await;
-                *active.lock().unwrap().get_mut(&bid).unwrap() -= 1;
-                total.fetch_sub(1, Ordering::SeqCst);
-                Ok(CallResponse::default())
-            }
-        });
+            },
+        );
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let target = ServiceDescriptor {
             node_id: node.into(),
@@ -417,7 +439,7 @@ async fn encoded_business_failure_is_preserved_when_release_fails() {
 
 #[derive(Clone)]
 struct NeverReady;
-impl tower::Service<(CallContext, Payload)> for NeverReady {
+impl tower::Service<tok_service::Request<(CallContext, Payload)>> for NeverReady {
     type Response = CallResponse;
     type Error = Status;
     type Future = tok_rpc::CallTask<'static>;
@@ -427,7 +449,7 @@ impl tower::Service<(CallContext, Payload)> for NeverReady {
     ) -> std::task::Poll<Result<(), Status>> {
         std::task::Poll::Pending
     }
-    fn call(&mut self, _: (CallContext, Payload)) -> Self::Future {
+    fn call(&mut self, _: tok_service::Request<(CallContext, Payload)>) -> Self::Future {
         panic!("未就绪时不得执行业务")
     }
 }
