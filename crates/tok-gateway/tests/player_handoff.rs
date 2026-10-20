@@ -206,7 +206,7 @@ impl Fixture {
         config: Config,
     ) -> Self {
         let service = GatewayRpcService::new(config.max_handoff_bytes).unwrap();
-        let gateway = Gateway::new(config.runtime_limits(), |context| {
+        let gateway = Gateway::new(config.gateway_limits(), |context| {
             Ingress::new(
                 context,
                 config,

@@ -2,11 +2,15 @@
 
 use std::{sync::Arc, time::Duration};
 use tok::{
+    application::Binding,
     core::coordination::{OwnershipStore, SessionOwner},
     gateway::{ErrorCode, Gateway, player},
     infra::routing::RendezvousRouter,
     rpc::RpcClients,
-    runtime::{ServiceContext, ServiceFactory, ServiceTask, StartTask},
+    service::{
+        lifecycle::{Factory, Init, InitTask},
+        task::Task,
+    },
 };
 
 /// 仅供本地开发的 demo:<正整数 ID> 凭证，不是 SDK 或生产认证方案。
@@ -64,38 +68,43 @@ impl PlayerIngressFactory {
         self
     }
 }
-impl ServiceFactory for PlayerIngressFactory {
-    fn start(&self, context: ServiceContext) -> StartTask {
+impl Factory for PlayerIngressFactory {
+    fn initialize(&self, init: Init) -> InitTask {
         let config = self.config.clone();
         let ownership = Arc::clone(&self.ownership);
         let tokens = self.tokens.clone();
         let gateway_rpc = self.gateway_rpc.clone();
         let events = self.events.clone();
         Box::pin(async move {
-            if context.service.protocol != "tcp" {
+            let binding = init
+                .extensions
+                .get::<Binding>()
+                .cloned()
+                .ok_or_else(|| std::io::Error::other("示例玩家网关缺少端点配置"))?;
+            if binding.service.protocol != "tcp" {
                 return Err(std::io::Error::other("示例玩家网关要求 tcp 端点").into());
             }
-            let listener = tokio::net::TcpListener::bind(context.listen_address).await?;
+            let listener = tokio::net::TcpListener::bind(binding.listen_address).await?;
             let clients = Arc::new(RpcClients::new(
                 Duration::from_millis(config.rpc_timeout_ms),
                 64,
             )?);
             let executor = Arc::new(player::RpcExecutor::new(
                 "player",
-                Arc::new(RendezvousRouter::new(Arc::clone(&context.directory))),
+                Arc::new(RendezvousRouter::new(Arc::clone(&binding.directory))),
                 tok::rpc::player::Client::new(clients),
             )?);
-            let mut limits = config.runtime_limits();
+            let mut limits = config.gateway_limits();
             if events.is_some() {
                 limits.max_tasks += 2;
             }
-            let gateway = Gateway::new(limits, |gateway_context| {
+            let gateway = Gateway::new_in(limits, &init.service, |gateway_context| {
                 let ingress = player::Ingress::new(
                     gateway_context,
                     config.clone(),
                     SessionOwner {
-                        node_id: context.service.node_id,
-                        service_name: context.service.service_name,
+                        node_id: binding.service.node_id,
+                        service_name: binding.service.service_name,
                     },
                     Arc::new(DemoAuthenticator),
                     ownership,
@@ -106,7 +115,7 @@ impl ServiceFactory for PlayerIngressFactory {
                     None => ingress,
                 };
                 match gateway_rpc {
-                    Some(service) => ingress.with_gateway_rpc(context.directory, &service),
+                    Some(service) => ingress.with_gateway_rpc(binding.directory, &service),
                     None => Ok(ingress),
                 }
             })?;
@@ -124,12 +133,16 @@ impl ServiceFactory for PlayerIngressFactory {
                     subscriptions.push(bus.subscribe(component).await?);
                 }
                 for subscription in subscriptions {
-                    let runtime = gateway.context();
-                    let stop = runtime.cancellation();
-                    runtime
-                        .launch(Box::pin(async move {
-                            subscription.run(stop).await.map_err(std::io::Error::other)
-                        }))
+                    let tasks = gateway.tasks();
+                    let stop = tasks.cancellation();
+                    tasks
+                        .launch(
+                            "event-subscription",
+                            Box::pin(async move {
+                                subscription.run(stop).await?;
+                                Ok(())
+                            }),
+                        )
                         .await?;
                 }
                 Some(bus)
@@ -137,13 +150,13 @@ impl ServiceFactory for PlayerIngressFactory {
                 None
             };
             Ok(Box::pin(async move {
-                let result = gateway.serve(listener, context.shutdown).await;
+                let result = gateway.serve(listener, init.service.cancellation()).await;
                 if let Some(bus) = bus {
                     bus.close().await?;
                 }
                 result?;
                 Ok(())
-            }) as ServiceTask)
+            }) as Task)
         })
     }
 }

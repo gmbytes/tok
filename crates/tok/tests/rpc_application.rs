@@ -10,9 +10,13 @@ use std::{
 };
 use tok::{
     AppConfig,
+    application::{self, Application},
     core::ServiceDirectory,
     rpc::{HandlerRegistry, RpcEndpoint, RpcService},
-    runtime::{Application, RuntimeError, ServiceContext, ServiceFactory, ServiceTask, StartTask},
+    service::{
+        lifecycle::{self, Init, InitTask},
+        task::Task,
+    },
 };
 
 struct Factory {
@@ -52,14 +56,16 @@ async fn redis_startup_timeout_does_not_start_or_publish_business() {
         .unwrap();
     assert!(matches!(
         result,
-        Err(RuntimeError::Core(tok::core::Error::DiscoveryUnavailable))
+        Err(application::Error::Core(
+            tok::core::Error::DiscoveryUnavailable
+        ))
     ));
     assert_eq!(starts.load(Ordering::SeqCst), 0);
     assert!(local.snapshot("player").unwrap().is_empty());
     assert!(query.snapshot("player").is_err());
 }
-impl ServiceFactory for Factory {
-    fn start(&self, context: ServiceContext) -> StartTask {
+impl lifecycle::Factory for Factory {
+    fn initialize(&self, init: Init) -> InitTask {
         let fail = self.fail;
         self.starts.fetch_add(1, Ordering::SeqCst);
         Box::pin(async move {
@@ -67,9 +73,9 @@ impl ServiceFactory for Factory {
                 return Err(std::io::Error::other("初始化失败").into());
             }
             Ok(Box::pin(async move {
-                context.shutdown.cancelled().await;
+                init.service.cancellation().cancelled().await;
                 Ok(())
-            }) as ServiceTask)
+            }) as Task)
         })
     }
 }
@@ -97,18 +103,27 @@ fn endpoint() -> RpcEndpoint {
 struct Inspect {
     observed: Arc<AtomicUsize>,
 }
-impl ServiceFactory for Inspect {
-    fn start(&self, context: ServiceContext) -> StartTask {
+impl lifecycle::Factory for Inspect {
+    fn initialize(&self, init: Init) -> InitTask {
         let observed = Arc::clone(&self.observed);
         Box::pin(async move {
-            let nodes = context.directory.snapshot("guild")?;
+            let nodes = init
+                .extensions
+                .get::<tok::application::Binding>()
+                .unwrap()
+                .directory
+                .snapshot("guild")?;
             assert_eq!(nodes[0].node_id, "external");
-            context.directory.subscribe()?;
+            init.extensions
+                .get::<tok::application::Binding>()
+                .unwrap()
+                .directory
+                .subscribe()?;
             observed.fetch_add(1, Ordering::SeqCst);
             Ok(Box::pin(async move {
-                context.shutdown.cancelled().await;
+                init.service.cancellation().cancelled().await;
                 Ok(())
-            }) as ServiceTask)
+            }) as Task)
         })
     }
 }
@@ -170,7 +185,7 @@ async fn bind_failure_happens_before_business_initialization() {
     app.register_rpc_endpoint("internal", endpoint()).unwrap();
     assert!(matches!(
         app.run_until(pending()).await,
-        Err(RuntimeError::Start { .. })
+        Err(application::Error::Start { .. })
     ));
     assert_eq!(starts.load(Ordering::SeqCst), 0);
     assert!(directory.snapshot("player").unwrap().is_empty());
@@ -199,7 +214,7 @@ async fn initialization_failure_cleans_up_shared_listener_and_directory() {
     drop(reservation);
     assert!(matches!(
         app.run_until(pending()).await,
-        Err(RuntimeError::Start { .. })
+        Err(application::Error::Start { .. })
     ));
     assert!(directory.snapshot("player").unwrap().is_empty());
     assert!(directory.snapshot("guild").unwrap().is_empty());

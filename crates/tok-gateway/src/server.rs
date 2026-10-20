@@ -2,10 +2,8 @@
 
 use crate::{ErrorCode, Result, transport::GatewayTransport};
 use std::{future::Future, pin::Pin, sync::Arc};
-use tokio::{
-    sync::{Semaphore, mpsc},
-    task::JoinSet,
-};
+use tok_service::task::{Handle, Supervisor};
+use tokio::{sync::Semaphore, task::JoinSet};
 use tokio_util::sync::CancellationToken;
 
 /// 受网关监督的连接或后台任务，不能自行遗留脱管任务。
@@ -32,58 +30,6 @@ impl GatewayConfig {
     }
 }
 
-/// 接入组件向统一运行时提交后台任务的入口。
-#[derive(Clone)]
-pub struct GatewayContext {
-    shutdown: CancellationToken,
-    launches: mpsc::Sender<GatewayTask>,
-    capacity: Arc<Semaphore>,
-}
-
-/// 已预留的后台任务容量；丢弃时归还，可用于改变所有权前检查资源。
-pub struct GatewayTaskReservation {
-    context: GatewayContext,
-    permit: tokio::sync::OwnedSemaphorePermit,
-}
-impl GatewayTaskReservation {
-    /// 使用已预留容量提交受监督任务。
-    pub async fn launch(self, task: GatewayTask) -> std::io::Result<()> {
-        let permit = self.permit;
-        let task: GatewayTask = Box::pin(async move {
-            let _permit = permit;
-            task.await
-        });
-        tokio::select! {
-            biased;
-            _ = self.context.shutdown.cancelled() => Err(std::io::Error::other("网关正在退出")),
-            result = self.context.launches.send(task) => result.map_err(|_| std::io::Error::other("网关任务入口已关闭")),
-        }
-    }
-}
-impl GatewayContext {
-    /// 预留一个后台任务名额；满时立即失败，不启动任务。
-    pub fn reserve(&self) -> std::io::Result<GatewayTaskReservation> {
-        let permit = Arc::clone(&self.capacity)
-            .try_acquire_owned()
-            .map_err(|_| {
-                std::io::Error::new(std::io::ErrorKind::WouldBlock, "网关后台任务容量已满")
-            })?;
-        Ok(GatewayTaskReservation {
-            context: self.clone(),
-            permit,
-        })
-    }
-    /// 网关关闭时取消；组件应派生子 token 管理自己的会话。
-    pub fn cancellation(&self) -> CancellationToken {
-        self.shutdown.clone()
-    }
-
-    /// 提交后台任务；容量满立即失败，提交成功不表示任务已开始执行。
-    pub async fn launch(&self, task: GatewayTask) -> std::io::Result<()> {
-        self.reserve()?.launch(task).await
-    }
-}
-
 /// 连接处理与业务生命周期的组装契约，不在运行时判断 Player 或 Scene。
 pub trait GatewayIngress: Send + Sync + 'static {
     /// 此组件接受的连接对象，由相匹配的传输适配器提供。
@@ -102,8 +48,7 @@ pub trait GatewayIngress: Send + Sync + 'static {
 pub struct Gateway<I: GatewayIngress> {
     config: GatewayConfig,
     ingress: Arc<I>,
-    context: GatewayContext,
-    launches: mpsc::Receiver<GatewayTask>,
+    supervisor: Supervisor,
 }
 struct Stop<I: GatewayIngress>(Arc<I>, CancellationToken);
 impl<I: GatewayIngress> Drop for Stop<I> {
@@ -114,23 +59,33 @@ impl<I: GatewayIngress> Drop for Stop<I> {
 }
 impl<I: GatewayIngress> Gateway<I> {
     /// 创建运行框架并注入组件所需的任务入口，不启动监听或后台任务。
-    pub fn new(
+    pub fn new(config: GatewayConfig, build: impl FnOnce(Handle) -> Result<I>) -> Result<Self> {
+        config.validate()?;
+        let supervisor = Supervisor::new(config.max_tasks, CancellationToken::new())
+            .map_err(|_| ErrorCode::InvalidRequest)?;
+        Self::build(config, supervisor, build)
+    }
+    /// 在所属服务内创建网关；共享父取消关系，父结束等待覆盖网关内部任务的实际回收。
+    pub fn new_in(
         config: GatewayConfig,
-        build: impl FnOnce(GatewayContext) -> Result<I>,
+        parent: &tok_service::lifecycle::Handle,
+        build: impl FnOnce(Handle) -> Result<I>,
     ) -> Result<Self> {
         config.validate()?;
-        let (sender, launches) = mpsc::channel(config.max_tasks);
-        let context = GatewayContext {
-            shutdown: CancellationToken::new(),
-            launches: sender,
-            capacity: Arc::new(Semaphore::new(config.max_tasks)),
-        };
-        let ingress = Arc::new(build(context.clone())?);
+        let supervisor = Supervisor::child(config.max_tasks, &parent.tasks())
+            .map_err(|_| ErrorCode::InvalidRequest)?;
+        Self::build(config, supervisor, build)
+    }
+    fn build(
+        config: GatewayConfig,
+        supervisor: Supervisor,
+        build: impl FnOnce(Handle) -> Result<I>,
+    ) -> Result<Self> {
+        let ingress = Arc::new(build(supervisor.handle())?);
         Ok(Self {
             config,
             ingress,
-            context,
-            launches,
+            supervisor,
         })
     }
     /// 访问已组装的接入组件，如取得 Ingress 的 session 查询句柄。
@@ -139,8 +94,8 @@ impl<I: GatewayIngress> Gateway<I> {
     }
 
     /// 获取通用任务监督入口；游戏组装层可预留容量并安装事件等后台任务。
-    pub fn context(&self) -> GatewayContext {
-        self.context.clone()
+    pub fn tasks(&self) -> Handle {
+        self.supervisor.handle()
     }
 
     /// 接管监听并监督连接与后台任务；退出时停止入口、收束任务并清理组件。
@@ -152,22 +107,17 @@ impl<I: GatewayIngress> Gateway<I> {
     where
         T: GatewayTransport<Connection = I::Connection>,
     {
-        let _stop = Stop(Arc::clone(&self.ingress), self.context.shutdown.clone());
+        let signal = self.supervisor.handle().cancellation();
+        let _stop = Stop(Arc::clone(&self.ingress), signal.clone());
         let capacity = Arc::new(Semaphore::new(self.config.max_connections));
         let mut connections = JoinSet::new();
-        let mut tasks = JoinSet::new();
         let mut outcome = loop {
             tokio::select! {
                 biased;
                 _ = shutdown.cancelled() => break Ok(()),
-                _ = self.context.shutdown.cancelled() => break Ok(()),
-                Some(task) = self.launches.recv() => { tasks.spawn(task); }
-                result = tasks.join_next(), if !tasks.is_empty() => {
-                    match result {
-                        Some(Err(error)) => break Err(std::io::Error::other(format!("网关后台任务崩溃：{error}"))),
-                        Some(Ok(Err(error))) => break Err(error),
-                        _ => {}
-                    }
+                _ = signal.cancelled() => break Ok(()),
+                completion = self.supervisor.next() => {
+                    if let Err(error) = completion.result { break Err(std::io::Error::other(error)); }
                 }
                 result = connections.join_next(), if !connections.is_empty() => {
                     if let Some(Err(error)) = result { break Err(std::io::Error::other(format!("网关连接任务崩溃：{error}"))); }
@@ -179,36 +129,24 @@ impl<I: GatewayIngress> Gateway<I> {
                         Err(_) => { metrics::counter!("tok_gateway_connections_rejected_total").increment(1); drop(connection); continue; }
                     };
                     let ingress = Arc::clone(&self.ingress);
-                    let signal = self.context.shutdown.child_token();
-                    connections.spawn(async move {
+                    let signal = signal.child_token();
+                    connections.spawn(self.supervisor.track(async move {
                         let _permit = permit;
                         if let Err(error) = ingress.connection(connection, signal).await {
                             tracing::debug!(error = %error, "网关连接已结束");
                         }
-                    });
+                    }));
                 }
             }
         };
         drop(transport);
-        self.context.shutdown.cancel();
+        self.supervisor.handle().request_stop();
         self.ingress.stop();
         connections.abort_all();
         while connections.join_next().await.is_some() {}
-        // 将尚未启动的任务也纳入监督；组件收到取消后只能清理，不能开启新业务。
-        while let Ok(task) = self.launches.try_recv() {
-            tasks.spawn(task);
-        }
-        while let Some(result) = tasks.join_next().await {
-            let error = match result {
-                Err(error) => Some(std::io::Error::other(format!(
-                    "网关后台清理任务崩溃：{error}"
-                ))),
-                Ok(Err(error)) => Some(error),
-                _ => None,
-            };
-            if let Some(error) = error {
-                outcome = outcome.and(Err(error));
-            }
+        // 专用连接退出后，后台任务沿共用监督器收束；整体期限仍由外层控制。
+        if let Err(error) = self.supervisor.shutdown(None).await {
+            outcome = outcome.and(Err(std::io::Error::other(error)));
         }
         if let Err(error) = self.ingress.finish().await {
             outcome = outcome.and(Err(error));

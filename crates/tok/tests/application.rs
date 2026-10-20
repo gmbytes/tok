@@ -11,8 +11,12 @@ use std::{
 
 use tok::{
     AppConfig,
+    application::{self, Application},
     core::ServiceDirectory,
-    runtime::{Application, RuntimeError, ServiceContext, ServiceFactory, ServiceTask, StartTask},
+    service::{
+        lifecycle::{self, Init, InitTask},
+        task::Task,
+    },
 };
 
 enum Behavior {
@@ -30,8 +34,8 @@ struct TestService {
     stopped: Arc<AtomicUsize>,
 }
 
-impl ServiceFactory for TestService {
-    fn start(&self, context: ServiceContext) -> StartTask {
+impl lifecycle::Factory for TestService {
+    fn initialize(&self, init: Init) -> InitTask {
         let stopped = Arc::clone(&self.stopped);
         match self.behavior {
             Behavior::FailStart => {
@@ -39,21 +43,21 @@ impl ServiceFactory for TestService {
             }
             Behavior::SlowStart => Box::pin(pending()),
             Behavior::PanicStart => panic!("测试初始化崩溃"),
-            Behavior::Exit => Box::pin(async { Ok(Box::pin(async { Ok(()) }) as ServiceTask) }),
+            Behavior::Exit => Box::pin(async { Ok(Box::pin(async { Ok(()) }) as Task) }),
             Behavior::Panic => Box::pin(async { Ok(panic_service()) }),
-            Behavior::Hang => Box::pin(async { Ok(Box::pin(pending()) as ServiceTask) }),
+            Behavior::Hang => Box::pin(async { Ok(Box::pin(pending()) as Task) }),
             Behavior::Wait => Box::pin(async move {
                 Ok(Box::pin(async move {
-                    context.shutdown.cancelled().await;
+                    init.service.cancellation().cancelled().await;
                     stopped.fetch_add(1, Ordering::SeqCst);
                     Ok(())
-                }) as ServiceTask)
+                }) as Task)
             }),
         }
     }
 }
 
-fn panic_service() -> ServiceTask {
+fn panic_service() -> Task {
     Box::pin(async { panic!("测试服务崩溃") })
 }
 
@@ -110,7 +114,7 @@ async fn custom_services_use_independent_factories_and_duplicate_names_are_rejec
             behavior: Behavior::FailStart,
             stopped: Arc::clone(&mail_stopped),
         }),
-        Err(RuntimeError::DuplicateFactory(name)) if name == "mail"
+        Err(application::Error::DuplicateFactory(name)) if name == "mail"
     ));
     let inspect = directory.clone();
     app.run_until(async move {
@@ -212,7 +216,7 @@ async fn startup_failure_rolls_back_started_services() {
     register(&mut app, "guild", Behavior::Wait, &stopped);
     assert!(matches!(
         app.run_until(pending()).await,
-        Err(RuntimeError::Start { .. })
+        Err(application::Error::Start { .. })
     ));
     assert_eq!(stopped.load(Ordering::SeqCst), 1);
     assert_empty(&directory);
@@ -230,7 +234,7 @@ async fn unexpected_exit_and_panic_stop_the_process() {
         let error = app.run_until(pending()).await.unwrap_err();
         assert!(matches!(
             error,
-            RuntimeError::UnexpectedExit(_) | RuntimeError::Task(_)
+            application::Error::UnexpectedExit(_) | application::Error::Task(_)
         ));
         assert!((1..=2).contains(&stopped.load(Ordering::SeqCst)));
         assert_empty(&directory);
@@ -257,7 +261,7 @@ async fn shutdown_deadline_aborts_uncooperative_service() {
     )
     .await
     .unwrap();
-    assert!(matches!(result, Err(RuntimeError::ShutdownTimeout)));
+    assert!(matches!(result, Err(application::Error::ShutdownTimeout)));
     assert_eq!(stopped.load(Ordering::SeqCst), 2);
     assert_empty(&directory);
 }
@@ -286,7 +290,7 @@ async fn startup_deadline_and_signal_cancel_pending_initialization() {
         if signal {
             assert!(result.is_ok());
         } else {
-            assert!(matches!(result, Err(RuntimeError::StartTimeout(_))));
+            assert!(matches!(result, Err(application::Error::StartTimeout(_))));
         }
         assert_eq!(stopped.load(Ordering::SeqCst), 1);
         assert_empty(&directory);
@@ -301,7 +305,7 @@ async fn missing_factory_is_rejected_before_any_service_starts() {
     register(&mut app, "player-ingress", Behavior::Wait, &stopped);
     assert!(matches!(
         app.run_until(pending()).await,
-        Err(RuntimeError::MissingFactory(name)) if name == "player"
+        Err(application::Error::MissingFactory(name)) if name == "player"
     ));
     assert_empty(&directory);
 }
@@ -324,5 +328,67 @@ async fn dropping_run_future_removes_directory_entries() {
     .unwrap();
     task.abort();
     assert!(task.await.unwrap_err().is_cancelled());
+    assert_empty(&directory);
+}
+
+#[tokio::test]
+async fn startup_failure_also_reclaims_uncooperative_service_children() {
+    struct Released(Arc<AtomicUsize>);
+    impl Drop for Released {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+    let mut app = app().with_task_capacity(1).unwrap();
+    let exported = Arc::new(std::sync::Mutex::new(None));
+    let exported_clone = Arc::clone(&exported);
+    let released = Arc::new(AtomicUsize::new(0));
+    let observed = Arc::clone(&released);
+    app.register_factory("player-ingress", move |init: Init| -> InitTask {
+        *exported_clone.lock().unwrap() = Some(init.service.clone());
+        let guard = Released(Arc::clone(&observed));
+        Box::pin(async move {
+            init.service
+                .tasks()
+                .launch(
+                    "uncooperative-child",
+                    Box::pin(async move {
+                        let _guard = guard;
+                        pending().await
+                    }),
+                )
+                .await?;
+            assert_eq!(
+                init.service.tasks().reserve().err().unwrap().kind(),
+                std::io::ErrorKind::WouldBlock
+            );
+            Ok(Box::pin(async move {
+                init.service.cancellation().cancelled().await;
+                Ok(())
+            }) as Task)
+        })
+    })
+    .unwrap();
+    register(
+        &mut app,
+        "player",
+        Behavior::FailStart,
+        &Arc::new(AtomicUsize::new(0)),
+    );
+    register(
+        &mut app,
+        "guild",
+        Behavior::Wait,
+        &Arc::new(AtomicUsize::new(0)),
+    );
+    let directory = app.directory();
+    assert!(matches!(
+        app.run_until(pending()).await,
+        Err(application::Error::Start { .. })
+    ));
+    assert_eq!(released.load(Ordering::SeqCst), 1);
+    let handle = exported.lock().unwrap().take().unwrap();
+    assert_eq!(handle.phase(), lifecycle::Phase::Stopped);
+    assert_eq!(handle.tasks().used_capacity(), 0);
     assert_empty(&directory);
 }

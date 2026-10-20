@@ -5,7 +5,8 @@ use std::sync::{
     atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 use tok_gateway::transport::{AcceptTask, GatewayTransport};
-use tok_gateway::{Gateway, GatewayConfig, GatewayContext, GatewayIngress, GatewayTask};
+use tok_gateway::{Gateway, GatewayConfig, GatewayIngress, GatewayTask};
+use tok_service::task;
 use tokio::{sync::mpsc, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
 
@@ -70,7 +71,7 @@ struct Fixture {
     started: mpsc::UnboundedReceiver<u32>,
     dropped: mpsc::UnboundedReceiver<u32>,
     drop_sender: mpsc::UnboundedSender<u32>,
-    context: GatewayContext,
+    tasks: task::Handle,
     stop: CancellationToken,
     stopped: Arc<AtomicUsize>,
     finished: Arc<AtomicBool>,
@@ -83,14 +84,14 @@ impl Fixture {
         let (drop_sender, dropped) = mpsc::unbounded_channel();
         let stopped = Arc::new(AtomicUsize::new(0));
         let finished = Arc::new(AtomicBool::new(false));
-        let mut context = None;
+        let mut tasks = None;
         let gateway = Gateway::new(
             GatewayConfig {
                 max_connections: 1,
                 max_tasks: 1,
             },
-            |runtime| {
-                context = Some(runtime);
+            |handle| {
+                tasks = Some(handle);
                 Ok(Ingress {
                     started,
                     stopped: Arc::clone(&stopped),
@@ -106,7 +107,7 @@ impl Fixture {
             started: starts,
             dropped,
             drop_sender,
-            context: context.unwrap(),
+            tasks: tasks.unwrap(),
             stop,
             stopped,
             finished,
@@ -151,7 +152,7 @@ impl Drop for Fixture {
 }
 
 #[tokio::test]
-async fn custom_ingress_uses_runtime_capacity_and_clean_shutdown() {
+async fn custom_ingress_uses_task_capacity_and_clean_shutdown() {
     let mut fixture = Fixture::new();
     fixture.connect(0).await;
     assert_eq!(fixture.start().await, 0);
@@ -161,26 +162,29 @@ async fn custom_ingress_uses_runtime_capacity_and_clean_shutdown() {
     fixture.connect(2).await;
     assert_eq!(fixture.drop_id().await, 2);
     assert!(fixture.started.try_recv().is_err());
-    let signal = fixture.context.cancellation();
+    let signal = fixture.tasks.cancellation();
     let (began, running) = tokio::sync::oneshot::channel();
     fixture
-        .context
-        .launch(Box::pin(async move {
-            #[expect(
-                clippy::let_underscore_must_use,
-                reason = "监督任务可能先被取消，启动确认接收方允许已经退出。"
-            )]
-            let _ = began.send(());
-            signal.cancelled().await;
-            Ok(())
-        }))
+        .tasks
+        .launch(
+            "test-background",
+            Box::pin(async move {
+                #[expect(
+                    clippy::let_underscore_must_use,
+                    reason = "监督任务可能先被取消，启动确认接收方允许已经退出。"
+                )]
+                let _ = began.send(());
+                signal.cancelled().await;
+                Ok(())
+            }),
+        )
         .await
         .unwrap();
     running.await.unwrap();
     assert_eq!(
         fixture
-            .context
-            .launch(Box::pin(async { Ok(()) }))
+            .tasks
+            .launch("test-background", Box::pin(async { Ok(()) }))
             .await
             .unwrap_err()
             .kind(),
@@ -188,26 +192,32 @@ async fn custom_ingress_uses_runtime_capacity_and_clean_shutdown() {
     );
     fixture.stop.cancel();
     fixture.result().await.unwrap();
+    fixture.tasks.wait_finished().await;
+    assert_eq!(fixture.tasks.state(), tok_service::task::State::Stopped);
     assert!(fixture.stopped.load(Ordering::SeqCst) > 0);
     assert!(fixture.finished.load(Ordering::SeqCst));
-    assert!(fixture.context.cancellation().is_cancelled());
+    assert!(fixture.tasks.cancellation().is_cancelled());
 }
 
 #[tokio::test]
-async fn background_failures_and_connection_panics_stop_the_runtime() {
+async fn background_failures_and_connection_panics_stop_the_gateway() {
     for failure in 0..3 {
         let mut fixture = Fixture::new();
         match failure {
             0 => fixture
-                .context
-                .launch(Box::pin(async {
-                    Err(std::io::Error::other("后台失败"))
-                }))
+                .tasks
+                .launch(
+                    "test-background",
+                    Box::pin(async { Err(std::io::Error::other("后台失败").into()) }),
+                )
                 .await
                 .unwrap(),
             1 => fixture
-                .context
-                .launch(Box::pin(async { panic!("后台任务崩溃") }))
+                .tasks
+                .launch(
+                    "test-background",
+                    Box::pin(async { panic!("后台任务崩溃") }),
+                )
                 .await
                 .unwrap(),
             _ => fixture.connect(666).await,
@@ -215,13 +225,15 @@ async fn background_failures_and_connection_panics_stop_the_runtime() {
         assert!(fixture.result().await.is_err());
         assert!(fixture.stopped.load(Ordering::SeqCst) > 0);
         assert!(fixture.finished.load(Ordering::SeqCst));
-        assert!(fixture.context.cancellation().is_cancelled());
+        assert!(fixture.tasks.cancellation().is_cancelled());
     }
 }
 
 #[tokio::test]
-async fn dropping_runtime_future_cancels_ingress_and_background_tasks() {
+async fn dropping_serve_future_cancels_ingress_and_background_tasks() {
     let mut fixture = Fixture::new();
+    fixture.connect(1).await;
+    assert_eq!(fixture.start().await, 1);
     let (started, running) = tokio::sync::oneshot::channel();
     struct Dropped(Arc<AtomicBool>);
     impl Drop for Dropped {
@@ -232,23 +244,33 @@ async fn dropping_runtime_future_cancels_ingress_and_background_tasks() {
     let dropped = Arc::new(AtomicBool::new(false));
     let guard = Dropped(Arc::clone(&dropped));
     fixture
-        .context
-        .launch(Box::pin(async move {
-            let _guard = guard;
-            #[expect(
-                clippy::let_underscore_must_use,
-                reason = "退出竞争测试允许等待方先退出，任务守卫负责后续清理。"
-            )]
-            let _ = started.send(());
-            std::future::pending::<()>().await;
-            Ok(())
-        }))
+        .tasks
+        .launch(
+            "test-background",
+            Box::pin(async move {
+                let _guard = guard;
+                #[expect(
+                    clippy::let_underscore_must_use,
+                    reason = "退出竞争测试允许等待方先退出，任务守卫负责后续清理。"
+                )]
+                let _ = started.send(());
+                std::future::pending::<()>().await;
+                Ok(())
+            }),
+        )
         .await
         .unwrap();
     running.await.unwrap();
     let task = fixture.task.take().unwrap();
     task.abort();
     assert!(task.await.unwrap_err().is_cancelled());
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        fixture.tasks.wait_finished(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(fixture.drop_id().await, 1);
     tokio::time::timeout(std::time::Duration::from_secs(2), async {
         while !dropped.load(Ordering::SeqCst) {
             tokio::task::yield_now().await;
@@ -256,7 +278,36 @@ async fn dropping_runtime_future_cancels_ingress_and_background_tasks() {
     })
     .await
     .unwrap();
-    assert!(fixture.context.cancellation().is_cancelled());
+    assert!(fixture.tasks.cancellation().is_cancelled());
     assert!(fixture.stopped.load(Ordering::SeqCst) > 0);
     assert!(!fixture.finished.load(Ordering::SeqCst));
+}
+
+#[tokio::test]
+async fn failed_gateway_construction_cancels_exported_task_handle() {
+    let mut exported = None;
+    let result = Gateway::<Ingress>::new(
+        GatewayConfig {
+            max_connections: 1,
+            max_tasks: 1,
+        },
+        |tasks| {
+            exported = Some(tasks);
+            Err(tok_gateway::ErrorCode::InvalidRequest.into())
+        },
+    );
+    assert!(result.is_err());
+    let handle = exported.unwrap();
+    assert!(handle.cancellation().is_cancelled());
+    handle.wait_finished().await;
+    assert!(handle.reserve().is_err());
+}
+
+#[tokio::test]
+async fn stopped_before_serve_still_runs_ingress_cleanup() {
+    let mut fixture = Fixture::new();
+    fixture.tasks.request_stop();
+    fixture.result().await.unwrap();
+    fixture.tasks.wait_finished().await;
+    assert!(fixture.finished.load(Ordering::SeqCst));
 }

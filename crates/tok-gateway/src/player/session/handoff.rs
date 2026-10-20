@@ -204,7 +204,7 @@ impl SessionManager {
         }
         session.channel.check_resume_position(request.ack_seq)?;
         let reservation = self
-            .runtime
+            .tasks
             .reserve()
             .map_err(|_| ErrorCode::CapacityExceeded)?;
         let deadline = Instant::now()
@@ -236,7 +236,7 @@ impl SessionManager {
         let tracked = Arc::clone(&record);
         let id = request.handoff_id.clone();
         // 由网关监督的截止任务在 RPC 被取消时仍负责解冻或停止旧入口。
-        if reservation.launch(Box::pin(async move {
+        if reservation.launch("handoff-deadline", Box::pin(async move {
             tokio::select! { _ = manager.shutdown.cancelled() => {}, _ = tokio::time::sleep_until(deadline) => {} }
             {
                 let mut record = tracked.lock().await;
@@ -429,7 +429,7 @@ pub(super) async fn receive(
             .map_err(|_| ErrorCode::Timeout)?;
     }
     let reservation = manager
-        .runtime
+        .tasks
         .reserve()
         .map_err(|_| ErrorCode::CapacityExceeded)?;
     let directory = manager
@@ -576,10 +576,13 @@ pub(super) async fn receive(
             Arc::clone(&manager.executor),
         );
         if reservation
-            .launch(Box::pin(async move {
-                task.await;
-                Ok(())
-            }))
+            .launch(
+                "player-session",
+                Box::pin(async move {
+                    task.await;
+                    Ok(())
+                }),
+            )
             .await
             .is_err()
         {

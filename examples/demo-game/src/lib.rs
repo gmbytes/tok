@@ -14,20 +14,24 @@ use protocol::GameMessage;
 use std::{sync::Arc, time::Duration};
 use tok::{
     AppConfig,
+    application::Application,
     core::{CallContext, ServiceDirectory, SessionIdentity},
     observability::Error,
     rpc::{RpcClients, RpcEndpoint, RpcService, protocol::internal::v1::Payload},
-    runtime::{Application, ServiceContext, ServiceFactory, ServiceTask, StartTask},
+    service::{
+        lifecycle::{Factory, Init, InitTask},
+        task::Task,
+    },
 };
 
 struct LifecycleService;
-impl ServiceFactory for LifecycleService {
-    fn start(&self, context: ServiceContext) -> StartTask {
+impl Factory for LifecycleService {
+    fn initialize(&self, init: Init) -> InitTask {
         Box::pin(async move {
             Ok(Box::pin(async move {
-                context.shutdown.cancelled().await;
+                init.service.cancellation().cancelled().await;
                 Ok(())
-            }) as ServiceTask)
+            }) as Task)
         })
     }
 }

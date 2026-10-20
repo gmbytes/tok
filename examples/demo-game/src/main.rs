@@ -7,8 +7,8 @@ use std::{path::PathBuf, time::Duration};
 use clap::Parser;
 use tok::{
     AppConfig,
+    application::shutdown_signal,
     observability::{Error, Observability, tracing},
-    runtime::shutdown_signal,
 };
 
 #[derive(Parser)]

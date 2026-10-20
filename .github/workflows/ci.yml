@@ -29,6 +29,8 @@ jobs:
           path: target/doc/
       - name: 构建示例二进制
         run: just build
+      - name: 验证类型化执行与公共生命周期
+        run: just execution-smoke lifecycle-smoke
       - name: 验证示例服务启动与退出
         run: just smoke
       - name: 验证共享端点内部 RPC

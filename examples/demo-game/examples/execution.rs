@@ -3,16 +3,16 @@
 
 use std::{io, sync::Arc, time::Duration};
 use tok::{
+    application::CancellationToken,
     core::{
         LogicalMessage, SessionIdentity, TimerTrigger,
         coordination::SessionOwner,
         execution::{Context, Source},
         service::Identity,
     },
-    gateway::{Gateway, GatewayContext, player},
+    gateway::{Gateway, player},
     infra::ownership::MemoryOwnership,
-    runtime::CancellationToken,
-    service::{Layer as ExecutionLayer, Request},
+    service::{Layer as ExecutionLayer, Request, task},
 };
 use tower::{Layer, ServiceExt, service_fn};
 
@@ -101,9 +101,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     // gateway 只添加自身能力，同一执行设施没有 gateway 依赖，也未改现有 worker。
     let config = player::Config::default();
-    let gateway = Gateway::new(config.runtime_limits(), |runtime| {
+    let gateway = Gateway::new(config.gateway_limits(), |tasks| {
         player::Ingress::new(
-            runtime,
+            tasks,
             config,
             SessionOwner {
                 node_id: "local".into(),
@@ -121,24 +121,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             event_id: "example:query".into(),
         },
     )?;
-    drop(gateway_context.extensions_mut().insert(gateway.context()));
+    drop(gateway_context.extensions_mut().insert(gateway.tasks()));
     drop(
         gateway_context
             .extensions_mut()
             .insert(gateway.ingress().sessions()),
     );
     let query = ExecutionLayer.layer(service_fn(|request: Request<()>| async move {
-        let runtime = request
+        let tasks = request
             .context
             .extensions()
-            .get::<GatewayContext>()
+            .get::<task::Handle>()
             .ok_or_else(|| io::Error::other("缺少网关能力"))?;
         let sessions = request
             .context
             .extensions()
             .get::<player::SessionManager>()
             .ok_or_else(|| io::Error::other("缺少会话目录"))?;
-        if runtime.cancellation().is_cancelled() {
+        if tasks.cancellation().is_cancelled() {
             return Err(io::Error::other("网关已停止"));
         }
         sessions

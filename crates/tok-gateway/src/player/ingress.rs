@@ -1,12 +1,13 @@
 //! Player 接入组件：组装认证、玩家所有权与串行 session，不拥有监听运行循环。
 
 use crate::{
-    ErrorCode, Gateway, GatewayContext, GatewayIngress, GatewayTask, Result,
+    ErrorCode, Gateway, GatewayIngress, GatewayTask, Result,
     codec::FrameCodec,
     player::{Authenticator, Config, Executor, SessionManager},
 };
 use std::{sync::Arc, time::Duration};
 use tok_core::coordination::{OwnershipStore, SessionOwner};
+use tok_service::task;
 use tokio::net::TcpStream;
 use tokio_util::sync::CancellationToken;
 
@@ -41,7 +42,7 @@ impl Ingress {
     }
     /// 注入网关任务入口与玩家后端；创建过程不启动监听或 session 任务。
     pub fn new(
-        context: GatewayContext,
+        tasks: task::Handle,
         config: Config,
         owner: SessionOwner,
         authenticator: Arc<dyn Authenticator>,
@@ -57,13 +58,13 @@ impl Ingress {
             Duration::from_millis(config.io_timeout_ms),
         )?;
         let config = Arc::new(config);
-        let shutdown = context.cancellation().child_token();
+        let shutdown = tasks.cancellation().child_token();
         let sessions = SessionManager::new(
             Arc::clone(&config),
             owner,
             ownership,
             executor,
-            context,
+            tasks,
             shutdown,
         )?;
         Ok(Self {
@@ -118,9 +119,9 @@ impl Gateway<Ingress> {
         ownership: Arc<dyn OwnershipStore>,
         executor: Arc<dyn Executor>,
     ) -> Result<Self> {
-        let limits = config.runtime_limits();
-        Self::new(limits, |context| {
-            Ingress::new(context, config, owner, authenticator, ownership, executor)
+        let limits = config.gateway_limits();
+        Self::new(limits, |tasks| {
+            Ingress::new(tasks, config, owner, authenticator, ownership, executor)
         })
     }
 }

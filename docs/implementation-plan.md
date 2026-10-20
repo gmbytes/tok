@@ -1,6 +1,6 @@
 # 服务与处理链方向校正实施计划
 
-本计划替代旧的阶段零至八推进顺序，是当前重构与实施的唯一批次入口。运行基线为 `2dbb2c8`，文档校准已提交为 `2552274`；P1 最小执行模型已完成并通过验收，P2–P7 尚未实施。旧阶段与验收见[实施历史](implementation-history.md)，代码现状见[实现状态](status.md)。
+本计划替代旧的阶段零至八推进顺序，是当前重构与实施的唯一批次入口。P1 已提交为 `f54b545`，文档校准为 `2552274`；P2 公共工厂与生命周期已实施，P3–P7 尚未实施。旧阶段与验收见[实施历史](implementation-history.md)，代码现状见[实现状态](status.md)。
 
 目标：框架提供“服务 = 状态 + 入口路由 + 处理链”，处理链由中间件与 handler 组成；tok-gateway 成为共同设施的内置扩展，tok crate 保持门面与应用组装入口。[总体设计](design.md)规定边界，[服务运行模型](service-runtime.md)规定目标契约。
 
@@ -9,8 +9,8 @@
 | 批次 | 内容 | 前置 | 状态 |
 | --- | --- | --- | --- |
 | P1 | 验证统一执行抽象 | 已确认的设计 | 已完成最小模型验收 |
-| P2 | 下沉服务构建与运行设施 | P1 契约成立 | 未实施，下一步 |
-| P3 | 统一 RPC 与事件执行入口 | P1、P2 | 未实施 |
+| P2 | 下沉服务构建与运行设施 | P1 契约成立 | 已实施，验收见下文 |
+| P3 | 统一 RPC 与事件执行入口 | P1、P2 | 未实施，下一步 |
 | P4 | gateway 迁移为服务扩展 | P2、P3 | 未实施 |
 | P5 | 实现传输 topic 路由 | P3 统一事件契约 | 未实施 |
 | P6 | 动态兴趣与主题策略 | P4 生命周期、P5 路由 | 未实施 |
@@ -24,7 +24,7 @@
 
 **工作：**
 
-- 明确 ExecutionContext 的公共身份、可信来源、操作、目标、追踪、预算与取消信息；网关、manager、session 和业务状态通过类型化能力扩展提供。
+- 明确 ExecutionContext 的公共身份、可信来源、操作、追踪、预算与取消信息；网关、manager、session 和业务状态通过类型化能力扩展提供。
 - 验证带上下文的类型化输入、不同结果类型、通用 Layer 和路由级 Layer。通用执行核心不依赖 tonic::Status、protobuf、NATS 或 gateway。
 - 验证可借用 &mut C 的异步 handler、同步回调适配、错误保留和首错顺序；本地执行不被迫编码、spawn 或包装为 Arc<Mutex<_>>。
 - 用普通服务与最小 gateway 组装示例验证扩展方向；只验证组装和能力接入，不在本批迁移生产连接与交接循环。
@@ -39,9 +39,8 @@
 - tok-core 的 execution::Context / Source / Extensions 与 service::Identity 提供通用契约，不依赖协议或 gateway。
 - 新增 tok-service 承载实际的 Request<T>、Tower Layer/Service 与受预算和取消保护的调用 future；tok 门面通过 service 导出，tok-service 的正常依赖不包含 gateway、RPC、事件或 NATS。
 - 本地异步 handler 可借用状态，普通调用、事件与 timer 保留不同输入/结果类型；最小 gateway 示例只安装查询/任务句柄能力，没有迁移生产 worker。
-- 公共构建、ServiceFactory 和生命周期监督在 P2 继续放入 tok-service；当前 Application/Gateway 结构不变。
+- P1 保持 Application/Gateway 结构不变；P2 已将公共 Factory 与生命周期监督放入 tok-service。
 - 独立示例为 `examples/demo-game/examples/execution.rs`，命令为 `just execution-smoke`。Layer 的克隆、readiness 预算和借用/静态任务兼容限制在用户指南记录。
-
 
 P1 上下文边界校正：移除通用 `target`；`operation` 明确为服务内稳定入口标识，`service` 只标识当前执行服务。实体身份按需通过类型化输入/扩展提供；路由输入、选定端点及熔断状态分离，契约见[服务运行模型](service-runtime.md#操作身份路由与熔断边界)。通用路由器和熔断器尚未实施，本次不扩大 P1 范围。
 
@@ -63,6 +62,27 @@ P1 上下文边界校正：移除通用 `target`；`operation` 明确为服务�
 - 普通服务与 gateway 复用任务容量、取消与清理规则；专用监听循环和 session 状态机不为统一而强行合并。
 
 **验收：** 普通服务和最小 gateway 都能构建、初始化、停止与等待结束；初始化失败/超时/取消、运行异常、正常退出和强制收束不遗留任务或注册。依赖无环，下层不导入 player/scene 专用状态。
+
+### P2 已形成的落点
+
+- `tok_service::lifecycle::{Factory, Init, InitTask}` 与 `tok_service::task::Task` 提供公共工厂契约，支持 trait 实现及闭包。工厂自行初始化状态、组装类型化入口和 Tower 链，不另建平行的 Handler/中间件体系；RPC 与事件的统一注册表留在 P3。
+- task::Supervisor / Handle / Reservation / State 只负责任务范围；lifecycle::Builder → Prepared → Running 消费式编排服务启动和退出，服务 Handle / Phase 提供查询。只有 start 推进就绪，不公开 mark_ready，不允许重复初始化或直接运行未初始化的服务。
+- 预留、排队和运行共用后台容量；初始化/主任务不占名额；used_capacity 包含预留。连接通过 Supervisor::track 跟踪，Supervisor::child 将子范围回收纳入父结束等待。shutdown 消费任务范围，成功后 wait_finished 立即完成；超时返回错误并保留未释放外部工作对应的 Stopping。
+- Application 保留节点配置、共享 RPC 端点、目录注册和应用级退出。工厂改用下层 Factory；端点和发现通过类型化 `application::Binding` 扩展注入，每服务后台容量默认 64，可显式调整。
+- Gateway 后台监督已复用 Supervisor，连接与 session 循环保持专用；工厂使用 Gateway::new_in 关联所属服务的父运行范围。Gateway::tasks 提供任务范围查询和操作，完整服务阶段/退出由所属 lifecycle::Handle 提供；完整业务生命周期扩展及消息 Layer 仍属 P4。
+- 应用模块改为 application，服务生命周期模块为 lifecycle，构建器为 Builder::build，初始化参数为 Init（service 字段提供生命周期句柄）；Gateway 直接复用 task::Handle / Reservation，无专用上下文包装。应用错误使用 application::Error，失败计数为 tok_application_failures_total。
+- 服务主任务在发现发布前交给监督，避免发布失败或取消时漏掉主任务清理；共享端点仍只绑定一次，初始化成功才开启入口并发布。
+- `just lifecycle-smoke` 同时验证无端点普通服务（状态 + 请求/本地事件类型化链）与 TCP Gateway 的初始化、停止、异步清理和结束等待。
+
+任务范围可读性收敛：ScopeState 维护共享状态与活动计数，ActivityGuard 通过 Drop 维护活动生命周期，Pending 的容量/活动守卫均说明持有和释放作用。lifecycle::Handle 保留服务阶段、停止和结束等待，任务提交、预留及容量查询统一经 tasks()。本次不改变任务调度或退出策略，外部专项沿用本批此前记录。
+
+### P2 验收记录（2026-10-20 Windows）
+
+工作区 207 项测试通过（P1 基线 187 项，本批新增 9 项服务生命周期测试、5 项任务范围测试、3 项应用/网关测试、1 项指南示例及 2 项编译失败文档测试）。覆盖初始化失败/超时/取消/panic、启动期后台故障、共同容量、正常清理、退出超时、Drop、连接跟踪、父子运行范围与结束等待，以及初始化/后台任务追踪关联。另验证消费式退出成功后立即完成结束等待、外部工作未释放时超时保留 Stopping、组件清理晚于子任务范围退出，以及重复初始化/启动被类型拒绝。
+
+全目标 Clippy、workspace rustdoc、格式/LF、84 处 Markdown 仓库内链接检查通过；execution-smoke、lifecycle-smoke、rpc-smoke、client-smoke、nats-smoke 通过。真实 NATS 13 项测试通过；Redis 发现 2 项测试及发现双进程、共享所有权、三进程交接 3 项集成均通过。本次外部回归串行运行，避免 Windows 示例 exe 占用影响构建。
+
+本批未执行 release 构建或 Linux 本地验证，不将 Windows 结果代替 CI。P3–P7 未实施，代码等待审阅，不自动提交。
 
 ## P3 统一 RPC 与事件执行入口
 

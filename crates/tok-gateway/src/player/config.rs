@@ -87,7 +87,7 @@ impl Default for Config {
 
 impl Config {
     /// 从玩家参数提取通用连接和后台任务容量；session 数量限制由玩家目录同时执行。
-    pub fn runtime_limits(&self) -> crate::GatewayConfig {
+    pub fn gateway_limits(&self) -> crate::GatewayConfig {
         crate::GatewayConfig {
             max_connections: self.max_connections,
             max_tasks: self

@@ -168,7 +168,7 @@ impl Fixture {
             permits: Semaphore::new(0),
         });
         let ownership = Arc::new(MemoryOwnership::new(config.max_sessions).unwrap());
-        let mut limits = config.runtime_limits();
+        let mut limits = config.gateway_limits();
         if events.is_some() {
             limits.max_tasks += 1;
         }
@@ -197,12 +197,16 @@ impl Fixture {
                 )
                 .await
                 .unwrap();
-            let context = gateway.context();
-            let stop = context.cancellation();
-            context
-                .launch(Box::pin(async move {
-                    subscription.run(stop).await.map_err(std::io::Error::other)
-                }))
+            let tasks = gateway.tasks();
+            let stop = tasks.cancellation();
+            tasks
+                .launch(
+                    "event-subscription",
+                    Box::pin(async move {
+                        subscription.run(stop).await?;
+                        Ok(())
+                    }),
+                )
                 .await
                 .unwrap();
         }

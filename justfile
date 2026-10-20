@@ -13,6 +13,10 @@ check:
 execution-smoke:
     cargo run -p demo-game --example execution --locked
 
+# 验证 P2 普通服务与 TCP 网关共用的构建、任务监督和生命周期
+lifecycle-smoke:
+    cargo run -p demo-game --example lifecycle --locked
+
 # 执行 workspace 测试
 test:
     cargo test --workspace --locked

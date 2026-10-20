@@ -8,7 +8,7 @@ use super::{
     worker::{self, renew_ownership},
 };
 use crate::{
-    ErrorCode, GatewayContext, Result,
+    ErrorCode, Result,
     player::{Config, Executor, resume_token::SignedResumeTokens},
 };
 use std::{
@@ -20,6 +20,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tok_core::coordination::{OwnershipStore, SessionOwner};
+use tok_service::task;
 use tokio::sync::{Notify, mpsc};
 use tokio_util::sync::CancellationToken;
 
@@ -50,7 +51,7 @@ pub struct SessionManager {
     pub(super) owner: SessionOwner,
     pub(super) ownership_store: Arc<dyn OwnershipStore>,
     pub(super) executor: Arc<dyn Executor>,
-    pub(super) runtime: GatewayContext,
+    pub(super) tasks: task::Handle,
     pub(super) shutdown: CancellationToken,
     resume_token_codec: Arc<dyn tok_core::credentials::ResumeTokenCodec>,
 }
@@ -61,7 +62,7 @@ impl SessionManager {
         owner: SessionOwner,
         ownership_store: Arc<dyn OwnershipStore>,
         executor: Arc<dyn Executor>,
-        runtime: GatewayContext,
+        tasks: task::Handle,
         shutdown: CancellationToken,
     ) -> Result<Self> {
         Ok(Self {
@@ -83,7 +84,7 @@ impl SessionManager {
             owner,
             ownership_store,
             executor,
-            runtime,
+            tasks,
             shutdown,
         })
     }
@@ -465,7 +466,7 @@ impl SessionManager {
             task.await;
             Ok(())
         });
-        let launched = tokio::select! { biased; _ = self.shutdown.cancelled() => false, result = self.runtime.launch(task) => result.is_ok() };
+        let launched = tokio::select! { biased; _ = self.shutdown.cancelled() => false, result = self.tasks.launch("player-session", task) => result.is_ok() };
         if !launched {
             #[expect(
                 clippy::let_underscore_must_use,

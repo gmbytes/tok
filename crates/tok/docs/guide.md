@@ -8,11 +8,11 @@ tok 是实验性的 Rust 游戏服务器框架。游戏通过本 crate 组装组
 
 | 目标 | 当前使用方式 | 状态 |
 | --- | --- | --- |
-| 服务与处理链共同构建 | Application / ServiceFactory 与 Gateway 分别组装 | P1/P2/P4 待实施 |
+| 服务与处理链共同构建 | 通用 Factory / Supervisor 已被 Application 与 Gateway 复用 | P2 已实施，P3/P4 继续迁移入口与扩展 |
 | 消息、事件、timer 共用上下文与 Layer | P1 原型可用，既有 RPC/事件/Executor 尚未迁移 | P1 原型验收通过，P3/P4 待实施 |
 | 本地与远程共用事件接口 | local::Dispatcher 与 Registry / Subscriber 为两套契约 | P3 待实施 |
 | topic 参与传输并动态聚合 | join_topic / leave_topic 为同步本地成员操作 | P5/P6 待实施 |
-| 完整生命周期、查询和状态扩展 | 当前句柄只提供已公开的有限操作 | P2/P4 待实施 |
+| 完整生命周期、查询和状态扩展 | 通用任务阶段/停止/结束等待可用，session 查询仍有限 | P2 已实施，完整业务扩展待 P4 |
 
 下文示例保持可编译，不使用尚未提供的统一 Builder 或异步主题接口。实际迁移后再按对应批次替换示例；不靠兼容别名长期维护两套模型。
 
@@ -35,13 +35,13 @@ workspace 同时禁止持有同步锁或 RefCell 借用跨越 await、丢弃未�
 
 tok-gateway 是这套基础设施的内置扩展，增加连接、认证、session、串行调度、补发与交接能力。游戏自定义服务和 gateway 应使用相同的构建与扩展机制。
 
-本 crate 是统一导出与应用组装门面。共同契约和运行能力应由下层提供，gateway 不反向依赖本 crate；使用端可以继续从 tok 取得便捷接口。当前 Application 与 Gateway 等执行设施尚未完成目标统一，下文示例仍以已实现 API 为准，不代表统一构建接口已经提供。
+本 crate 是统一导出与应用组装门面。共同契约和运行能力应由下层提供，gateway 不反向依赖本 crate；使用端可以继续从 tok 取得便捷接口。当前 Application 与 Gateway 已复用公共工厂和任务生命周期，业务入口尚未完成统一，下文示例以已实现 API 为准。
 
 ## P1 通用执行原型
 
 P1 已提供 [`core::execution::Context`]、类型化 [`service::Request`] 与共同的 [`service::Layer`]。
 上下文的 `service()` 表示当前执行所属服务，`operation()` 是入口适配器填写的稳定操作标识，不拼接实体或请求 ID。业务实体身份、路由输入等按需使用类型化输入或扩展携带；当前原型没有通用路由器或熔断器。
-原型位于 tok-core / tok-service，构建普通调用与 gateway 能力时共用；现有 Application、Gateway、RPC 和事件注册表尚未迁移。
+原型位于 tok-core / tok-service，构建普通调用与 gateway 能力时共用；Application/Gateway 已复用 P2 生命周期；RPC 和事件注册表尚未迁移至共同执行核心。
 
 以下普通 Rust 输入不要求 protobuf，本地状态直接借用，经过 await 后仍在当前任务中修改：
 
@@ -49,7 +49,7 @@ P1 已提供 [`core::execution::Context`]、类型化 [`service::Request`] 与�
 use std::{io, time::Duration};
 use tok::{
     core::{execution::{Context, Source}, service::Identity},
-    runtime::CancellationToken,
+    application::CancellationToken,
     service::{Layer as ExecutionLayer, Request},
 };
 use tower::{Layer, ServiceExt, service_fn};
@@ -76,7 +76,7 @@ assert_eq!((result, value), (1, 1));
 # async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> { example().await }
 ```
 
-Context::child 继承原截止点、目标、追踪和能力，父取消向子传播，子取消不关闭父调用。
+Context::child 继承当前服务身份、原截止点、追踪和扩展，父取消向子传播，子取消不关闭父调用。
 Extensions 共享类型化能力；插入 Arc 状态等能力由游戏明确选择，不强制把本地 &mut 状态转换为共享锁。
 Source 是可信入口的关联信息，构造这个类型本身不构成认证；远程适配仍需验证元数据。
 
@@ -97,20 +97,20 @@ owned 输入满足相应 Send 条件时仍可交给运行时。P1 不增加隐�
 多个服务可以引用同一个端点；端点中的协议名由对应的传输组件解释。
 
 ```rust
-use tok::{AppConfig, core::ServiceDirectory, runtime::{Application, ServiceContext,
-    ServiceFactory, ServiceTask, StartTask}};
+use tok::{AppConfig, core::ServiceDirectory, application::Application,
+    service::{lifecycle::{Init, Factory, InitTask}, task::Task}};
 
 struct GameService;
 
-impl ServiceFactory for GameService {
-    fn start(&self, context: ServiceContext) -> StartTask {
+impl Factory for GameService {
+    fn initialize(&self, init: Init) -> InitTask {
         Box::pin(async move {
             // 在返回前完成初始化，持有资源使用 RAII，初始化必须可取消。
             Ok(Box::pin(async move {
-                context.shutdown.cancelled().await;
+                init.service.cancellation().cancelled().await;
                 // 收到退出通知后清理服务资源。
                 Ok(())
-            }) as ServiceTask)
+            }) as Task)
         })
     }
 }
@@ -146,12 +146,96 @@ assert!(directory.snapshot("guild")?.is_empty());
 # }
 ```
 
-[`runtime::ServiceFactory::start`] 返回初始化 future；初始化完成后返回持续运行的服务任务。
-[`runtime::Application::run_until`] 监督任务，初始化失败、超时、提前结束或崩溃会触发整个进程清理。
-服务通过 [`runtime::ServiceContext::shutdown`] 接收取消通知。
+[`service::lifecycle::Factory::initialize`] 返回初始化 future；初始化完成后返回持续运行的服务任务。
+[`application::Application::run_until`] 监督任务，初始化失败、超时、提前结束或崩溃会触发整个进程清理。
+服务通过 [`service::lifecycle::Handle::cancellation`] 接收取消通知。
 默认初始化期限为 30 秒，整体退出期限为 10 秒，可通过
-[`runtime::Application::with_timeouts`] 调整。
-生产进程可向 `run_until` 传入 [`runtime::shutdown_signal`]，支持 Windows Ctrl+C 和 Unix SIGTERM。
+[`application::Application::with_timeouts`] 调整。
+生产进程可向 `run_until` 传入 [`application::shutdown_signal`]，支持 Windows Ctrl+C 和 Unix SIGTERM。
+
+## 通用工厂与生命周期
+
+[`service::lifecycle::Factory`] 是公共构建契约，可实现 trait 或使用返回 InitTask 的闭包。
+工厂创建状态、入口和 Tower 链，返回主任务；普通服务不要求网络端点或 session。
+Application 通过类型化 [`application::Binding`] 扩展注入端点和发现查询；RPC/事件注册表统一仍属 P3。
+
+任务范围与服务生命周期分别管理：
+
+| 设施 | 职责及状态 |
+| --- | --- |
+| [`service::task::Supervisor`] | 通用任务所有者，驱动任务及有界退出；状态为 Open / Stopping / Stopped |
+| [`service::task::Handle`] | 提交任务、预留容量、查询使用量、请求停止和等待任务范围结束 |
+| [`service::lifecycle::Builder`] | 尚未初始化的服务；消费自身初始化，返回 Prepared |
+| [`service::lifecycle::Prepared`] | 初始化已完成；消费自身 start，将主任务交给监督并推进就绪 |
+| [`service::lifecycle::Running`] | 主任务已启动；run 监督服务策略并收束完整退出 |
+| [`service::lifecycle::Handle`] | 服务阶段、停止和结束等待；通过 tasks() 操作任务范围 |
+
+下面的普通服务没有端点，初始化提交后台任务，再按唯一顺序启动、停止并等待退出：
+
+```rust
+use std::{sync::Arc, time::Duration};
+use tok::{core::{execution::Extensions, service::Identity}, application::CancellationToken,
+    service::{lifecycle::{Init, Factory, Phase, InitTask, Builder}, task::Task}};
+
+fn initialize(init: Init) -> InitTask {
+    Box::pin(async move {
+        let stop = init.service.cancellation();
+        init.service.tasks().launch("worker", Box::pin(async move {
+            stop.cancelled().await;
+            Ok(())
+        })).await?;
+        Ok(Box::pin(async move {
+            init.service.cancellation().cancelled().await;
+            Ok(())
+        }) as Task)
+    })
+}
+# #[tokio::main]
+# async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+let builder = Builder::new(
+    Identity { node_id: "local".into(), service_name: "worker".into() },
+    8, CancellationToken::new(),
+)?;
+let handle = builder.handle();
+let factory: Arc<dyn Factory> = Arc::new(initialize);
+let prepared = builder.build(factory, Extensions::default(), Duration::from_secs(2)).await?;
+assert_eq!(handle.phase(), Phase::Starting);
+let service = prepared.start();
+assert_eq!(handle.phase(), Phase::Ready);
+let running = tokio::spawn(service.run(Duration::from_secs(2)));
+handle.request_stop();
+running.await??;
+assert_eq!(handle.phase(), Phase::Stopped);
+handle.wait_finished().await; // run 成功后立即完成，无需额外 drop 所有者。
+# Ok(())
+# }
+```
+
+Builder 不能直接运行；build 消费 Builder，start 消费 Prepared，类型阻止重复初始化/启动。
+服务就绪只在 start 推进一次；若已收到停止通知，仍启动主任务完成清理，阶段保持 Stopping。
+Application 在 start 之后开启 RPC 准入并发布发现；run 不再隐式标记就绪。
+
+通用 Supervisor 不认识工厂、主任务或 Ready。所有者用 next 取得后台完成结果，再决定策略；
+服务运行层允许有限后台任务正常完成，将后台错误/panic 和主任务提前结束视为服务失败。
+后台容量同时覆盖预留、排队与运行，used_capacity 表示使用的名额，包含尚未提交的预留。
+生命周期句柄不重复提供 launch、reserve 或 used_capacity；统一通过 `init.service.tasks()` 或服务句柄的 `tasks()` 访问任务范围。
+任务范围内部由 ScopeState 记录状态与活动数，ActivityGuard 在创建/释放时维护计数；容量守卫负责归还名额，活动守卫负责阻止范围提前结束。
+初始化与主任务单独跟踪，不占后台名额。
+
+任务范围只有一个消费式退出入口 `shutdown(timeout)`：Some 指定期限，None 由外层控制期限。
+成功返回表示被跟踪任务和子范围均已释放，wait_finished 已完成；
+超时中止并回收自身拥有的任务，返回 ShutdownTimeout。外部跟踪工作仍须由其所有者回收，未释放前状态保持 Stopping。
+Drop 只发起取消和中止，不能承诺异步清理完成，应通过 wait_finished 观察实际释放。
+任务不得等待自身范围结束。
+
+服务 Running::run 先停止准入，收束主任务清理，再关闭任务范围；主任务持有的子组件与清理均属于完整服务退出。
+Supervisor::child 创建独立容量的子范围，父取消向子传播；Supervisor::track 跟踪外部调度工作，容量和回收仍由调用方控制。
+工厂使用 [`gateway::Gateway::new_in`] 关联所属服务；Gateway 保留连接循环和 ingress finish。
+Gateway::tasks 暴露后台/连接任务范围，其结束不表示 ingress finish 已完成；完整退出等待所属服务 Handle 或 serve future。
+
+Application 默认每服务允许 64 个后台名额，可用 [`application::Application::with_task_capacity`] 调整。
+共享端点和发现任务由应用统一管理，子任务范围有独立容量。
+`just lifecycle-smoke` 演示普通服务的状态、请求/事件链，以及 TCP gateway 的构建和完整退出。
 
 ## 日志 指标与追踪
 
@@ -189,8 +273,8 @@ player 使用 `into_player`，普通业务服务使用 `into_business`，两者�
 ```rust,no_run
 use std::sync::Arc;
 use tok::{AppConfig, rpc::{HandlerRegistry, RpcEndpoint, RpcService},
-    runtime::{Application, ServiceContext, ServiceFactory, ServiceTask, StartTask,
-        shutdown_signal}};
+    application::{Application, shutdown_signal},
+    service::{lifecycle::{Init, Factory, InitTask}, task::Task}};
 
 #[derive(Clone, PartialEq, prost::Message)]
 struct ReadGuild {
@@ -199,13 +283,13 @@ struct ReadGuild {
 }
 
 struct Lifecycle;
-impl ServiceFactory for Lifecycle {
-    fn start(&self, context: ServiceContext) -> StartTask {
+impl Factory for Lifecycle {
+    fn initialize(&self, init: Init) -> InitTask {
         Box::pin(async move {
             Ok(Box::pin(async move {
-                context.shutdown.cancelled().await;
+                init.service.cancellation().cancelled().await;
                 Ok(())
-            }) as ServiceTask)
+            }) as Task)
         })
     }
 }
@@ -245,7 +329,7 @@ endpoint = "internal-rpc"
 初始化失败、监听失败和运行异常都进入同一清理流程。
 工厂初始化不能等待尚未启动的其他服务；依赖调用应在必要服务就绪后发起。
 
-调用方通过 [`runtime::Application::service_directory`] 或 [`runtime::ServiceContext::directory`]
+调用方通过 [`application::Application::service_directory`] 或 [`application::Binding::directory`]
 查询服务，再用 [`infra::routing::route`] 按 bid 选点。
 [`rpc::RpcClients`] 只管理共享连接、缓存撤销和默认期限，不包含 Player 或 Business 方法。
 [`rpc::player::Client`] 提供 call / handle_event，[`rpc::business::Client`] 提供普通业务 call；
@@ -319,8 +403,8 @@ let rpc = RpcService::new("node-a", "guild", Arc::new(TowerHandler(layer.layer(s
 
 [`core::ServiceDirectory`] 提供快照和变更订阅。先订阅再读取初始快照，每次通知后重新读取需要的服务。
 通知可以合并；不能根据通知次数推断服务变更次数。
-[`runtime::Application::with_service_directory`] 可注入查询后端；本进程注册和退出撤销仍由应用管理。
-[`runtime::Application::directory`] 返回本进程的内存注册目录。
+[`application::Application::with_service_directory`] 可注入查询后端；本进程注册和退出撤销仍由应用管理。
+[`application::Application::directory`] 返回本进程的内存注册目录。
 
 [`infra::ownership::MemoryOwnership`] 是有界的单进程所有权后端，实现
 [`core::coordination::OwnershipStore`] 的条件获取、续租与释放。
@@ -407,7 +491,7 @@ cargo run -p demo-game --locked -- --config examples/demo-game/config/redis-gate
 两份配置必须使用相同 Redis URL 和 namespace，node_id 各不相同。增加游戏进程时复制配置并修改 node_id 和监听端口。
 跨开发机使用时，`advertise_address` 应填其他机器能够连接的 IP 与端口；`address` 保留本机监听地址。
 例如监听 `0.0.0.0:7001`，发布 `192.0.2.10:7001`。
-工厂通过 [`runtime::ServiceContext::listen_address`] 获取监听地址，`context.service.address` 是发布地址。
+工厂通过 `init.extensions.get::<application::Binding>()` 获取 Application 注入的绑定，再由 [`application::Binding::listen_address`] 取得监听地址，`binding.service.address` 是发布地址。
 Redis 发现拒绝发布通配地址；Memory 仍允许原有单进程配置。
 
 ```toml
@@ -434,7 +518,7 @@ namespace 最长 64 字节，只允许 ASCII 字母、数字、短横线和下�
 变更通常在下一次刷新后可见；后端断开、租约丢失、扫描超时或目录超过配置容量时，缓存失效，监督任务失败，Application 退出。
 该开发后端采用失败后退出策略，恢复 Redis 后需要重新启动应用，不后台无限重连。没有后台刷新时，缓存最多保留一个租期，过期查询返回错误。
 
-`Application::directory()` 始终返回本进程的内存注册镜像；跨进程查询必须使用 `Application::service_directory()` 或 `context.directory`。
+`Application::directory()` 始终返回本进程的内存注册镜像；跨进程查询必须使用 `Application::service_directory()` 或工厂扩展中的 `Binding.directory`。
 `with_service_directory` 只替换查询来源，注册仍使用配置选定的后端。
 首次 Redis 同步完成前快照返回不可用，业务应等待就绪后发起调用；示例 smoke 会有界等待。
 
@@ -899,7 +983,7 @@ Core NATS 拒绝 Persistent，不静默降级；JetStream、离线加载和去�
 
 事件订阅由游戏服务工厂组装。取得 Gateway::context()，显式预留后台任务容量，再把 subscription.run(stop) 交给该运行时监督。
 Ingress 不依赖 NATS，也不限制只能安装一个事件消费任务；可在 `serve` 前确认订阅并提交任务。发布/订阅连接的关闭由持有者负责。
-用 ingress.sessions() 捕获会话目录并注册游戏处理者；普通服务则把同一个消费 future 纳入自己的 ServiceTask。
+用 ingress.sessions() 捕获会话目录并注册游戏处理者；普通服务则通过 `Init.service.launch` 提交同一个消费 future。
 处理函数可执行自定义网关操作，也可创建 [`gateway::player::events::Delivery`] 交给 SessionManager::deliver：
 
 - `Action::Notify { message_id, body }`：显式转换为客户端协议通知，不执行 player；成功准入后沿 server_seq 进入补发缓存。
@@ -958,7 +1042,7 @@ W3C traceparent / tracestate 使用标准 NATS headers；发布、网关接收�
 
 ## 统一 Gateway 与接入组件
 
-本节的“统一”指当前 Player/Scene 共用 Gateway 外壳，尚不代表其构建和监督已与普通服务统一。后者由 P2/P4 迁移。
+Player/Scene 共用 Gateway 外壳，P2 已将其后台任务监督与普通服务统一；完整业务扩展和消息 Layer 在 P4 迁移。
 
 [`gateway::Gateway`] 共用连接接收、容量控制、后台任务监督与退出流程。
 [`gateway::GatewayIngress`] 定义连接处理和清理钩子，当前
@@ -980,8 +1064,8 @@ endpoint = "client"
 factory = "player-ingress"
 ```
 
-[`runtime::Application::register_factory`] 按名称注册工厂；运行前检查配置实际使用的工厂是否已注册，
-每个服务调用一次工厂并传入自身的服务身份、端点和退出 token。
+[`application::Application::register_factory`] 按名称注册工厂；运行前检查配置实际使用的工厂是否已注册，
+每个服务调用一次工厂，Init 提供服务身份、生命周期句柄及扩展；端点与发现信息位于 Binding 扩展。
 [`config::ServiceConfig::factory_name`] 优先返回显式的 `factory`，省略时返回 `service_name`；端点协议不参与工厂选择。
 demo-game 提供 `player-ingress`、`player` 与 `guild`；选择 `scene-ingress` 明确返回尚未实现。
 Player 接入组件要求独占 TCP 端点，业务组件要求 gRPC 端点；具体约束由游戏组装层检查。
@@ -991,10 +1075,10 @@ Player 接入组件要求独占 TCP 端点，业务组件要求 gRPC 端点；�
 初始化工厂使用 `register_factory` 按名称注册，同一工厂注册一次即可供多个服务使用。
 RPC 端点仍显式绑定服务名；业务调用方、路由与发现查询使用实际的 `service_name`。
 
-自定义组件通过 `Gateway::new` 获取 [`gateway::GatewayContext`]，调用 `launch` 提交受监督的后台任务。
+自定义组件通过 `Gateway::new` 获取 [`service::task::Handle`]，调用 `launch(name, task)` 提交受监督的后台任务。Gateway::tasks 返回同一种句柄，不另加网关上下文或预留包装。
 [`gateway::GatewayConfig`] 单独限制连接数和后台任务总数，任务总数包含等待启动的任务。
-Player 保留 `[player_gateway]` 配置布局，`Config::runtime_limits` 从连接数和最大 session 数
-生成运行时容量；会话、队列、所有权与协议参数仍由 Player 组件使用。
+Player 保留 `[player_gateway]` 配置布局，`Config::gateway_limits` 从连接数和最大 session 数
+生成网关容量；会话、队列、所有权与协议参数仍由 Player 组件使用。
 
 普通连接错误只关闭该连接；连接 panic、后台任务错误或 panic 会使网关退出。
 退出时运行框架取消任务、调用组件 `stop`、收束后台任务，再调用异步 `finish`。
@@ -1003,7 +1087,7 @@ Player 保留 `[player_gateway]` 配置布局，`Config::runtime_limits` 从连�
 
 玩家接入统一使用 `Gateway::player` 或 `Gateway::new` 与 `Ingress` 组装，
 通过 `gateway.ingress().sessions()` 获取会话管理器；不再保留 `PlayerGateway` 兼容包装。
-玩家接入参数使用 `Config`，通用运行时容量使用 `gateway::GatewayConfig`。
+玩家接入参数使用 `Config`，网关容量使用 `gateway::GatewayConfig`。
 Scene 目前仅预留模块，不套用 Player 的串行与所有权语义。
 
 ## 组件入口与当前边界
@@ -1011,9 +1095,9 @@ Scene 目前仅预留模块，不套用 Player 的串行与所有权语义。
 | 入口 | 用途 |
 | --- | --- |
 | [`config`] | TOML 加载、校验与端点引用 |
-| [`runtime`] | 服务工厂、启动监督与退出 |
+| [`application`] | 服务工厂、启动监督与退出 |
 | [`core`] | 共享类型、错误、执行上下文和组件契约 |
-| [`service`] | P1 类型化执行与预算/取消 Layer 原型，未迁移已有运行时 |
+| [`service`] | 类型化执行与预算/取消 Layer，以及 P2 公共工厂、任务监督和生命周期 |
 | [`infra`] | 服务目录、路由及协调后端 |
 | [`rpc`] | 内部 RPC 与 Tower 组装 |
 | [`gateway`] | 统一 Gateway 运行框架与 Player、Scene 接入组件 |
