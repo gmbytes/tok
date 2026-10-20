@@ -4,6 +4,10 @@ use std::net::SocketAddr;
 
 /// 服务发现信息，地址并不意味着网络监听已经启动。
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[expect(
+    clippy::module_name_repetitions,
+    reason = "从 crate 根导出的服务身份描述，保留服务角色以区分其他描述对象。"
+)]
 pub struct ServiceDescriptor {
     /// 部署节点身份；服务由 (node_id, service_name) 定位。
     pub node_id: String,

@@ -1,0 +1,31 @@
+node_id = "dev-gateway-a"
+discovery = "redis"
+ownership = "redis"
+
+[redis_discovery]
+namespace = "demo-dev"
+[redis_ownership]
+namespace = "demo-dev"
+[resume_token]
+# 公开示例密钥，仅用于开发，部署时替换为随机共享密钥。
+secret_key = "1111111111111111111111111111111111111111111111111111111111111111"
+
+[player_gateway]
+handoff_enabled = true
+
+[[endpoints]]
+name = "client"
+protocol = "tcp"
+address = "127.0.0.1:7100"
+[[endpoints]]
+name = "internal-rpc"
+protocol = "grpc"
+address = "127.0.0.1:7101"
+
+[[services]]
+service_name = "player-gateway"
+factory = "player-ingress"
+endpoint = "client"
+[[services]]
+service_name = "gateway-rpc"
+endpoint = "internal-rpc"

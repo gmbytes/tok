@@ -1,17 +1,35 @@
-use super::*;
-use crate::player::channel::Outbound;
-use crate::player::{PlayerReply, PlayerTask};
-use std::sync::atomic::AtomicUsize;
-use tok_core::{TimerSpec, TimerTrigger, TimerUpdate};
+use super::{
+    channel::{self, Binding, Outbound},
+    handle::{PendingResponse, SessionHandle},
+    state::{Completion, SessionState},
+    timer, worker,
+};
+use crate::{
+    ErrorCode,
+    player::{Config, Executor, Reply, Task},
+};
+use std::{
+    collections::BTreeMap,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    },
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
+use tok_core::{
+    LogicalMessage, MessageKind, SessionIdentity, TimerSpec, TimerTrigger, TimerUpdate,
+    coordination::{OwnershipStore, SessionOwner},
+};
 use tok_infra::ownership::MemoryOwnership;
-use tokio::sync::Semaphore;
+use tokio::sync::{Notify, Semaphore, mpsc};
+use tokio_util::sync::CancellationToken;
 
 #[derive(Debug)]
 enum Event {
     Request(u32),
     Timer(TimerTrigger),
 }
-struct Executor {
+struct TestExecutor {
     updates: Mutex<BTreeMap<u32, TimerUpdate>>,
     timer_update: Mutex<Option<TimerUpdate>>,
     events: mpsc::UnboundedSender<Event>,
@@ -19,12 +37,8 @@ struct Executor {
     failures: AtomicUsize,
     block_timer: AtomicBool,
 }
-impl PlayerExecutor for Executor {
-    fn execute_request(
-        &self,
-        _identity: SessionIdentity,
-        request: LogicalMessage,
-    ) -> PlayerTask<'_> {
+impl Executor for TestExecutor {
+    fn execute_request(&self, _identity: SessionIdentity, request: LogicalMessage) -> Task<'_> {
         Box::pin(async move {
             self.events
                 .send(Event::Request(request.message_id))
@@ -32,7 +46,7 @@ impl PlayerExecutor for Executor {
             if request.message_id == 2 {
                 self.permits.acquire().await.unwrap().forget();
             }
-            Ok(PlayerReply {
+            Ok(Reply {
                 response: Some(LogicalMessage {
                     kind: MessageKind::Response,
                     message_id: request.message_id + 100,
@@ -51,7 +65,7 @@ impl PlayerExecutor for Executor {
         _request_id: u64,
         _spec: TimerSpec,
         trigger: TimerTrigger,
-    ) -> PlayerTask<'_> {
+    ) -> Task<'_> {
         Box::pin(async move {
             assert_eq!(identity.player_id, "42");
             self.events.send(Event::Timer(trigger)).unwrap();
@@ -65,7 +79,7 @@ impl PlayerExecutor for Executor {
             {
                 return Err(ErrorCode::Unavailable.into());
             }
-            Ok(PlayerReply {
+            Ok(Reply {
                 response: None,
                 timers: self.timer_update.lock().unwrap().take(),
             })
@@ -74,13 +88,13 @@ impl PlayerExecutor for Executor {
 }
 struct Fixture {
     handle: SessionHandle,
-    executor: Arc<Executor>,
+    executor: Arc<TestExecutor>,
     events: mpsc::UnboundedReceiver<Event>,
     channel: mpsc::Receiver<Outbound>,
     ownership: Arc<MemoryOwnership>,
     task: Option<tokio::task::JoinHandle<()>>,
     due: i64,
-    connection: ConnectionBinding,
+    connection: Binding,
 }
 impl Fixture {
     async fn new() -> Self {
@@ -102,6 +116,8 @@ impl Fixture {
         let (channel, mut outgoing) = mpsc::channel(8);
         let cancel = CancellationToken::new();
         let active = Arc::new(SessionState {
+            timers: Arc::new(timer::Scheduler::new(128, 1048576)),
+            initial_execution: None,
             ownership: lease,
             cancel: cancel.clone(),
             completion: Completion {
@@ -109,11 +125,7 @@ impl Fixture {
                 notify: Notify::new(),
             },
             job_sender: queue,
-            channel: Arc::new(SessionChannel::new(
-                channel,
-                &PlayerConfig::default(),
-                cancel,
-            )),
+            channel: Arc::new(channel::Channel::new(channel, &Config::default(), cancel)),
             resume_token: String::new(),
         });
         let connection = active
@@ -139,7 +151,7 @@ impl Fixture {
             due_at_ms: due,
             interval_ms: Some(1000),
         }]);
-        let executor = Arc::new(Executor {
+        let executor = Arc::new(TestExecutor {
             updates: Mutex::new(BTreeMap::from([(1, initial)])),
             timer_update: Mutex::new(None),
             events,
@@ -147,12 +159,12 @@ impl Fixture {
             failures: AtomicUsize::new(0),
             block_timer: AtomicBool::new(false),
         });
-        let task = tokio::spawn(session_task(
-            active.clone(),
+        let task = tokio::spawn(worker::task(
+            Arc::clone(&active),
             receiver,
-            Arc::new(PlayerConfig::default()),
-            ownership.clone(),
-            executor.clone(),
+            Arc::new(Config::default()),
+            Arc::<MemoryOwnership>::clone(&ownership),
+            Arc::<TestExecutor>::clone(&executor),
         ));
         Self {
             handle: SessionHandle(active),

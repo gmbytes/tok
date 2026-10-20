@@ -6,6 +6,10 @@
 pub mod internal {
     /// v1 协议，由构建脚本从 protobuf 自动生成。
     #[allow(missing_docs)] // 仅豁免生成代码，手写协议模块仍需文档。
+    #[allow(
+        clippy::clone_on_ref_ptr,
+        reason = "tonic 生成代码使用 .clone()，仅豁免生成模块，不修改构建产物。"
+    )]
     pub mod v1 {
         include!(concat!(env!("OUT_DIR"), "/tok.internal.v1.rs"));
     }

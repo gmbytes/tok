@@ -65,3 +65,5 @@ jobs:
         run: just ownership-test
       - name: 验证独立网关共享所有权
         run: just ownership-smoke
+      - name: 验证三进程跨网关交接及宕机降级
+        run: just handoff-smoke

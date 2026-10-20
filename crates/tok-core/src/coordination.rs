@@ -5,6 +5,10 @@ use std::{future::Future, pin::Pin, time::Duration};
 use crate::{Result, SessionIdentity};
 
 /// 后端异步操作；具体实现必须明确取消和租约语义。
+#[expect(
+    clippy::module_name_repetitions,
+    reason = "跨 crate 使用的协调任务类型，名称区分业务执行等其他异步任务。"
+)]
 pub type CoordinationTask<'a, T> = Pin<Box<dyn Future<Output = Result<T>> + Send + 'a>>;
 
 /// 所有权持有者，以部署节点和服务名定位。
@@ -25,12 +29,35 @@ pub struct SessionOwnership {
     pub owner: SessionOwner,
 }
 
-/// 原子获取、续租与条件释放。读取所有权不等同于持有租约。
+/// 原子获取、条件转移、续租与释放。读取所有权不等同于持有租约。
 ///
 /// 这是 session 驱动权租约，不是任意业务写入的严格互斥保证。续租失败后停止新调用；
 /// 已发出的 RPC 在超时或所有权变化后仍可能运行，不默认要求每次存储写入校验 fencing token。
 /// 后续存储封装按调用期限和本地已知租约期限做尽力检查，检查与实际写入间的竞态由系统约定接受。
 pub trait OwnershipStore: Send + Sync {
+    /// 快速重登：原子检查玩家最新登录的 session_id 后建立新会话。
+    /// 新登录更新此标记，交接和租约释放保留；旧凭证不能借租约过期再次进入。
+    /// 自定义后端需实现此原子操作才能支持快速重登，默认不支持。
+    fn acquire_for_relogin(
+        &self,
+        _previous: crate::credentials::ResumeClaims,
+        _session_id: String,
+        _owner: SessionOwner,
+        _expected_epoch: Option<u64>,
+        _ttl: Duration,
+    ) -> CoordinationTask<'_, SessionOwnership> {
+        Box::pin(async { Err(crate::Error::NotImplemented("快速重登会话代次校验")) })
+    }
+    /// 仅在完整旧身份匹配且租约有效时转移；保留 session_id 并增加 epoch。
+    /// 默认不支持，不能用先查询再 acquire 模拟完整身份比较。
+    fn transfer(
+        &self,
+        _expected: SessionOwnership,
+        _target: SessionOwner,
+        _ttl: Duration,
+    ) -> CoordinationTask<'_, SessionOwnership> {
+        Box::pin(async { Err(crate::Error::NotImplemented("所有权条件转移")) })
+    }
     /// 读取未过期的所有权；查询结果不能代替获取或续租。
     fn lookup(&self, player_id: &str) -> CoordinationTask<'_, Option<SessionOwnership>>;
 

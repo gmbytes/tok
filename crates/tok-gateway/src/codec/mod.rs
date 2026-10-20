@@ -10,6 +10,10 @@ pub const VERSION: u32 = 3;
 
 /// 有长度上限和整帧期限的 TCP 编解码器，不能取消半帧读取后继续复用连接。
 #[derive(Debug, Clone)]
+#[expect(
+    clippy::module_name_repetitions,
+    reason = "公开编解码器明确处理 Frame，跨模块导入时仍可辨识编解码对象。"
+)]
 pub struct FrameCodec {
     limit: usize,
     timeout: Duration,

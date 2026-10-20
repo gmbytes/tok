@@ -7,6 +7,10 @@ use tokio::net::{TcpListener, TcpStream};
 pub type AcceptTask<'a, C> = Pin<Box<dyn Future<Output = std::io::Result<C>> + Send + 'a>>;
 
 /// 监听接入适配；连接对象由组件解释，不强制其他协议套用 TCP socket。
+#[expect(
+    clippy::module_name_repetitions,
+    reason = "公开传输契约明确限定网关接入，避免与内部 RPC 传输混淆。"
+)]
 pub trait GatewayTransport: Send {
     /// 每次接入交给组件处理的对象。
     type Connection: Send + 'static;

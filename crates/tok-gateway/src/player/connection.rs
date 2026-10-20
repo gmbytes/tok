@@ -6,8 +6,8 @@ use crate::{
     ErrorCode, GatewayError, Result,
     codec::{FrameCodec, VERSION},
     player::{
-        AuthenticatedPlayer, Authenticator, PlayerConfig, SessionManager,
-        channel::{self, Outbound, OutboundSender},
+        AuthenticatedIdentity, Authenticator, Config, SessionManager,
+        session::channel::{self, Outbound, OutboundSender},
     },
     protocol::{self, Frame, frame::Content},
 };
@@ -42,7 +42,7 @@ impl Drop for ConnectionGuard {
 
 pub(super) async fn serve_connection(
     stream: TcpStream,
-    config: Arc<PlayerConfig>,
+    config: Arc<Config>,
     codec: FrameCodec,
     authenticator: Arc<dyn Authenticator>,
     sessions: SessionManager,
@@ -58,6 +58,10 @@ pub(super) async fn serve_connection(
                 Outbound::Frame(frame, written) => {
                     codec.write(&mut writer, &frame).await?;
                     if let Some(written) = written {
+                        #[expect(
+                            clippy::let_underscore_must_use,
+                            reason = "确认等待方可能已超时退出，socket 写入已完成，不重试确认。"
+                        )]
                         let _ = written.send(());
                     }
                 }
@@ -99,7 +103,7 @@ pub(super) async fn serve_connection(
         authenticator,
         sessions,
         sender,
-        binding.clone(),
+        Arc::clone(&binding),
     );
     tokio::select! { biased; _ = shutdown.cancelled() => Ok(()), result = writing => result, result = reading => result }
 }
@@ -131,13 +135,17 @@ async fn send_error(sender: &OutboundSender, code: ErrorCode, timeout: Duration)
         .try_send(Outbound::Frame(frame, Some(written)))
         .is_ok()
     {
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "错误帧仅尽力等待写入，超时或确认方退出后均关闭连接。"
+        )]
         let _ = tokio::time::timeout(timeout, completed).await;
     }
 }
 
 async fn handle_frames(
     reader: &mut tokio::net::tcp::OwnedReadHalf,
-    config: &PlayerConfig,
+    config: &Config,
     codec: &FrameCodec,
     authenticator: Arc<dyn Authenticator>,
     sessions: SessionManager,
@@ -182,7 +190,9 @@ async fn handle_frames(
                     && (login.credential.is_empty()
                         || login.credential.len() > MAX_CREDENTIAL_BYTES))
                     || (!login.resume_token.is_empty()
-                        && (!login.credential.is_empty() || login.resume_token.len() != 64))
+                        && (!login.credential.is_empty()
+                            || login.resume_token.len()
+                                > super::resume_token::MAX_RESUME_TOKEN_BYTES))
                 {
                     Some(ErrorCode::AuthenticationFailed)
                 } else {
@@ -194,7 +204,14 @@ async fn handle_frames(
                 } else if !login.resume_token.is_empty() {
                     sessions
                         .authenticate_resume_token(&login.resume_token)
-                        .map(|player_id| AuthenticatedPlayer { player_id })
+                        .map(|claims| {
+                            (
+                                AuthenticatedIdentity {
+                                    player_id: claims.player_id.clone(),
+                                },
+                                Some(claims),
+                            )
+                        })
                 } else {
                     match tokio::time::timeout(
                         Duration::from_millis(config.auth_timeout_ms),
@@ -205,13 +222,14 @@ async fn handle_frames(
                         Ok(result) => result,
                         Err(_) => Err(ErrorCode::Timeout.into()),
                     }
+                    .map(|player| (player, None))
                 };
                 let opened = match authenticated {
-                    Ok(player)
+                    Ok((player, previous))
                         if !player.player_id.trim().is_empty() && player.player_id.len() <= 256 =>
                     {
                         sessions
-                            .create_session(player.player_id, sender.clone())
+                            .create_session(player.player_id, sender.clone(), previous)
                             .await
                     }
                     Ok(_) => Err(ErrorCode::AuthenticationFailed.into()),
@@ -285,6 +303,28 @@ async fn handle_frames(
                             ..Default::default()
                         }),
                     )?,
+                }
+            }
+            Content::RefreshResumeToken(refresh) => {
+                let result = if refresh.request_id == 0 || refresh.request_id <= last_request_id {
+                    Err(ErrorCode::InvalidRequest.into())
+                } else if let Some(bound) = &session {
+                    sessions
+                        .refresh_resume_token(bound, refresh.request_id)
+                        .await
+                } else {
+                    Err(ErrorCode::Unauthenticated.into())
+                };
+                last_request_id = last_request_id.max(refresh.request_id);
+                if let Err(error) = result {
+                    enqueue_content(
+                        &sender,
+                        Content::ResumeTokenRefreshed(protocol::RefreshResumeTokenResponse {
+                            request_id: refresh.request_id,
+                            error_code: error.code as u32,
+                            ..Default::default()
+                        }),
+                    )?;
                 }
             }
             Content::Request(request) => {

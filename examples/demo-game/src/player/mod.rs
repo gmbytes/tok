@@ -78,9 +78,9 @@ pub fn handlers(
         GetPlayerRequest::MESSAGE_ID,
         GetPlayerResponse::MESSAGE_ID,
         {
-            let state = state.clone();
+            let state = Arc::clone(&state);
             move |context, _request: GetPlayerRequest| {
-                let state = state.clone();
+                let state = Arc::clone(&state);
                 async move {
                     let player_id = player_id(&context)?;
                     let stored = state
@@ -111,9 +111,9 @@ pub fn handlers(
         SetPlayerRequest::MESSAGE_ID,
         SetPlayerResponse::MESSAGE_ID,
         {
-            let state = state.clone();
+            let state = Arc::clone(&state);
             move |context, request: SetPlayerRequest| {
-                let state = state.clone();
+                let state = Arc::clone(&state);
                 async move {
                     let player_id = player_id(&context)?;
                     let mut values = state
@@ -136,9 +136,9 @@ pub fn handlers(
         StartProductionRequest::MESSAGE_ID,
         StartProductionResponse::MESSAGE_ID,
         {
-            let state = state.clone();
+            let state = Arc::clone(&state);
             move |context, _request: StartProductionRequest| {
-                let state = state.clone();
+                let state = Arc::clone(&state);
                 async move {
                     let id = player_id(&context)?;
                     let now = SystemTime::now()
@@ -168,7 +168,7 @@ pub fn handlers(
     registry.register_timer(
         ProductionFinished::MESSAGE_ID,
         move |context, _event: ProductionFinished| {
-            let state = state.clone();
+            let state = Arc::clone(&state);
             async move {
                 let id = player_id(&context)?;
                 let mut values = state
@@ -201,8 +201,8 @@ pub fn handlers(
         QueryGuildRequest::MESSAGE_ID,
         QueryGuildResponse::MESSAGE_ID,
         move |context, request: QueryGuildRequest| {
-            let directory = directory.clone();
-            let clients = clients.clone();
+            let directory = Arc::clone(&directory);
+            let clients = Arc::clone(&clients);
             async move {
                 let target = tok::infra::routing::route(
                     directory.as_ref(),

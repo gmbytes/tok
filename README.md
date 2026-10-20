@@ -13,15 +13,17 @@ workspace 启用 `missing_docs = "deny"`，对外公开的模块、类型、字�
 
 所有库、二进制及构建脚本的非测试代码启用 `clippy::unwrap_used`、`clippy::expect_used` 的 deny 检查。能传播的错误使用 `?` 或显式分支；确需保留的断言必须在局部通过 `#[expect(..., reason = "具体原因")]` 说明成立前提和失败处理，测试代码不受此限制。`unwrap_or`、`unwrap_or_else` 等不触发 panic 的默认值操作不属于该检查。
 
+workspace 同时禁止持有同步锁或 RefCell 借用跨越 await、丢弃未处理的 Future、过大 Future、`unimplemented!`、重复模块名、引用计数指针的隐式克隆、无等待的 async 函数，以及匿名忽略 must_use 返回值。对应检查为 `await_holding_lock`、`await_holding_refcell_ref`、`let_underscore_future`、`large_futures`、`unimplemented`、`module_name_repetitions`、`clone_on_ref_ptr`、`unused_async`、`let_underscore_must_use`。引用计数克隆使用 `Arc::clone` 等显式写法；取消和退出中的尽力操作按具体语句使用带原因的 `#[expect]`，手写模块不得整体关闭这些检查。公共角色名称确需保留时也逐项注明原因；tonic 生成模块仅豁免 `clone_on_ref_ptr`。
+
 项目命令使用 [just](https://just.systems/)，在仓库根目录执行 `just` 查看可用任务。
 
 ## 工程结构
 
 框架采用 Cargo workspace，库位于 `crates/`，具体游戏组装最终二进制。`examples/demo-game` 展示游戏协议、服务配置和内存服务目录。
 
-当前已提供配置校验、内存目录、Redis 开发发现与变更订阅、bid 路由、内存与 Redis session 所有权、protobuf 生成、服务生命周期、可观测组件及共享内部 gRPC 端点。PlayerGateway 提供 TCP 登录、认证扩展点、有界串行 session、timer 调度、统一下行序号、累计 ACK 和有界内存缓存。客户端 Frame 已升级为版本 3，旧版须同步升级；已支持同网关 token 恢复、有序补发与快速重登，默认断线宽限期 30 秒，期间继续驱动 timer。示例支持玩家状态读写、player 调用 guild 及计时更新状态；按 Ctrl+C 优雅退出。跨网关交接、Kubernetes 发现和 NATS 消费按后续批次推进。
+当前已提供配置校验、内存目录、Redis 开发发现与变更订阅、bid 路由、内存与 Redis session 所有权、protobuf 生成、服务生命周期、可观测组件及共享内部 gRPC 端点。Ingress 提供 TCP 登录、认证扩展点、有界串行 session、timer 调度、统一下行序号、累计 ACK 和有界内存缓存。客户端 Frame 已升级为版本 3，旧版须同步升级；已支持同网关 token 恢复、有序补发与快速重登，默认断线宽限期 30 秒，期间继续驱动 timer。示例支持玩家状态读写、player 调用 guild 及计时更新状态；按 Ctrl+C 优雅退出。显式配置兼容签名密钥及内部交接端点后支持跨网关接续；Kubernetes 发现和 NATS 消费按后续批次推进。
 
-网关共用 `Gateway` 运行框架，接入组件负责具体业务语义。当前 `PlayerIngress` 实现 TCP 登录和串行 session，Scene 接入尚未实现；`PlayerGateway` 保留为兼容包装。`player/`、`scene/` 分别组织玩家和场景组件，`transport/`、`security/`、`codec/` 提供传输、安全与编解码适配。示例通过可选的 `factory = "player-ingress"` 选择网关工厂，服务名可自行命名。
+网关共用 `Gateway` 运行框架，接入组件负责具体业务语义。当前 `Ingress` 实现 TCP 登录和串行 session，Scene 接入尚未实现；通过 `Gateway::player` 便捷组装。`player/`、`scene/` 分别组织玩家和场景组件，`transport/`、`security/`、`codec/` 提供传输、安全与编解码适配。示例通过可选的 `factory = "player-ingress"` 选择网关工厂，服务名可自行命名。
 
 示例消息 ID 统一定义在 [message_id.proto](examples/demo-game/proto/demo/v1/message_id.proto) 的 `MessageId` 枚举中。构建脚本按消息名称生成 `GameMessage::MESSAGE_ID`，客户端和服务端共用，不再在业务模块手写数字。请求与回应仍显式配对；已有数值保持不变，零保留为未指定值，删除的编号和名称需在 proto 中 `reserved`。
 
@@ -47,9 +49,9 @@ just build
 
 `just run` 持续运行客户端 TCP 与内部 RPC，`just smoke` 运行一秒后通过同一退出流程结束。`just rpc-smoke` 验证内部调用；`just client-smoke` 使用真实 TCP 完成登录、状态读取、状态变更和公会查询，然后优雅退出。也可传入 `--run-for <秒数>`。Linux 额外支持 SIGTERM，适配容器停止。服务默认初始化期限为 30 秒，整体退出期限为 10 秒，游戏可通过 `Application::with_timeouts` 调整。
 
-示例凭证为 `demo:<正整数玩家 ID>`，只用于本地开发。TCP 使用 4 字节大端长度和 protobuf Frame，协议及状态机见 [客户端与 session 约定](docs/client-session.md)。身份以认证后的 session 为准，同玩家请求串行，不同玩家可以并发。队列满返回明确错误；重复登录先关闭旧入口并收束旧调用，断线立即释放会话。完整帧的读写期限也包含空闲等待，本批尚无心跳和断线宽限期。
+示例凭证为 `demo:<正整数玩家 ID>`，只用于本地开发。TCP 使用 4 字节大端长度和 protobuf Frame，协议及状态机见 [客户端与 session 约定](docs/client-session.md)。身份以认证后的 session 为准，同玩家请求串行，不同玩家可以并发。队列满返回明确错误；重复登录先关闭旧入口并收束旧调用，断线后默认保留会话 30 秒，继续 timer 和续租，到期后收束释放。完整帧的读写期限也包含空闲等待，目前尚无心跳。
 
-`[player_gateway]` 配置连接、session、执行队列、下行缓冲、帧长度与期限；默认值见 local.toml。示例采用明文 TCP，默认 Memory 所有权，可显式选择共享 Redis 协调；玩家状态是有界内存数据，生产认证、安全、持久化和跨网关恢复按后续阶段实施。
+`[player_gateway]` 配置连接、session、执行队列、下行缓冲、帧长度与期限；默认值见 local.toml。示例采用明文 TCP，默认 Memory 所有权，可显式选择共享 Redis 协调；玩家状态是有界内存数据，生产认证、安全和持久化按后续阶段实施。跨网关恢复需显式配置兼容签名密钥及内部端点。
 
 游戏通过 `ServiceFactory` 注册各类服务，通过 `Application::register_rpc_endpoint` 显式注册共享 gRPC 端点。应用先绑定监听，业务初始化完成后才加入目录并开启对应的就绪入口；未就绪调用返回 Unavailable。监听或服务启动失败、超时、崩溃或提前结束会触发全进程清理，撤销目录并通知任务退出。服务在取消后负责清理自己的资源，超出退出期限会中止任务。
 
@@ -104,7 +106,7 @@ cargo run -p demo-game --locked -- --config examples/demo-game/config/redis-gate
 
 Redis discovery 只共享服务地址。session 所有权独立选择 `ownership = "memory"`（默认）或 `"redis"`。
 redis-gateway.toml 已配置 `ownership = "redis"` 及 `[redis_ownership]`；多个网关共享相同 Redis URL、数据库和 namespace，节点身份及监听端口各不相同。
-Redis 所有权提供原子获取、epoch 更新、条件续租和释放；活动租约被其他网关持有时拒绝登录，释放或过期后才能建立新会话，跨网关交接仍待实现。
+Redis 所有权提供原子获取、epoch 更新、条件续租和释放；活动租约被其他网关持有时拒绝登录，释放或过期后才能建立新会话。携带共享恢复凭证的 Resume 可通过旧网关协作完成交接，保留 session_id 和下行序列并增加 epoch。
 `just ownership-test` 验证竞争、旧身份拒绝、过期与 epoch 精度；`just ownership-smoke` 使用两个独立网关进程验证共享所有权和失效收束。
 
 租约和 RPC 均有期限且不自动重试。发起业务前根据续租开始时刻检查剩余租期，Redis 获取与续租也拒绝明显超过租期的迟到回应。
@@ -146,3 +148,15 @@ fields = { player_id = 123 }
 `trace_filter` 使用级别和模块规则，如 `info,demo_game::player=debug`，决定普通根 span 的采样资格；span 字段条件通过强追踪规则配置。为避免字段规则被提前排除，span 进入 SDK 后统一决定采样，普通根 span 仍按过滤和 ratio 丢弃。默认比例采样只用于无有效父级且未命中强规则的 span。
 
 匹配字段应在创建 span 时提供。采样后补录字段不会重新采样；尽量在入口请求 span 上命中规则，随后传播采样决定。下游命中规则可开启从该处开始的追踪，但无法补回此前丢弃的上游 span。强制采样需要启用 OTLP 导出，不意味着追踪系统故障时保证数据送达。
+
+## 跨网关交接开发
+
+恢复凭证采用 HMAC-SHA256，使用固定共享密钥在本地签发和验证，不访问 Redis。多网关在 `[resume_token]` 配置相同 secret_key；默认使用进程临时随机密钥。密钥在启动时加载，维护时统一更换并重启，旧 token 随即失效，不提供运行时轮换。
+
+已认证在线连接支持 `RefreshResumeTokenRequest` 主动刷新，成功回应返回新 token 和 TTL；沿用原会话，不重置业务序号与 timer。客户端收到成功回应后替换保存，按 TTL 提前刷新。在线会话可在原 token 到期后刷新；离线过期须普通鉴权。
+
+新登录仍失效旧入口并更新最新 session_id。签名有效不代表能进入当前会话；快速重登在获取所有权时原子比较最新登录标记，旧 token 无法顶回新会话，也无法在新会话释放后重新进入。Redis 只参与所有权及最新会话协调，不保存 token；交接保留原 session_id 和凭证。
+
+示例启用 `[player_gateway] handoff_enabled = true` 和内部 `gateway-rpc` 服务。配合 `redis-game.toml` 启动 `redis-handoff-a.toml` 与 `redis-handoff-b.toml`，客户端端口为 7100、7200。两个示例共用公开的开发共享密钥，部署时应替换。
+
+`just resume-token-test` 离线验证签名、期限和维护换密钥失效；`just handoff-smoke` 使用三个独立进程验证交接及宕机降级，Redis 仅用于发现和所有权。交接先冻结并排空已有任务，再导出有界快照，由旧网关协调提交；失败不回滚业务或自动重发未知结果请求。

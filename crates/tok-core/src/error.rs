@@ -3,6 +3,9 @@
 /// 框架内部错误；客户端 ErrorCode 映射由网关协议层提供。
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    /// 本地凭证密钥或系统时钟不可用，不包含密钥及 token。
+    #[error("本地凭证组件不可用")]
+    CredentialUnavailable,
     /// 调用参数不符合组件契约，附带原因。
     #[error("调用参数无效：{0}")]
     InvalidInput(String),

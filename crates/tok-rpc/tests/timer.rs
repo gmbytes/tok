@@ -70,10 +70,10 @@ async fn internal_trigger_is_propagated_and_cannot_be_selected_by_client_message
             })
         })
         .unwrap();
-    let seen = calls.clone();
+    let seen = Arc::clone(&calls);
     registry
         .register_timer(3, move |context, request: Data| {
-            let seen = seen.clone();
+            let seen = Arc::clone(&seen);
             async move {
                 let trigger = context.timer.unwrap();
                 assert_eq!(trigger.timer_id, "income");

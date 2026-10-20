@@ -211,7 +211,7 @@ async fn timeout_does_not_retry_business_execution() {
                 "local",
                 "guild",
                 Arc::new(Slow {
-                    calls: calls.clone(),
+                    calls: Arc::clone(&calls),
                 }),
             )
             .unwrap()
@@ -234,6 +234,10 @@ async fn timeout_does_not_retry_business_execution() {
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     shutdown.cancel();
     server.abort();
+    #[expect(
+        clippy::let_underscore_must_use,
+        reason = "测试清理已取消或中止的服务任务，不限定两者的完成先后。"
+    )]
     let _ = server.await;
 }
 
@@ -264,13 +268,13 @@ fn duplicate_message_and_proto_service_bindings_are_rejected() {
 async fn user_tower_concurrency_limit_is_preserved_across_handler_clones() {
     let active = Arc::new(AtomicUsize::new(0));
     let peak = Arc::new(AtomicUsize::new(0));
-    let tracked_peak = peak.clone();
+    let tracked_peak = Arc::clone(&peak);
     let service = tok_rpc::tower::ServiceBuilder::new()
         .concurrency_limit(1)
         .service(tok_rpc::tower::service_fn(
             move |(context, payload): (CallContext, Payload)| {
-                let active = active.clone();
-                let peak = tracked_peak.clone();
+                let active = Arc::clone(&active);
+                let peak = Arc::clone(&tracked_peak);
                 async move {
                     let count = active.fetch_add(1, Ordering::SeqCst) + 1;
                     peak.fetch_max(count, Ordering::SeqCst);

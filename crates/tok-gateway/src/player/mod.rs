@@ -1,20 +1,16 @@
-//! PlayerIngress：统一 Gateway 中的玩家接入和逻辑会话组件。
+//! Ingress：统一 Gateway 中的玩家接入和逻辑会话组件。
 
 pub mod auth;
-pub mod channel;
-pub mod config;
+mod config;
 mod connection;
-pub mod executor;
-pub mod gateway;
-pub mod ingress;
-pub mod replay;
+mod executor;
+mod ingress;
 pub mod resume_token;
-pub mod session;
-pub mod timer;
+mod session;
 
-pub use auth::{AuthenticatedPlayer, AuthenticationTask, Authenticator};
-pub use config::PlayerConfig;
-pub use executor::{PlayerExecutor, PlayerReply, PlayerTask, RpcErrorMapper, RpcPlayerExecutor};
-pub use gateway::PlayerGateway;
-pub use ingress::PlayerIngress;
-pub use session::{SessionHandle, SessionManager};
+pub use auth::{AuthenticatedIdentity, AuthenticationTask, Authenticator};
+pub use config::Config;
+pub use executor::{DefaultRpcErrorMapper, Executor, Reply, RpcErrorMapper, RpcExecutor, Task};
+pub use ingress::{Ingress, MAX_CREDENTIAL_BYTES};
+pub(crate) use session::HandoffAction;
+pub use session::{PendingResponse, ReplayBatch, SessionHandle, SessionManager};

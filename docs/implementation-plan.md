@@ -2,7 +2,7 @@
 
 ## 实施目标与范围
 
-当前项目已接通局外请求链路、在线 timer 调度、统一下行序列与 ACK 缓存、Redis 开发发现与共享 session 所有权：客户端登录后，经串行 session 调用 player，收到业务响应，并可由 player 调用 guild。同网关恢复已接通，下一步实现跨网关交接，再推进跨节点事件、Kubernetes 部署和场景接入。
+当前项目已接通局外请求链路、在线 timer 调度、统一下行序列与 ACK 缓存、Redis 开发发现与共享 session 所有权：客户端登录后，经串行 session 调用 player，收到业务响应，并可由 player 调用 guild。同网关恢复与显式开启的跨网关交接已接通，后续推进跨节点事件、Kubernetes 部署和场景接入。
 
 本大纲以 2026-10-12 的代码为基线，遵循 [设计文档](design.md)。各阶段的技术选择属于实施建议；已经确定的执行语义继续以设计文档为准。阶段完成以可运行示例和验收结果为依据，不以模块或接口存在为依据。
 
@@ -10,7 +10,7 @@
 
 ## 批次校准与验收状态
 
-网关组装已校准为统一 Gateway 运行框架加可配置接入组件。当前重构拆出监听、连接容量与任务监督，PlayerIngress 保留玩家登录和串行 session，Scene 按后续阶段实现；服务配置显式选择组件，业务服务名不承担类型判断。重构期间保留 PlayerGateway 兼容接口，验收覆盖现有 TCP 和 Redis 行为及自定义组件的生命周期。
+网关组装已校准为统一 Gateway 运行框架加可配置接入组件。当前重构拆出监听、连接容量与任务监督，Ingress 保留玩家登录和串行 session，Scene 按后续阶段实现；服务配置显式选择组件，业务服务名不承担类型判断。重构期间曾保留 PlayerGateway 兼容接口，现已清理并统一到 Gateway::player，验收覆盖现有 TCP 和 Redis 行为及自定义组件的生命周期。
 
 第一批按“内部 RPC 基础可运行”完成；阶段零至二的全部生产能力仍按各自验收项推进。第二批以 [局外 TCP 协议与 session 实施约定](client-session.md) 为编码和验收依据。
 
@@ -19,9 +19,9 @@
 | 内部 RPC | 共享监听、强类型分发、连接复用、超时不重试及追踪传播已验证 | 上下文字段校验不代替内部调用身份认证 |
 | 服务发现与路由 | 内存与 Redis 开发快照、合并通知、后端注入和稳定 bid 选点已验证 | Channel 失效入口为显式调用；生产监听与自动失效策略随生产发现补齐 |
 | 并发和过载 | 用户 Tower 并发限制、session 队列满快速失败经测试，连接与下行容量有界 | 未默认配置 RPC 过载拒绝层；生产容量仍需负载验证 |
-| 协调与会话 | 串行 session、Memory 与 Redis 所有权、epoch 比较、条件续租释放、双网关竞争及失效收束已验证 | Cluster 客户端与完整交接待实现；接受超时后远端继续执行的竞态窗口 |
+| 协调与会话 | 串行 session、Memory 与 Redis 所有权、epoch 比较、条件续租释放、双网关竞争及失效收束已验证 | Cluster 客户端待实现；接受超时后远端继续执行的竞态窗口 |
 | 开发检查 | Windows 常规检查、文档、smoke 和 release 构建通过 | Linux 以对应 CI 的实际运行结果为准，不能由本地 Windows 验证替代 |
-| 客户端协议 | 版本 3 TCP 分帧、统一序号、ACK 缓存、宽限期、同网关恢复与快速重登已实现 | 跨网关交接、共享凭证与生产安全待实现 |
+| 客户端协议 | 版本 3 TCP 分帧、统一序号、ACK 缓存、宽限期、同网关恢复与快速重登已实现 | 生产安全待实现 |
 
 第二批的交付顺序是协议与错误码、认证契约、session 执行器、TCP 适配、示例业务与客户端 smoke。重复登录必须收束旧调用后建立新入口；断线立即关闭的本批行为在第三批扩展为宽限期保留和恢复。
 
@@ -34,8 +34,8 @@
 | 服务生命周期 | [runtime.rs](../crates/tok/src/runtime.rs) 提供工厂注册、共享端点、就绪入口、初始化期限及失败清理 | 生产依赖就绪策略与发现后端 |
 | 发现 | [MemoryDirectory](../crates/tok-infra/src/discovery/memory.rs) 支持单进程；[RedisDirectory](../crates/tok-infra/src/discovery/redis.rs) 提供多进程开发租约注册、条件撤销、本地缓存与合并通知 | Kubernetes 本地缓存与资源映射；Redis 发现不代替 session 所有权 |
 | 协议与 RPC | [tok-rpc](../crates/tok-rpc/src/lib.rs) 提供 PlayerRpc、BusinessRpc、强类型分发、连接复用、超时、追踪传播和 TowerHandler | 配置式中间件、锁 Layer 及生产调用身份认证 |
-| 网关 | [Gateway](../crates/tok-gateway/src/runtime.rs) 统一接收、容量及监督；[PlayerIngress](../crates/tok-gateway/src/player/ingress.rs) 提供 TCP 认证、串行 session、所有权续租、timer 调度和下行通知 | 下行缓存与恢复、生产安全及 scene 接入 |
-| 路由与 Redis | bid rendezvous 路由、Memory 与 Redis 所有权、条件续租释放及本地时间预算检查已实现 | Cluster 拓扑与故障切换适配、交接及请求级锁后端 |
+| 网关 | [Gateway](../crates/tok-gateway/src/runtime.rs) 统一接收、容量及监督；[Ingress](../crates/tok-gateway/src/player/ingress.rs) 提供 TCP 认证、串行 session、所有权续租、timer、下行缓存及同网关恢复 | 生产安全及 scene 接入 |
+| 路由与 Redis | bid rendezvous 路由、Memory 与 Redis 所有权、条件续租释放及本地时间预算检查已实现 | Cluster 拓扑与故障切换适配及请求级锁后端 |
 | 事件 | [tok-events](../crates/tok-events/src/lib.rs) 已有 DeliveryPolicy 和 EventTarget | 同步本地分发、NATS 后端、订阅、去重及交接处理 |
 | 可观测 | 日志动态过滤、Prometheus、OTLP、强追踪规则、RPC metadata 传播及调用指标已实现 | 事件 headers 传播及 session、timer 指标 |
 | 示例与部署 | player 与 guild 共享内部 gRPC；`just client-smoke` 经真实 TCP 验证登录、状态读写和 player 调用 guild | 容器构建和可部署清单 |
@@ -67,7 +67,7 @@ RedisOwnership 已实现 OwnershipStore 的原子获取、expected_epoch 接管�
 租约与计数器使用同一 hash tag，为 Cluster 共槽预留；当前客户端连接单 Redis 主端点，Cluster 拓扑与故障切换适配尚未实现。
 
 网关仍拒绝抢占其他网关的活动租约，释放或过期后才可重新登录。独立网关进程验证竞争拒绝、旧入口续租失败关闭、条件释放保护新所有者以及崩溃后过期。
-已实现基础后端不代表第三批完成：在线 timer、下行序列与同网关恢复已接通，跨网关交接仍待推进，请求级锁是另一套契约。
+该次补充只完成所有权基础后端，不代表当时第三批完成；后续在线 timer、恢复与跨网关交接见下文，请求级锁是另一套契约。
 
 系统接受有限的竞态窗口：调用期限与本地已知租约期限做尽力判断，续租失败或剩余预算不足时停止新驱动，不自动重试，也不强制逐次远程校验或存储 fencing。
 RPC 超时后远端仍可能执行，存储层落地时统一加入写入前期限检查；业务按明确需求增加幂等、条件更新或事务。Redis 状态回退不作为绝对互斥保证。
@@ -77,9 +77,9 @@ RPC 超时后远端仍可能执行，存储层落地时统一加入写入前期�
 
 ## 统一网关运行框架重构
 
-设计与实现已统一为 Gateway 加接入组件：运行时不判断 Player 或 Scene，GatewayTransport 提供连接，GatewayIngress 处理业务连接，GatewayContext 提交有界后台任务。PlayerIngress 保留原登录、串行 session、所有权与通知行为，PlayerGateway 保留兼容包装。
+设计与实现已统一为 Gateway 加接入组件：运行时不判断 Player 或 Scene，GatewayTransport 提供连接，GatewayIngress 处理业务连接，GatewayContext 提交有界后台任务。Ingress 保留原登录、串行 session、所有权与通知行为，兼容包装已清理，统一使用 Gateway::player。
 
-服务配置使用可选 factory 指定初始化工厂，省略时按 service_name 查找，普通 player 和 guild 无需重复填写；示例网关显式选择 player-ingress。Application::register_factory 按名称注册并复用工厂，不再提供 gateway 或 component 配置字段。具体协议与端点共享规则由组装层检查，scene-ingress 仍明确报尚未实现。现有 player_gateway 参数保留，PlayerConfig 派生通用运行时容量。连接普通错误仅关闭连接，panic 与后台失败由网关统一监督；退出取消入口并收束任务，组件负责清理。
+服务配置使用可选 factory 指定初始化工厂，省略时按 service_name 查找，普通 player 和 guild 无需重复填写；示例网关显式选择 player-ingress。Application::register_factory 按名称注册并复用工厂，不再提供 gateway 或 component 配置字段。具体协议与端点共享规则由组装层检查，scene-ingress 仍明确报尚未实现。现有 player_gateway 参数保留，Config 派生通用运行时容量。连接普通错误仅关闭连接，panic 与后台失败由网关统一监督；退出取消入口并收束任务，组件负责清理。
 
 新增测试覆盖非 TCP 自定义组件、连接与后台任务容量、普通错误、panic、后台失败、正常及强制退出，以及组件配置与自定义服务名。既有 TCP 和 Redis 多进程测试用于验证行为兼容。此重构不代表第三批 timer、恢复或交接已完成。
 
@@ -158,16 +158,16 @@ RPC 超时后远端仍可能执行，存储层落地时统一加入写入前期�
 
 **目标：** 让单网关 session 可以持续调度并接续断线消息。
 
-第三批第一步已实现在线 timer：HandlerReply 保留可选计时更新，PlayerReply 交给 session 应用；ReplaceAll、Upsert、Cancel 原子校验，旧版本的排队触发失效；同一有界队列串行执行客户端与计时任务，繁忙时合并周期，失败或超时不重试。CallContext.timer 区分内部来源，强类型 timer 分发表拒绝客户端仅凭消息 ID 触发。数量、ID 和正文总字节有限，非法更新关闭 session。示例 START_PRODUCTION 只发起业务操作，服务端决定 timer 与产出，内部 FINISH_PRODUCTION 结算状态，client-smoke 覆盖完整链路。
+第三批第一步已实现在线 timer：HandlerReply 保留可选计时更新，Reply 交给 session 应用；ReplaceAll、Upsert、Cancel 原子校验，旧版本的排队触发失效；同一有界队列串行执行客户端与计时任务，繁忙时合并周期，失败或超时不重试。CallContext.timer 区分内部来源，强类型 timer 分发表拒绝客户端仅凭消息 ID 触发。数量、ID 和正文总字节有限，非法更新关闭 session。示例 START_PRODUCTION 只发起业务操作，服务端决定 timer 与产出，内部 FINISH_PRODUCTION 结算状态，client-smoke 覆盖完整链路。
 
-当前已接通 ACK 缓存、断线宽限期、同网关恢复与快速重登；默认断线 30 秒内继续 timer 和续租。未增加固定的 player 登录 RPC，游戏初始化请求负责完整状态及全量 timer，demo 已支持。下一步推进跨网关交接。
+当前已接通 ACK 缓存、断线宽限期、同网关恢复与快速重登；默认断线 30 秒内继续 timer 和续租。未增加固定的 player 登录 RPC，游戏初始化请求负责完整状态及全量 timer，demo 已支持。跨网关交接见第三批第四步约定。
 
 2026-10-19 第二步校准与实施约定见[客户端会话约定](client-session.md#第三批第二步下行序列确认与缓存)，按以下顺序交付：
 
 1. **下行序列与缓存（已实现）：** 客户端 Frame 升级为版本 2；已绑定 session 的 Response（含框架失败）与 Notify 统一发布、连续编号并缓存最终编码字节。独立 Ack 累计确认，不进入 player 队列；确认不超过已发布最大序号，重复及倒退忽略。缓存按单调时间、条数、字节淘汰最旧记录，支持查询连续范围和缺口。demo 已同步升级并验证真实 TCP。此步断线仍立即关闭 session，不开放恢复请求，也不实现 token 或宽限期。
 2. **同网关恢复（已实现）：** 分离连接与 session 生命周期；宽限期继续驱动 timer，签发及校验 token，校验连接绑定代次，按原序号补发并串接新下行，发送恢复完成标记。缓存缺口或 session 不可恢复时返回 ResumeUnavailable，使用有效 token 快速重登，建立新逻辑会话并刷新业务状态及 timer。
 
-第三批第三步协议已升为 Frame 版本 3；当前 token 为签发网关内存中的有界随机凭证，身份有效期默认 1 小时，断线宽限期默认 30 秒，重启后失效。跨网关 token 验证与完整交接继续留待阶段五；游戏状态初始化负责完整业务状态与 TimerUpdate::ReplaceAll，框架不增加固定的 player 登录 RPC。详见[同网关恢复约定](client-session.md#第三批第三步同网关恢复)。
+第三批第三步协议已升为 Frame 版本 3；该步 token 为签发网关内存中的有界随机凭证，身份有效期默认 1 小时，断线宽限期默认 30 秒，重启后失效。跨网关 token 验证与完整交接由后续阶段五实现；游戏状态初始化负责完整业务状态与 TimerUpdate::ReplaceAll，框架不增加固定的 player 登录 RPC。详见[同网关恢复约定](client-session.md#第三批第三步同网关恢复)。
 
 第三批第三步 Windows 验收（2026-10-19）：101 项常规测试、4 项文档测试通过；新增 7 项凭证/下行/会话单元测试和 6 项真实 TCP 恢复测试，扩展生产初始化用例验证新会话可读取全量 timer。覆盖在途回应不重执行、旧连接隔离、宽限期到期/撤销、补发期间新消息排序及缺口、凭证失效、快速重登、离线租约丢失和半帧断线恢复。格式、clippy（含 missing_docs）、中文 rustdoc、三类本地 smoke、两项 Redis 多进程 smoke 及 release 构建通过。Redis 回归使用独立临时容器，已清理；Windows 的可执行文件占用曾使所有权 smoke 启动失败，等待其他 smoke 退出后单独重跑通过。Linux 结果以 CI 为准。
 
@@ -175,7 +175,7 @@ RPC 超时后远端仍可能执行，存储层落地时统一加入写入前期�
 
 第三批第二步 Windows 验收（2026-10-19）：Rust 1.99.0、just 1.58.0，88 项常规测试、4 项文档测试通过；新增 9 项下行与缓存单元测试、3 项真实 TCP 测试，并扩展队列拒绝、通知、重复登录和旧帧版本用例。格式、clippy（含 missing_docs）、中文 rustdoc、生命周期/RPC/客户端三类 smoke 与 release 构建通过。Redis 发现和共享所有权两项多进程 smoke 通过，测试使用独立临时 Redis，容器已清理。客户端 Frame 版本 2 是协议升级，旧客户端须同步升级；断线恢复尚未实现，Linux 结果以 CI 为准。
 
-2026-10-19 Windows 验收：Rust 1.99.0、just 1.58.0，73 项常规测试、4 项文档测试与 7 项真实 Redis 集成测试通过；新增 10 项调度及会话测试、2 项 RPC 测试和 1 项文档测试，客户端既有用例增加计时状态变更与来源隔离。格式、clippy、中文 rustdoc、三类 smoke、四份部署配置校验及 release 构建通过。Redis 数据库无遗留测试数据，临时容器已清理。PlayerExecutor 结果改为 PlayerReply，CallContext 增加可选 timer 来源，迁移方式见 Rust 用户指南；Linux 结果以 CI 为准。
+2026-10-19 Windows 验收：Rust 1.99.0、just 1.58.0，73 项常规测试、4 项文档测试与 7 项真实 Redis 集成测试通过；新增 10 项调度及会话测试、2 项 RPC 测试和 1 项文档测试，客户端既有用例增加计时状态变更与来源隔离。格式、clippy、中文 rustdoc、三类 smoke、四份部署配置校验及 release 构建通过。Redis 数据库无遗留测试数据，临时容器已清理。Executor 结果改为 Reply，CallContext 增加可选 timer 来源，迁移方式见 Rust 用户指南；Linux 结果以 CI 为准。
 
 示例业务边界校准：移除客户端计时配置接口，改为无计时参数的“开始生产”请求，耗时、内部消息和产出全部由服务端规则决定。新增客户端夹带计时或产出字段不能覆盖规则的回归测试；74 项常规测试、4 项文档测试、格式、clippy、rustdoc、客户端 smoke、Redis 发现与所有权两项多进程联调及 release 构建通过。临时 Redis 数据库无遗留数据，容器已清理。
 
@@ -192,7 +192,9 @@ RPC 超时后远端仍可能执行，存储层落地时统一加入写入前期�
 
 **目标：** 将单进程串行前提扩展到多网关部署。
 
-当前已完成 Redis 所有权基础后端、双网关竞争拒绝和失效入口收束；本阶段的 Cluster 客户端、完整交接和请求级锁仍未完成。
+当前已完成 Redis 所有权、完整身份条件转移、共享恢复凭证、跨网关冻结交接和失效入口收束；本阶段的 Cluster 客户端和请求级锁仍未完成。
+
+第三批第四步已按[跨网关交接约定](client-session.md#第三批第四步跨网关交接)实现共享凭证、冻结排空、稳定快照、旧网关协调提交和完整身份条件转移，并在新网关接续补发与 timer。正常交接保留 session_id、请求进度和下行序列，epoch 增加；旧网关宕机或缓存缺口则降级快速重登。Redis Cluster、请求级锁、NATS 和生产安全不并入本轮验收。
 
 - 实现 Redis 所有权记录、原子获取与 epoch 更新、续租、条件释放和旧所有者失效；明确 Redis Cluster 键布局与原子操作范围。
 - session 开始业务执行前检查所有权有效性。Redis 不可达、续租失败或租约不确定时停止新的有效驱动，避免继续假定自己拥有会话。
@@ -202,6 +204,8 @@ RPC 超时后远端仍可能执行，存储层落地时统一加入写入前期�
 - 锁租约丢失和 RPC 超时都不能视为业务回滚；业务写入需要更强保证时使用业务版本或其他校验，具体持久化方案另行设计。
 
 **验收：** 覆盖双网关竞争、重复登录、旧 epoch、Redis 故障、旧网关宕机及交接中断；检测到租约失效或预算不足后停止新驱动，已发出或检查后暂停的调用遵循约定的竞态边界。正常交接保留序列与 timer，不丢交接边界内的下行。请求级锁验证同 bid 的正常路径互斥、不同 bid 并发和旧持有者不能释放新锁，不宣称异常路径下绝对安全。
+
+2026-10-20 文档校准：同网关恢复、player 类型/方法/字段命名及非测试 unwrap/expect 检查已提交为 `c9365ae`。校准时 Windows 常规检查通过 102 项测试与 4 项文档测试，7 项依赖真实 Redis 的测试未在本次执行。当时跨网关交接仅完成设计校准；后续实现与验收见文末记录。
 
 ## 阶段六 本地事件与 NATS 事件
 
@@ -258,7 +262,7 @@ RPC 超时后远端仍可能执行，存储层落地时统一加入写入前期�
 
 ## 交付与推进方式
 
-第一批已接通基础类型与协调契约、内存开发后端、RPC service、共享监听、连接复用与调用验证，同时加入 Rust 原生用户文档生成。第二批已实现注入认证、串行 session、TCP 接入及示例客户端闭环，并完成本地验收。第三批已接通在线 timer、下行序列与 ACK 缓存及 Redis 所有权基础，已接通同网关恢复，接下来推进跨网关交接；锁 Layer、NATS、生产安全和 Kubernetes 仍按后续阶段推进。
+第一批已接通基础类型与协调契约、内存开发后端、RPC service、共享监听、连接复用与调用验证，同时加入 Rust 原生用户文档生成。第二批已实现注入认证、串行 session、TCP 接入及示例客户端闭环，并完成本地验收。第三批已接通在线 timer、下行序列与 ACK 缓存及 Redis 所有权基础，已接通同网关恢复及显式开启的跨网关交接；锁 Layer、NATS、生产安全和 Kubernetes 仍按后续阶段推进。
 
 每个阶段按“契约与协议 → 组件实现 → 示例接通 → 故障与边界验证 → 文档更新”拆分变更。优先开始阶段零至三，得到可运行的局外链路后，再推进恢复与集群能力。
 
@@ -271,3 +275,39 @@ RPC 超时后远端仍可能执行，存储层落地时统一加入写入前期�
 - 第三批：timer、下行序列、同网关恢复、Redis 所有权及跨网关交接。
 - 第四批：跨节点事件、生产发现与部署、安全适配及故障验证。
 - 第五批：局内场景接入；存储方案和无缝切换另开设计与实施计划。
+
+## 第三批第四步实现记录
+
+跨网关交接已实现，默认关闭。ResumeTokenCodec 提供纯本地签发与验证契约，HMAC-SHA256 固定共享密钥签发与验证并保留原有效期；不维护 Redis 凭证表；Redis 所有权条件转移比较完整旧身份，保留 session_id 并增加 epoch。
+
+旧网关停止新准入与 timer 调度，排空已有队列后导出原字节缓存、请求进度及 timer 调度；新网关预留容量并校验快照后，由旧网关协调提交或取消。准备记录、目标暂存和后台任务均有界；受监督截止任务在 RPC 被取消后仍负责解冻或停驱动。提交结果不确定先查询，提交开始后不重新启用旧入口；客户端在排空期间断开也会进入目标网关的正常宽限期清理。
+
+示例增加本地 resume_token 共享密钥配置、GatewayRpc gRPC 服务及 redis-handoff-a.toml / redis-handoff-b.toml。客户端仍使用版本 3 的 Resume/Resumed/Recovered，不增加字段；普通登录不能抢占活动远端所有权。网关宕机或缺少快照时返回 ResumeUnavailable，待租约释放或过期后用共享 token 快速重登，业务全量初始化负责重建状态和 timer。
+
+新增 9 项真实 TCP/gRPC 交接测试，覆盖原回应补发、timer 接续、在途排空、通知冻结、取消与迟到提交、目标竞争、准备期限、未知提交结果和客户端中断清理。增加缓存迁移预算、完整身份条件转移、共享凭证及配置测试。just resume-token-test 离线验证签名凭证；真实 Redis 验证入口为 just ownership-test 和 just handoff-smoke，独立 Linux CI 包含三进程交接检查。
+
+Redis Cluster、请求级锁、NATS 订阅迁移及生产安全不计入本步完成范围；内部交接仅用于受信开发部署，不宣称超时回滚、异常路径恰好一次或绝对互斥。
+
+2026-10-20 Windows 验收：Rust 1.99.0、just 1.58.0，119 项常规测试与 4 项文档测试通过，格式和 Clippy 无警告；中文 rustdoc、三类本地 smoke、两份新增交接配置校验和 release 构建通过。独立 Redis 7.4 容器通过 10 项外部集成测试：发现后端 2 项、所有权后端 5 项，以及发现、所有权、交接多进程 smoke 各 1 项。三进程交接验证已在最终实现上通过，临时数据库确认无遗留键后容器已清理。Linux CI 已配置，实际运行结果仍以对应 runner 为准。
+
+本地验签校准：移除 ResumeTokenStore、Redis/内存逐 token 记录及 max_resume_tokens；改为同步 ResumeTokenCodec 和启动时加载的 HMAC-SHA256 固定共享密钥。顶号保证保留：新登录在所有权获取中原子更新最新 session_id，快速重登原子比较此标记，交接和释放不删除它。新增普通登录顶掉旧入口、旧 token 在新会话下线后仍不能重登的回归；凭证验签本身不访问 Redis。
+
+凭证简化校准：移除多公钥、密钥 ID、用途域和运行时替换入口，改为 HMAC-SHA256 固定共享密钥。配置统一为 `[resume_token]` 下的 secret_key 与 clock_skew_ms，不同游戏和环境使用独立密钥。维护时统一更换密钥并重启，旧凭证失效；不提供在线轮换。
+
+在线凭证刷新补充：版本 3 增加 RefreshResumeTokenRequest/Response 两个控制帧，已认证且完成恢复的当前连接可主动刷新，条件续租确认所有权后签发同一 session_id 的新凭证，不重建业务或序号。在线可在原凭证到期后刷新，离线过期须普通鉴权；旧凭证仍按原期限有效，顶号按 session_id 同时阻止整组旧会话凭证。刷新与交接/替换串行协调，不增加独立长期 refresh token 或密钥轮换。新增在线过期刷新及再恢复、准入/重复 ID/顶号、所有权失效和旧绑定/补发/冻结拒绝回归，并扩展双网关交接与客户端 smoke。
+
+在线刷新验收（2026-10-20 Windows）：123 项常规测试及 4 项文档测试、格式、Clippy、rustdoc、更新后的客户端 smoke 和 release 构建通过。真实 Redis 三进程回归确认目标网关刷新后，源网关可在目标宕机、租约过期后验证新凭证并快速重登；临时数据库确认无遗留键后清理容器。
+
+网关内部 RPC 入口校准：将玩家交接专用 HandoffService 提升为网关层 rpc::GatewayRpcService，协议统一为 GatewayRpc，交接方法显式命名 PrepareHandoff、CommitHandoff、CancelHandoff、CompleteHandoff。会话交接状态机继续保留在 player/session/handoff.rs；目录与管理器注册可供后续网关 RPC 共用，注册与 handoff_enabled 解耦。内部发现/工厂名改为 gateway-rpc，配置字段为 gateway_rpc_service_name；内部 gRPC 路径和旧配置不兼容，参与节点需同步更新，客户端协议不变。不预先增加未实现的查询或踢人接口。
+
+统一网关 RPC 验收（2026-10-20 Windows）：124 项常规测试及 4 项文档测试、格式、Clippy、rustdoc、客户端 smoke、两份交接配置校验和 release 构建通过。真实 Redis 三进程交接与双网关所有权回归通过；临时数据库确认无遗留键后清理容器。
+
+玩家模块结构整理：player 外层保留认证、配置、接入、连接协议、执行扩展和凭证能力；session.rs 只组织内部模块并导出会话类型。session 下按 manager、handle、state、worker、handoff、channel、replay、timer 分工，测试按长度和辅助代码规模组织：短小测试内联，较长测试保留独立文件。内部以 timer::Scheduler、timer::Ticket、channel::Channel、channel::Binding 等限定名称表达上下文；共享可见性限制在 session 或 player 范围。外部从 player 导入 SessionManager、SessionHandle、PendingResponse、ReplayBatch；移除 PlayerGateway 兼容包装，测试统一通过 Gateway::player 组装。公共模块路径的调整为 API 变更，客户端协议与业务行为不变。
+
+玩家结构整理验收（2026-10-20 Windows）：124 项常规测试及 4 项文档测试、格式、Clippy、rustdoc、客户端 smoke 和 release 构建通过。真实 Redis 三进程交接与双网关所有权回归通过，临时数据库确认无遗留键后清理容器。
+
+Clippy 检查补齐：workspace 显式禁止同步锁/RefCell 借用跨 await、匿名丢弃 Future，并加入 large_futures、unimplemented、module_name_repetitions、clone_on_ref_ptr、unused_async、let_underscore_must_use 的 deny 检查。手写引用计数克隆改为 Arc::clone；must_use 忽略经逐处审查，在取消、退出及测试清理边界用带明确原因的语句级 expect 保留；tonic 生成模块仅豁免其克隆风格。测试崩溃服务改为显式构造惰性 future，仍在任务执行阶段触发 panic。
+
+player 公共名称同步精简为 Config、Ingress、Executor、RpcExecutor、Reply、Task、AuthenticatedIdentity，凭证配置使用 resume_token::Config；实现模块 config/executor/ingress 隐藏，经 player 导出，使用端可保留 player:: 限定避免裸名冲突。DefaultRpcErrorMapper 和 MAX_CREDENTIAL_BYTES 也从 player 导出。其他跨模块角色或后端名称逐项说明保留理由，不做全局风格豁免。此为 Rust API 命名变更，配置内容与客户端协议不变。
+
+Clippy 补齐验收（2026-10-20 Windows）：新增规则下 workspace 全目标 Clippy 无告警，124 项常规测试及 4 项文档测试通过，格式、rustdoc、生命周期/RPC/客户端三类 smoke 和 release 构建通过。真实 Redis 的 2 项发现、5 项所有权和 3 项多进程 smoke 均通过；临时数据库确认无遗留键后清理容器。

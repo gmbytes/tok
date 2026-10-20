@@ -14,11 +14,11 @@ use tok_core::{
     coordination::{CoordinationTask, OwnershipStore, SessionOwner, SessionOwnership},
 };
 use tok_gateway::{
-    ErrorCode,
+    ErrorCode, Gateway,
     codec::{FrameCodec, VERSION},
     player::{
-        AuthenticatedPlayer, AuthenticationTask, Authenticator, PlayerConfig, PlayerExecutor,
-        PlayerGateway, PlayerTask, SessionManager,
+        AuthenticatedIdentity, AuthenticationTask, Authenticator, Config, Executor, SessionManager,
+        Task,
     },
     protocol::{self, Frame, frame::Content},
 };
@@ -43,7 +43,7 @@ impl Authenticator for Auth {
                 .ok()
                 .filter(|id| *id > 0)
                 .ok_or(ErrorCode::AuthenticationFailed)?;
-            Ok(AuthenticatedPlayer {
+            Ok(AuthenticatedIdentity {
                 player_id: id.to_string(),
             })
         })
@@ -65,13 +65,9 @@ impl Drop for Inflight {
         self.0.players.lock().unwrap().get_mut(&self.1).unwrap().0 -= 1;
     }
 }
-struct Executor(Arc<Tracker>);
-impl PlayerExecutor for Executor {
-    fn execute_request(
-        &self,
-        identity: SessionIdentity,
-        request: LogicalMessage,
-    ) -> PlayerTask<'_> {
+struct TestExecutor(Arc<Tracker>);
+impl Executor for TestExecutor {
+    fn execute_request(&self, identity: SessionIdentity, request: LogicalMessage) -> Task<'_> {
         Box::pin(async move {
             self.0.calls.fetch_add(1, Ordering::SeqCst);
             assert_ne!(request.message_id, 666, "测试 session 任务崩溃");
@@ -89,7 +85,7 @@ impl PlayerExecutor for Executor {
                 counts.0 += 1;
                 counts.1 = counts.1.max(counts.0);
             }
-            let _inflight = Inflight(self.0.clone(), identity.player_id.clone());
+            let _inflight = Inflight(Arc::clone(&self.0), identity.player_id.clone());
             self.0.started.send(identity.player_id.clone()).unwrap();
             if request.body == b"block" {
                 self.0.permits.acquire().await.unwrap().forget();
@@ -121,11 +117,11 @@ struct Fixture {
     ownership: Arc<MemoryOwnership>,
 }
 impl Fixture {
-    async fn new(config: PlayerConfig) -> Self {
+    async fn new(config: Config) -> Self {
         Self::with_backend(config, |memory| memory).await
     }
     async fn with_backend(
-        config: PlayerConfig,
+        config: Config,
         backend: impl FnOnce(Arc<MemoryOwnership>) -> Arc<dyn OwnershipStore>,
     ) -> Self {
         let (started, receiver) = mpsc::unbounded_channel();
@@ -138,18 +134,18 @@ impl Fixture {
             permits: Semaphore::new(0),
         });
         let ownership = Arc::new(MemoryOwnership::new(config.max_sessions).unwrap());
-        let gateway = PlayerGateway::new(
+        let gateway = Gateway::player(
             config,
             SessionOwner {
                 node_id: "local".into(),
                 service_name: "player-gateway".into(),
             },
             Arc::new(Auth),
-            backend(ownership.clone()),
-            Arc::new(Executor(tracker.clone())),
+            backend(Arc::clone(&ownership)),
+            Arc::new(TestExecutor(Arc::clone(&tracker))),
         )
         .unwrap();
-        let sessions = gateway.sessions();
+        let sessions = gateway.ingress().sessions();
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let token = CancellationToken::new();
@@ -232,10 +228,10 @@ impl OwnershipStore for DelayedRenew {
 async fn known_exhausted_lease_budget_rejects_work_after_process_pause() {
     let delay_once = Arc::new(AtomicBool::new(false));
     let renewals = Arc::new(AtomicUsize::new(0));
-    let delay = delay_once.clone();
-    let renew_count = renewals.clone();
+    let delay = Arc::clone(&delay_once);
+    let renew_count = Arc::clone(&renewals);
     let fixture = Fixture::with_backend(
-        PlayerConfig {
+        Config {
             rpc_timeout_ms: 20,
             ownership_ttl_ms: 300,
             renew_interval_ms: 100,
@@ -336,6 +332,16 @@ impl Client {
         };
         response
     }
+    async fn refresh(&mut self, id: u64) -> protocol::RefreshResumeTokenResponse {
+        self.send(Content::RefreshResumeToken(
+            protocol::RefreshResumeTokenRequest { request_id: id },
+        ))
+        .await;
+        let Content::ResumeTokenRefreshed(response) = self.read().await else {
+            panic!("缺少凭证刷新回应");
+        };
+        response
+    }
     async fn fast_login(&mut self, id: u64, token: &str) -> protocol::LoginResponse {
         self.send(Content::Login(protocol::LoginRequest {
             request_id: id,
@@ -364,8 +370,8 @@ impl Client {
         }
     }
 }
-fn config() -> PlayerConfig {
-    PlayerConfig {
+fn config() -> Config {
+    Config {
         disconnect_grace_ms: 0,
         max_sessions: 8,
         max_connections: 8,
@@ -373,20 +379,20 @@ fn config() -> PlayerConfig {
         ownership_ttl_ms: 5000,
         renew_interval_ms: 500,
         io_timeout_ms: 3000,
-        ..PlayerConfig::default()
+        ..Config::default()
     }
 }
 
 #[tokio::test]
 async fn reconnect_replays_inflight_result_without_reexecution_and_preserves_request_progress() {
-    let mut fixture = Fixture::new(PlayerConfig {
+    let mut fixture = Fixture::new(Config {
         disconnect_grace_ms: 2000,
         ..config()
     })
     .await;
     let mut first = fixture.connect().await;
     let login = first.login(1, "1").await;
-    assert_eq!(login.resume_token.len(), 64);
+    assert!(!login.resume_token.is_empty());
     first.request(2, 1, b"block").await;
     fixture.started().await;
     let handle = fixture.sessions.session("1").unwrap().unwrap();
@@ -444,7 +450,7 @@ async fn reconnect_replays_inflight_result_without_reexecution_and_preserves_req
 
 #[tokio::test]
 async fn recovery_takes_over_live_connection_and_rejects_invalid_confirmation_without_takeover() {
-    let fixture = Fixture::new(PlayerConfig {
+    let fixture = Fixture::new(Config {
         disconnect_grace_ms: 2000,
         ..config()
     })
@@ -484,7 +490,7 @@ async fn recovery_takes_over_live_connection_and_rejects_invalid_confirmation_wi
 
 #[tokio::test]
 async fn grace_expiry_keeps_valid_identity_token_for_fast_login_and_resets_sequence() {
-    let fixture = Fixture::new(PlayerConfig {
+    let fixture = Fixture::new(Config {
         disconnect_grace_ms: 40,
         resume_token_ttl_ms: 5000,
         ..config()
@@ -511,14 +517,38 @@ async fn grace_expiry_keeps_valid_identity_token_for_fast_login_and_resets_seque
     let mut rejected = fixture.connect().await;
     assert_eq!(
         rejected.resume(1, &login.resume_token, 0).await.error_code,
-        ErrorCode::AuthenticationFailed as u32
+        ErrorCode::ResumeUnavailable as u32
+    );
+    assert_eq!(
+        rejected.fast_login(2, &login.resume_token).await.error_code,
+        ErrorCode::SessionReplaced as u32
+    );
+    assert_eq!(
+        fixture
+            .sessions
+            .session("1")
+            .unwrap()
+            .unwrap()
+            .identity()
+            .session_id,
+        fresh.session_id
+    );
+    drop(second);
+    fixture.released("1").await;
+    assert_eq!(
+        rejected.fast_login(3, &login.resume_token).await.error_code,
+        ErrorCode::SessionReplaced as u32
+    );
+    assert_eq!(
+        rejected.fast_login(4, &fresh.resume_token).await.error_code,
+        0
     );
     fixture.finish().await;
 }
 
 #[tokio::test]
 async fn cache_gap_requires_fast_login_and_never_silently_skips_messages() {
-    let fixture = Fixture::new(PlayerConfig {
+    let fixture = Fixture::new(Config {
         disconnect_grace_ms: 2000,
         replay_capacity: 1,
         ..config()
@@ -559,7 +589,7 @@ async fn cache_gap_requires_fast_login_and_never_silently_skips_messages() {
 
 #[tokio::test]
 async fn invalid_token_cannot_restore_or_fast_login_and_offline_lease_loss_stops_recovery() {
-    let fixture = Fixture::new(PlayerConfig {
+    let fixture = Fixture::new(Config {
         disconnect_grace_ms: 2000,
         ..config()
     })
@@ -697,8 +727,8 @@ async fn ack_requires_authenticated_binding_and_cannot_confirm_unpublished_messa
 #[tokio::test]
 async fn oversized_response_is_cached_after_normalization_and_notify_rejection_preserves_sequence()
 {
-    let fixture = Fixture::new(PlayerConfig {
-        max_frame_size: 256,
+    let fixture = Fixture::new(Config {
+        max_frame_size: 512,
         ..config()
     })
     .await;
@@ -713,7 +743,7 @@ async fn oversized_response_is_cached_after_normalization_and_notify_rejection_p
                 request_id: 0,
                 error_code: 0,
                 server_seq: None,
-                body: vec![8; 256],
+                body: vec![8; 512],
             })
             .unwrap_err()
             .code,
@@ -788,7 +818,7 @@ async fn authentication_errors_and_request_ids_do_not_execute_business() {
 
 #[tokio::test]
 async fn same_player_is_serial_and_queue_full_is_immediate() {
-    let mut fixture = Fixture::new(PlayerConfig {
+    let mut fixture = Fixture::new(Config {
         queue_capacity: 1,
         ..config()
     })
@@ -922,7 +952,7 @@ async fn duplicate_login_waits_for_old_call_and_invalidates_old_handle() {
 
 #[tokio::test]
 async fn closed_sessions_are_reclaimed_and_foreign_ownership_is_not_taken() {
-    let fixture = Fixture::new(PlayerConfig {
+    let fixture = Fixture::new(Config {
         max_sessions: 1,
         ..config()
     })
@@ -953,6 +983,10 @@ async fn closed_sessions_are_reclaimed_and_foreign_ownership_is_not_taken() {
         .await
         .unwrap();
     second.request(3, 1, b"ok").await;
+    #[expect(
+        clippy::let_underscore_must_use,
+        reason = "租约丢失时允许连接先关闭，不限定最后一个帧，随后断言业务未执行。"
+    )]
     let _ = second.codec.read(&mut second.stream).await;
     assert_eq!(fixture.tracker.calls.load(Ordering::SeqCst), 0);
     let mut third = fixture.connect().await;
@@ -966,7 +1000,7 @@ async fn closed_sessions_are_reclaimed_and_foreign_ownership_is_not_taken() {
 
 #[tokio::test]
 async fn timeouts_do_not_retry_and_session_remains_usable() {
-    let fixture = Fixture::new(PlayerConfig {
+    let fixture = Fixture::new(Config {
         rpc_timeout_ms: 30,
         auth_timeout_ms: 30,
         ..config()
@@ -996,7 +1030,7 @@ async fn timeouts_do_not_retry_and_session_remains_usable() {
 
 #[tokio::test]
 async fn notify_uses_bounded_outbound_without_executing_player() {
-    let fixture = Fixture::new(PlayerConfig {
+    let fixture = Fixture::new(Config {
         outbound_capacity: 1,
         ..config()
     })
@@ -1021,6 +1055,10 @@ async fn notify_uses_bounded_outbound_without_executing_player() {
     assert_eq!(fixture.tracker.calls.load(Ordering::SeqCst), 0);
     handle.notify(notification.clone()).unwrap();
     assert!(handle.notify(notification).is_err());
+    #[expect(
+        clippy::let_underscore_must_use,
+        reason = "慢连接退出可能是帧错误或 EOF，随后以所有权释放和缓存关闭作断言。"
+    )]
     let _ = client.codec.read(&mut client.stream).await;
     fixture.released("1").await;
     assert_eq!(
@@ -1032,7 +1070,7 @@ async fn notify_uses_bounded_outbound_without_executing_player() {
 
 #[tokio::test]
 async fn malformed_frames_are_rejected_before_business_execution() {
-    let fixture = Fixture::new(PlayerConfig {
+    let fixture = Fixture::new(Config {
         max_frame_size: 256,
         ..config()
     })
@@ -1092,7 +1130,7 @@ async fn malformed_frames_are_rejected_before_business_execution() {
 
 #[tokio::test]
 async fn truncated_transport_frame_does_not_destroy_the_recoverable_session() {
-    let fixture = Fixture::new(PlayerConfig {
+    let fixture = Fixture::new(Config {
         disconnect_grace_ms: 2000,
         ..config()
     })
@@ -1115,7 +1153,7 @@ async fn truncated_transport_frame_does_not_destroy_the_recoverable_session() {
 
 #[tokio::test]
 async fn frame_deadline_and_connection_capacity_are_bounded() {
-    let fixture = Fixture::new(PlayerConfig {
+    let fixture = Fixture::new(Config {
         io_timeout_ms: 50,
         max_connections: 1,
         ..config()
@@ -1176,4 +1214,150 @@ async fn session_panic_stops_gateway_and_cleans_up_owned_records() {
     assert!(result.is_err());
     assert!(fixture.ownership.lookup("1").await.unwrap().is_none());
     TcpListener::bind(fixture.address).await.unwrap();
+}
+
+#[tokio::test]
+async fn new_credential_login_kicks_old_connection_and_old_token_cannot_reenter_after_logout() {
+    let fixture = Fixture::new(config()).await;
+    let mut first = fixture.connect().await;
+    let old = first.login(1, "1").await;
+    let old_handle = fixture.sessions.session("1").unwrap().unwrap();
+    let mut second = fixture.connect().await;
+    let fresh = second.login(1, "1").await;
+    assert_eq!(fresh.error_code, 0);
+    assert_ne!(fresh.session_id, old.session_id);
+    assert!(old_handle.cancellation().is_cancelled());
+    assert!(first.codec.read(&mut first.stream).await.unwrap().is_none());
+    let mut stale = fixture.connect().await;
+    assert_eq!(
+        stale.resume(1, &old.resume_token, 0).await.error_code,
+        ErrorCode::ResumeUnavailable as u32
+    );
+    assert_eq!(
+        stale.fast_login(2, &old.resume_token).await.error_code,
+        ErrorCode::SessionReplaced as u32
+    );
+    second.request(2, 1, b"still-current").await;
+    assert_eq!(second.response().await.error_code, 0);
+    drop(second);
+    fixture.released("1").await;
+    assert_eq!(
+        stale.fast_login(3, &old.resume_token).await.error_code,
+        ErrorCode::SessionReplaced as u32
+    );
+    assert_eq!(stale.fast_login(4, &fresh.resume_token).await.error_code, 0);
+    fixture.finish().await;
+}
+
+#[tokio::test]
+async fn online_refresh_after_token_expiry_preserves_session_and_reconnects() {
+    let fixture = Fixture::new(Config {
+        resume_token_ttl_ms: 1000,
+        disconnect_grace_ms: 3000,
+        ..config()
+    })
+    .await;
+    let mut client = fixture.connect().await;
+    let login = client.login(1, "1").await;
+    client.request(2, 1, b"").await;
+    assert_eq!(client.response().await.server_seq, 1);
+    // 验证在线会话可以在原凭证确实过期后刷新；凭证期限使用真实 UTC。
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    let mut probe = fixture.connect().await;
+    assert_eq!(
+        probe.resume(1, &login.resume_token, 1).await.error_code,
+        ErrorCode::AuthenticationFailed as u32
+    );
+    let refreshed = client.refresh(3).await;
+    assert_eq!(refreshed.error_code, 0);
+    assert_eq!(refreshed.resume_token_ttl_ms, 1000);
+    assert_ne!(refreshed.resume_token, login.resume_token);
+    assert_eq!(
+        fixture
+            .sessions
+            .session("1")
+            .unwrap()
+            .unwrap()
+            .identity()
+            .session_id,
+        login.session_id
+    );
+    client.request(4, 1, b"").await;
+    assert_eq!(client.response().await.server_seq, 2);
+    drop(client);
+    let mut restored = fixture.connect().await;
+    let resumed = restored.resume(1, &refreshed.resume_token, 2).await;
+    assert_eq!(resumed.error_code, 0);
+    assert_eq!(resumed.session_id, login.session_id);
+    assert_eq!(resumed.epoch, login.epoch);
+    assert!(matches!(restored.read().await, Content::Recovered(done) if done.through_seq == 2));
+    assert_eq!(fixture.tracker.calls.load(Ordering::SeqCst), 2);
+    fixture.finish().await;
+}
+
+#[tokio::test]
+async fn refresh_requires_authentication_unique_request_id_and_cannot_bypass_top_login() {
+    let fixture = Fixture::new(config()).await;
+    let mut client = fixture.connect().await;
+    let denied = client.refresh(1).await;
+    assert_eq!(denied.error_code, ErrorCode::Unauthenticated as u32);
+    assert!(denied.resume_token.is_empty());
+    let login = client.login(2, "1").await;
+    assert_eq!(login.error_code, 0);
+    for id in [0, 2] {
+        let denied = client.refresh(id).await;
+        assert_eq!(denied.error_code, ErrorCode::InvalidRequest as u32);
+        assert!(denied.resume_token.is_empty());
+    }
+    let refreshed = client.refresh(3).await;
+    assert_eq!(refreshed.error_code, 0);
+    let duplicate = client.refresh(3).await;
+    assert_eq!(duplicate.error_code, ErrorCode::InvalidRequest as u32);
+    assert!(duplicate.resume_token.is_empty());
+    let mut replacement = fixture.connect().await;
+    let new_login = replacement.login(1, "1").await;
+    assert_eq!(new_login.error_code, 0);
+    assert_ne!(new_login.session_id, login.session_id);
+    assert!(
+        client
+            .codec
+            .read(&mut client.stream)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let mut stale = fixture.connect().await;
+    assert_eq!(
+        stale
+            .fast_login(1, &refreshed.resume_token)
+            .await
+            .error_code,
+        ErrorCode::SessionReplaced as u32
+    );
+    assert_eq!(fixture.tracker.calls.load(Ordering::SeqCst), 0);
+    fixture.finish().await;
+}
+
+#[tokio::test]
+async fn refresh_cannot_issue_credentials_after_ownership_is_lost() {
+    let fixture = Fixture::new(config()).await;
+    let mut client = fixture.connect().await;
+    let login = client.login(1, "1").await;
+    let ownership = fixture.ownership.lookup("1").await.unwrap().unwrap();
+    fixture.ownership.release(ownership).await.unwrap();
+    client
+        .send(Content::RefreshResumeToken(
+            protocol::RefreshResumeTokenRequest { request_id: 2 },
+        ))
+        .await;
+    if let Some(frame) = client.codec.read(&mut client.stream).await.unwrap() {
+        let Some(Content::ResumeTokenRefreshed(response)) = frame.content else {
+            panic!()
+        };
+        assert_ne!(response.error_code, 0);
+        assert!(response.resume_token.is_empty());
+    }
+    assert!(fixture.sessions.session("1").unwrap().is_none());
+    assert!(!login.resume_token.is_empty());
+    fixture.finish().await;
 }

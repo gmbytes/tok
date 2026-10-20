@@ -9,8 +9,11 @@ tok 是实验性的 Rust 游戏服务器框架。游戏通过本 crate 组装组
 需要在浏览器中打开时，可自行执行 `cargo doc -p tok --no-deps --locked --open`。
 Rust 示例随 `cargo test --workspace --locked` 执行文档测试，API 链接由 rustdoc 校验。
 公开 API 通过 `missing_docs = "deny"` 强制维护文档注释，缺失时编译失败。
+
 仅 protobuf 自动生成模块豁免；手写模块、类型、字段、枚举变体及方法都需要文档。
 框架自己的 API 使用中文说明；第三方重导出补充中文介绍，完整 API 说明保留上游原文。
+
+workspace 同时禁止持有同步锁或 RefCell 借用跨越 await、丢弃未处理的 Future、过大 Future、`unimplemented!`、重复模块名、引用计数指针的隐式克隆、无等待的 async 函数，以及匿名忽略 must_use 返回值。对应检查为 `await_holding_lock`、`await_holding_refcell_ref`、`let_underscore_future`、`large_futures`、`unimplemented`、`module_name_repetitions`、`clone_on_ref_ptr`、`unused_async`、`let_underscore_must_use`。引用计数克隆使用 `Arc::clone` 等显式写法；取消和退出中的尽力操作按具体语句使用带原因的 `#[expect]`，手写模块不得整体关闭这些检查。公共角色名称确需保留时也逐项注明原因；tonic 生成模块仅豁免 `clone_on_ref_ptr`。
 
 ## 配置一个服务
 
@@ -387,7 +390,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
 游戏通过 [`gateway::player::Authenticator`] 返回规范化的可信玩家 ID，同一玩家的凭据别名必须归一到相同 ID。
 `gateway::Gateway::player` 注入认证器、[`core::coordination::OwnershipStore`] 和
-[`gateway::player::PlayerExecutor`]；[`gateway::player::RpcPlayerExecutor`] 可组合
+[`gateway::player::Executor`]；[`gateway::player::RpcExecutor`] 可组合
 [`infra::routing::RendezvousRouter`] 与 [`rpc::RpcClients`] 调用 player 服务。
 网关工厂先绑定 TCP 监听，再把监听及服务退出 token 交给 `serve` 的受监督任务。
 客户端正文不提供 session 身份；示例 player 从可信的调用上下文读取玩家 ID。
@@ -398,16 +401,23 @@ player 内部按职责组织会话通信与执行：
 | --- | --- |
 | `SessionHandle` | 向逻辑会话提交业务、发布通知及请求关闭 |
 | `BoundSession` | 携带连接代次的操作入口，校验连接是否仍然有效 |
-| `SessionChannel` | 管理连接绑定、请求准入、下行发布、确认与断线恢复 |
-| `ReplayCache` | 保存已编码下行消息，查询可连续补发的范围 |
+| `channel::Channel`（内部） | 管理连接绑定、请求准入、下行发布、确认与断线恢复 |
+| `replay::ReplayCache`（内部） | 保存已编码下行消息，查询可连续补发的范围 |
 | `ReplayPlan` | 由连接写循环执行恢复响应、补发及恢复完成标记 |
-| `ResumeTokens` | 签发并验证恢复凭证，关联可信玩家和逻辑会话 |
-| `TimerScheduler` | 调度 timer 并将到期任务送入会话队列 |
+| `SignedResumeTokens` | 使用本地共享密钥签发和验证，不存储逐 token 记录 |
+| `timer::Scheduler`（内部） | 调度 timer 并将到期任务送入会话队列 |
 
-通信状态位于 `player::channel`，恢复凭证位于 `player::resume_token`。
+通信、缓存和计时机制封装在私有 `session` 模块内，恢复凭证位于 `player::resume_token`。
+对外从 `player` 导入 `SessionManager`、`SessionHandle`、`PendingResponse`、`ReplayBatch`；无需依赖内部文件路径。
+
+内部实现按职责组织：`session/manager.rs` 管理目录、登录、恢复及凭证刷新协调；
+`handle.rs` 提供会话与连接操作视图；`state.rs` 存放共享会话数据；`worker.rs` 串行执行业务并负责续租与退出；
+`handoff.rs` 实现跨网关交接；`channel.rs`、`replay.rs`、`timer.rs` 分别管理通信绑定、确认缓存和计时调度。
+这些模块保持私有或仅在 `player` 内可见，公共 API 经 `player` 统一导出。
+
 原模块路径 `player::outbound`、`player::resume` 已相应调整。
 
-[`gateway::player::PlayerConfig`] 对连接数、会话数、请求队列、下行队列、包长及期限提供有界默认值。
+[`gateway::player::Config`] 对连接数、会话数、请求队列、下行队列、包长及期限提供有界默认值。
 TOML 的可选 `[player_gateway]` 节可覆盖参数，未知字段和非法容量会使配置校验失败：
 
 ```toml
@@ -429,7 +439,6 @@ replay_capacity = 256
 replay_max_bytes = 4194304
 disconnect_grace_ms = 30000
 resume_token_ttl_ms = 3600000
-max_resume_tokens = 16384
 ```
 
 同一玩家的业务请求顺序执行，不同玩家可以并发。队列满立即返回错误，RPC 超时不重试。
@@ -467,7 +476,7 @@ ACK 不使用 `request_id`，不进入 player 队列，不触发 RPC。零值、
 合法 ACK 释放已确认记录；过期记录在发布、ACK 或缓存查询时清理，重读快照不延长原始保留时间。
 
 [`gateway::player::SessionHandle::replay_after`] 查询给定确认位置之后的完整缓存，返回
-[`gateway::player::replay::ReplayBatch`]，其 `through_seq` 是查询时的最大序号，`frames` 是按序编码正文。
+[`gateway::player::ReplayBatch`]，其 `through_seq` 是查询时的最大序号，`frames` 是按序编码正文。
 范围有缺口或位置越界返回 `None`；已确认释放的字节不能再从更早位置查询，关闭后返回 `SessionClosed`。
 查询不发送、不确认消息；调用方持有快照会延长对应字节的生命期，应及时释放。
 `try_request` 的独立回应只交给调用方，仍无下行序号，也不自动写入客户端缓存。
@@ -475,16 +484,38 @@ ACK 不使用 `request_id`，不进入 player 队列，不触发 RPC。零值、
 ### 同网关断线恢复
 
 成功登录的 `LoginResponse` 包含 `resume_token` 和 `resume_token_ttl_ms`。
-当前 token 是两个随机 UUID v4 组成的 64 字符不透明凭证，仅在签发网关的有界内存中验证，关联可信玩家及原 session；
-不写 Redis，不记录日志，不支持跨网关验证。网关重启后凭证失效，客户端重新鉴权。
-凭证默认有效 1 小时，宽限期默认 30 秒，两者独立；恢复不延长凭证期限。
-有效凭证表满时新玩家登录返回 `CapacityExceeded`，不淘汰其他玩家的有效凭证；过期记录在签发及验证时回收。
-同一玩家新登录轮换凭证并撤销旧凭证；仍在线的 session 不因凭证到期主动退出。
+凭证由 HMAC-SHA256 认证，载荷包含玩家、原 session、签发和过期时刻；客户端原样保存，不假定固定长度。
+[`core::credentials::ResumeTokenCodec`] 是同步的本地签发/验签契约，不访问 Redis 或其他网络来源。
+[`gateway::player::resume_token::SignedResumeTokens`] 使用启动时加载的共享密钥签发和验证。
+默认生成进程临时密钥，重启后旧 token 无法验证；配置相同共享密钥后各网关可独立验证，不共享凭证表。
+凭证默认有效 1 小时，宽限期默认 30 秒，两者独立；恢复、交接及验签不刷新原过期时刻。
+
+在线客户端可发送 `RefreshResumeTokenRequest { request_id }` 主动刷新，成功收到
+`RefreshResumeTokenResponse { request_id, error_code: 0, resume_token, resume_token_ttl_ms }` 后替换保存的凭证。
+建议按成功签发/刷新返回的 TTL 提前刷新，例如在有效期经过约 80% 时发起，并为网络延迟留出余量；
+这与连接保活独立，客户端仍须遵守完整帧读取的空闲期限。
+请求不携带旧 token，授权依据是当前已认证的在线连接及有效会话所有权；原 token 已过期仍可在线刷新。
+未登录、旧连接、被顶号或所有权失效的会话不能刷新；补发完成前和交接冻结期间也不允许刷新。
+
+刷新只重新签发同一 session_id 的凭证，从签发时重新计算 `resume_token_ttl_ms`，
+不更改 epoch、请求进度、timer 或下行序号，不建立新的所有权，也不执行游戏认证器或 player RPC。
+刷新前会条件续租确认所有权；校验、签发与回应入队同会话替换、交接及连接重绑定协调。
+两个新增帧为控制消息，不占 `server_seq`、不进入补发缓存；`request_id` 必须为当前连接内递增的非零值，
+与登录、恢复及业务请求共用计数。成功回应丢失时客户端可在仍在线的连接用新请求 ID 重试。
+旧 token 保留原到期时间，不因刷新立即撤销；同一会话的多个未过期 token 都可验证，
+新登录替换 session_id 后全部失去会话接入资格。断线后不能凭已过期 token 刷新，须普通鉴权。
+客户端 Frame 仍为版本 3，仅新增 oneof 字段 12、13，既有字段和行为兼容；使用刷新能力须更新客户端协议。
+
+
+新登录仍会失效旧入口。签名有效不代表能进入当前会话：Resume 必须匹配原 session；快速重登通过
+[`core::coordination::OwnershipStore::acquire_for_relogin`] 原子比较该玩家最新登录的 session_id，再获取新所有权。
+新登录更新此标记，交接与租约释放保留，因此旧 token 不能顶回新会话，也不能在新会话下线后重新进入。
+Redis 只保存所有权与最新登录标记，不保存 token；这属于会话协调，不是验签的一部分。
 
 EOF、帧 I/O 超时、传输失败或下行队列满时，session 在服务器观察到断线后进入宽限期。
 已排队和在途调用继续收束，timer 与租约续期继续；回应、通知进入原下行缓存。
 `disconnect_grace_ms=0` 保留立即关闭行为，最大 86400000；
-`resume_token_ttl_ms` 为正且不超过 86400000，`max_resume_tokens` 为正且不超过 65536。
+`resume_token_ttl_ms` 为正且不超过 86400000；不再配置凭证表容量。
 宽限期由 session 的受监督 future 计时，不为每次断线创建任务；到期停止新业务、收束调用并条件释放所有权。
 
 客户端暂停新业务，在新连接发送 `ResumeRequest { request_id, resume_token, ack_seq }`。
@@ -502,12 +533,60 @@ EOF、帧 I/O 超时、传输失败或下行队列满时，session 在服务器�
 token 有效而会话过期或缓存不完整时，`ResumeResponse.error_code` 返回 `ResumeUnavailable`。
 客户端可在同一未绑定连接发送 `LoginRequest { resume_token, credential: 空 }` 快速重登，绕过游戏认证器；
 两种凭证必须二选一。快速重登建立新 session、epoch 和 token，下行从 1 开始，并重新请求完整业务状态。
-新登录后旧 token 撤销；伪造、过期或其他网关签发的凭证返回 `AuthenticationFailed`，须普通鉴权。
+伪造、过期不匹配或格式不合法 返回 `AuthenticationFailed`。签名仍有效但原会话已替换时，恢复返回 `ResumeUnavailable`，快速重登返回 `SessionReplaced`。默认临时密钥无法验证其他独立进程签发的凭证。
 
 框架不固定游戏初始化消息。快速重登后的状态请求应返回完整状态与 `TimerUpdate::ReplaceAll`，重建 timer 集合；
 demo 的 `GetPlayer` 从服务端保存的生产截止时间重建 timer，已完成任务不会重复结算。
-同网关恢复复用原 timer 集合，不重新安装。`just client-smoke` 包含断线期间生产、恢复原会话及状态校验。
+同网关恢复复用原 timer 集合，不重新安装。`just client-smoke` 包含在线刷新、使用新凭证恢复原会话、断线期间生产及状态校验。
 
+### 跨网关交接
+
+示例使用 `ownership = "redis"` 和多节点发现，并在 `[player_gateway]` 设置 `handoff_enabled = true`。
+参与节点配置相同的固定共享密钥；`[resume_token]` 示例为：
+
+```toml
+[resume_token]
+# 公开示例密钥，仅供开发，部署时替换为随机共享密钥。
+secret_key = "1111111111111111111111111111111111111111111111111111111111111111"
+clock_skew_ms = 5000
+```
+
+不同游戏及开发、正式环境必须使用独立共享密钥来隔离凭证。
+密钥在启动时加载；维护时统一更换共享密钥并重启所有参与网关，旧 token 失效，客户端需普通登录。
+`clock_skew_ms` 只容忍签发时刻领先本机，不延长过期时间；跨节点仍依赖部署侧时间同步。
+
+每个节点配置名为 `gateway-rpc` 的网关内部 gRPC 服务；`gateway_rpc_service_name` 可覆盖发现名称。
+自定义组装先通过 [`gateway::player::Ingress::with_resume_token_codec`] 注入本地 codec，
+再通过 [`gateway::player::Ingress::with_gateway_rpc`] 注入目录并向
+[`gateway::rpc::GatewayRpcService`] 登记会话管理器；内部服务交给 [`rpc::RpcEndpoint::add_service`]。
+统一入口当前提供 PrepareHandoff、CommitHandoff、CancelHandoff、CompleteHandoff，未来网关管理 RPC 在同一服务扩展。
+登记不受 handoff_enabled 限制，交接关闭时由具体交接操作拒绝；不会为每组方法重复登记管理器。
+普通 credential 登录仍不能直接抢占远端活动租约；恢复交接由旧网关协作完成。
+
+新连接仍发送同一个 `ResumeRequest`。旧网关冻结新准入，排空已接收请求和 timer，导出原编码下行缓存、请求进度及 timer 调度快照；
+新网关校验并预留容量后，由旧网关串行协调提交与取消，再比较完整旧所有权原子转移。
+成功保留 `session_id` 和下行序列、增加 `epoch`，先回应、补发，再发送 `RecoveryComplete`。
+交接期间新的请求和主动通知明确失败，不透明转发或重试；已成功发布的通知进入快照。
+
+`handoff_timeout_ms` 默认 15000（1..60000），`max_handoffs` 默认 16（1..4096），
+`max_handoff_bytes` 默认 8388608（65536..134217728）。源准备记录和目标暂存共用节点交接容量；
+快照有独立大小校验，内部消息上限同时显式设置。缓存和原恢复窗口不会因交接刷新，timer 不补跑全部历史周期。
+
+提交前失败可取消准备；旧所有权与恢复窗口仍有效时，旧网关恢复运行。提交开始后结果不确定先查询，旧入口不会自行恢复。
+接管后失败关闭新入口并条件释放所有权。旧网关宕机、快照缺失或缓存有缺口时返回 `ResumeUnavailable`，
+客户端等待原租约释放或过期后，用仍有效的 token 快速重登并请求完整状态；不回滚业务或重发未知结果请求。
+
+本地启动 Redis 和游戏进程后，分别执行：
+
+```text
+just run examples/demo-game/config/redis-game.toml
+just run examples/demo-game/config/redis-handoff-a.toml
+just run examples/demo-game/config/redis-handoff-b.toml
+```
+
+两个网关的客户端端口为 7100、7200，内部端口为 7101、7201；只适用于受信开发环境。
+`just resume-token-test` 离线验证签名、期限和维护换密钥失效，`just handoff-smoke` 验证三个独立进程的交接、补发、timer 和宕机降级。
+测试通过 `TOK_TEST_REDIS_URL` 选择 Redis，使用独立 namespace；常规 `just verify` 不依赖外部服务。
 
 ## 玩家 timer
 
@@ -564,7 +643,7 @@ session 建立时对齐 UTC 与单调时钟，此后按同一基准等待，墙�
 周期错过的时刻不逐次追赶，完成后按原基准计算下一个未来时刻；一次性 timer 触发后移除。
 timer 失败或超时只记录本次失败，不重试；周期的后续触发独立进行。
 
-自定义 [`gateway::player::PlayerExecutor`] 的 `execute_request` 返回 [`gateway::player::PlayerReply`]，
+自定义 [`gateway::player::Executor`] 的 `execute_request` 返回 [`gateway::player::Reply`]，
 普通 `LogicalMessage` 可通过 `.into()` 转换；需要计时执行时实现 `execute_timer` 方法。
 原 `execute`、`timer` 方法已分别改为上述名称，自定义实现需同步调整。
 `execute_timer` 的关联序号由 session 独立生成，不消耗客户端 request_id；计时结果可继续返回更新，不产生客户端回应。
@@ -576,7 +655,7 @@ timer 失败或超时只记录本次失败，不重试；周期的后续触发�
 
 [`gateway::Gateway`] 共用连接接收、容量控制、后台任务监督与退出流程。
 [`gateway::GatewayIngress`] 定义连接处理和清理钩子，当前
-[`gateway::player::PlayerIngress`] 实现玩家认证、所有权和串行 session。
+[`gateway::player::Ingress`] 实现玩家认证、所有权和串行 session。
 运行框架通过 [`gateway::transport::GatewayTransport`] 接收连接，当前具体适配为 TCP；
 其他传输和 Scene 组件仍待实现，不需要复制网关运行循环。
 
@@ -607,7 +686,7 @@ RPC 端点仍显式绑定服务名；业务调用方、路由与发现查询使�
 
 自定义组件通过 `Gateway::new` 获取 [`gateway::GatewayContext`]，调用 `launch` 提交受监督的后台任务。
 [`gateway::GatewayConfig`] 单独限制连接数和后台任务总数，任务总数包含等待启动的任务。
-Player 保留 `[player_gateway]` 配置布局，`PlayerConfig::runtime_limits` 从连接数和最大 session 数
+Player 保留 `[player_gateway]` 配置布局，`Config::runtime_limits` 从连接数和最大 session 数
 生成运行时容量；会话、队列、所有权与协议参数仍由 Player 组件使用。
 
 普通连接错误只关闭该连接；连接 panic、后台任务错误或 panic 会使网关退出。
@@ -615,8 +694,9 @@ Player 保留 `[player_gateway]` 配置布局，`PlayerConfig::runtime_limits` �
 `stop` 必须可重复调用；组件收到取消后应停止新业务并完成清理，整体退出期限由外层 Application 或调用方控制。
 运行 future 被强制丢弃时会取消并中止受监督任务、调用 `stop`，无法等待异步 `finish`。
 
-已有 [`gateway::player::PlayerGateway`] 保留原构造、`sessions()` 和 TCP `serve` 接口，内部委托统一运行框架；
-玩家接入参数统一使用 `PlayerConfig`，通用运行时容量使用 `gateway::GatewayConfig`。新代码使用 `Gateway::player` 与 `PlayerIngress`。
+玩家接入统一使用 `Gateway::player` 或 `Gateway::new` 与 `Ingress` 组装，
+通过 `gateway.ingress().sessions()` 获取会话管理器；不再保留 `PlayerGateway` 兼容包装。
+玩家接入参数使用 `Config`，通用运行时容量使用 `gateway::GatewayConfig`。
 Scene 目前仅预留模块，不套用 Player 的串行与所有权语义。
 
 ## 组件入口与当前边界

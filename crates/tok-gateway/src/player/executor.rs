@@ -13,16 +13,16 @@ use tok_rpc::{
 };
 
 /// 单次玩家调用的结果，受 session 的调用期限控制。
-pub type PlayerTask<'a> = Pin<Box<dyn Future<Output = Result<PlayerReply>> + Send + 'a>>;
+pub type Task<'a> = Pin<Box<dyn Future<Output = Result<Reply>> + Send + 'a>>;
 
 /// 玩家执行结果，计时更新留在 session 内部，不进入客户端协议正文。
-pub struct PlayerReply {
+pub struct Reply {
     /// 客户端请求必须有回应；内部 timer 可以没有回应。
     pub response: Option<LogicalMessage>,
     /// None 保持当前计时集合。
     pub timers: Option<TimerUpdate>,
 }
-impl From<LogicalMessage> for PlayerReply {
+impl From<LogicalMessage> for Reply {
     fn from(response: LogicalMessage) -> Self {
         Self {
             response: Some(response),
@@ -32,10 +32,9 @@ impl From<LogicalMessage> for PlayerReply {
 }
 
 /// 所有玩家执行来源应进入 session 队列后使用的执行扩展点。
-pub trait PlayerExecutor: Send + Sync {
+pub trait Executor: Send + Sync {
     /// 使用 session 身份执行请求，不能从消息正文选择其他玩家。
-    fn execute_request(&self, identity: SessionIdentity, request: LogicalMessage)
-    -> PlayerTask<'_>;
+    fn execute_request(&self, identity: SessionIdentity, request: LogicalMessage) -> Task<'_>;
     /// 执行内部 timer；序号由 session 独立分配，不占用客户端请求序列。默认拒绝未支持的计时调用。
     fn execute_timer(
         &self,
@@ -43,7 +42,7 @@ pub trait PlayerExecutor: Send + Sync {
         _request_id: u64,
         _spec: TimerSpec,
         _trigger: TimerTrigger,
-    ) -> PlayerTask<'_> {
+    ) -> Task<'_> {
         Box::pin(async { Err(ErrorCode::UnknownMessage.into()) })
     }
 }
@@ -72,14 +71,14 @@ impl RpcErrorMapper for DefaultRpcErrorMapper {
 }
 
 /// 以可信玩家 ID 路由到 player 的内部 RPC 执行器。
-pub struct RpcPlayerExecutor {
+pub struct RpcExecutor {
     service_name: String,
     router: Arc<dyn ServiceRouter>,
     clients: Arc<RpcClients>,
     mapper: Arc<dyn RpcErrorMapper>,
 }
 
-impl RpcPlayerExecutor {
+impl RpcExecutor {
     /// 创建 player RPC 适配，router 与连接缓存由组装层注入。
     pub fn new(
         service_name: impl Into<String>,
@@ -104,12 +103,8 @@ impl RpcPlayerExecutor {
     }
 }
 
-impl PlayerExecutor for RpcPlayerExecutor {
-    fn execute_request(
-        &self,
-        identity: SessionIdentity,
-        request: LogicalMessage,
-    ) -> PlayerTask<'_> {
+impl Executor for RpcExecutor {
+    fn execute_request(&self, identity: SessionIdentity, request: LogicalMessage) -> Task<'_> {
         self.call(identity, request, None)
     }
     fn execute_timer(
@@ -118,7 +113,7 @@ impl PlayerExecutor for RpcPlayerExecutor {
         request_id: u64,
         spec: TimerSpec,
         trigger: TimerTrigger,
-    ) -> PlayerTask<'_> {
+    ) -> Task<'_> {
         self.call(
             identity,
             LogicalMessage {
@@ -133,13 +128,13 @@ impl PlayerExecutor for RpcPlayerExecutor {
         )
     }
 }
-impl RpcPlayerExecutor {
+impl RpcExecutor {
     fn call(
         &self,
         identity: SessionIdentity,
         request: LogicalMessage,
         timer: Option<TimerTrigger>,
-    ) -> PlayerTask<'_> {
+    ) -> Task<'_> {
         Box::pin(async move {
             let is_timer = timer.is_some();
             let target = self
@@ -174,7 +169,7 @@ impl RpcPlayerExecutor {
                 if error.code == 0 {
                     return Err(ErrorCode::Internal.into());
                 }
-                return Ok(PlayerReply {
+                return Ok(Reply {
                     response: Some(LogicalMessage {
                         kind: MessageKind::Response,
                         request_id: response.request_id,
@@ -187,13 +182,13 @@ impl RpcPlayerExecutor {
                 });
             }
             if is_timer {
-                return Ok(PlayerReply {
+                return Ok(Reply {
                     response: None,
                     timers,
                 });
             }
             let payload = response.payload.ok_or(ErrorCode::Internal)?;
-            Ok(PlayerReply {
+            Ok(Reply {
                 response: Some(LogicalMessage {
                     kind: MessageKind::Response,
                     request_id: response.request_id,

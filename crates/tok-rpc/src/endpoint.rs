@@ -89,7 +89,9 @@ impl RpcEndpoint {
             )));
         }
         let ready = Arc::new(AtomicBool::new(false));
-        self.readiness.0.insert(service_name.clone(), ready.clone());
+        self.readiness
+            .0
+            .insert(service_name.clone(), Arc::clone(&ready));
         self.bindings.insert(service_name, S::NAME);
         let service = InterceptedService::new(service, move |request: tonic::Request<()>| {
             if !ready.load(Ordering::Acquire) {

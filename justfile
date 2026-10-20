@@ -61,6 +61,14 @@ ownership-test:
 ownership-smoke:
     cargo test -p demo-game --test redis_discovery --locked -- --ignored ownership
 
+# 验证本地签名凭证、有效期和维护更换密钥后的失效
+resume-token-test:
+    cargo test -p tok-gateway player::resume_token --locked
+
+# 验证真实 Redis 与三个独立进程间的跨网关恢复
+handoff-smoke:
+    cargo test -p demo-game --test redis_discovery --locked -- --ignored handoff
+
 # 验证指定服务配置
 config-check config="examples/demo-game/config/local.toml":
     cargo run -p demo-game --locked -- --config "{{config}}" --check-config

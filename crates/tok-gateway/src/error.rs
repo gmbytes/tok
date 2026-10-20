@@ -3,6 +3,10 @@
 /// 框架错误码；具体业务的非零错误码由游戏自行维护。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
+#[expect(
+    clippy::module_name_repetitions,
+    reason = "从 crate 根导出，保留网关错误角色并区分错误对象与错误码。"
+)]
 pub enum ErrorCode {
     /// 操作成功。
     Ok = 0,
@@ -39,6 +43,10 @@ pub enum ErrorCode {
 /// 网关控制错误，只携带有限错误码，避免泄漏凭证。
 #[derive(Debug, Clone, Copy, thiserror::Error)]
 #[error("网关错误：{code:?}")]
+#[expect(
+    clippy::module_name_repetitions,
+    reason = "从 crate 根导出，保留网关错误角色并区分错误对象与错误码。"
+)]
 pub struct GatewayError {
     /// 可转换到客户端信封的错误码。
     pub code: ErrorCode,

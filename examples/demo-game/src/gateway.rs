@@ -3,12 +3,7 @@
 use std::{sync::Arc, time::Duration};
 use tok::{
     core::coordination::{OwnershipStore, SessionOwner},
-    gateway::{
-        ErrorCode, Gateway,
-        player::{
-            AuthenticatedPlayer, AuthenticationTask, Authenticator, PlayerConfig, RpcPlayerExecutor,
-        },
-    },
+    gateway::{ErrorCode, Gateway, player},
     infra::routing::RendezvousRouter,
     rpc::RpcClients,
     runtime::{ServiceContext, ServiceFactory, ServiceTask, StartTask},
@@ -16,36 +11,58 @@ use tok::{
 
 /// 仅供本地开发的 demo:<正整数 ID> 凭证，不是 SDK 或生产认证方案。
 pub struct DemoAuthenticator;
-impl Authenticator for DemoAuthenticator {
-    fn authenticate(&self, credential: String) -> AuthenticationTask<'_> {
+impl player::Authenticator for DemoAuthenticator {
+    fn authenticate(&self, credential: String) -> player::AuthenticationTask<'_> {
         Box::pin(async move {
             let player_id = credential
                 .strip_prefix("demo:")
                 .and_then(|value| value.parse::<u64>().ok())
                 .filter(|value| *value > 0)
                 .ok_or(ErrorCode::AuthenticationFailed)?;
-            Ok(AuthenticatedPlayer {
+            Ok(player::AuthenticatedIdentity {
                 player_id: player_id.to_string(),
             })
         })
     }
 }
 
-/// 初始化 TCP 监听并组装统一 Gateway 与 PlayerIngress。
+/// 初始化 TCP 监听并组装统一 Gateway 与 player::Ingress。
 pub struct PlayerIngressFactory {
-    config: PlayerConfig,
+    config: player::Config,
     ownership: Arc<dyn OwnershipStore>,
+    tokens: Option<Arc<dyn tok::core::credentials::ResumeTokenCodec>>,
+    gateway_rpc: Option<tok::gateway::rpc::GatewayRpcService>,
 }
 impl PlayerIngressFactory {
     /// 配置经验证的开发网关，注入内存或共享 Redis 所有权。
-    pub fn new(config: PlayerConfig, ownership: Arc<dyn OwnershipStore>) -> Self {
-        Self { config, ownership }
+    pub fn new(config: player::Config, ownership: Arc<dyn OwnershipStore>) -> Self {
+        Self {
+            config,
+            ownership,
+            tokens: None,
+            gateway_rpc: None,
+        }
+    }
+    /// 注入本地恢复凭证组件。
+    pub fn with_resume_token_codec(
+        mut self,
+        tokens: Arc<dyn tok::core::credentials::ResumeTokenCodec>,
+    ) -> Self {
+        self.tokens = Some(tokens);
+        self
+    }
+    /// 注入统一网关内部 RPC 服务，由初始化后的玩家接入登记管理器。
+    pub fn with_gateway_rpc(mut self, service: tok::gateway::rpc::GatewayRpcService) -> Self {
+        self.gateway_rpc = Some(service);
+        self
     }
 }
 impl ServiceFactory for PlayerIngressFactory {
     fn start(&self, context: ServiceContext) -> StartTask {
         let config = self.config.clone();
-        let ownership = self.ownership.clone();
+        let ownership = Arc::clone(&self.ownership);
+        let tokens = self.tokens.clone();
+        let gateway_rpc = self.gateway_rpc.clone();
         Box::pin(async move {
             if context.service.protocol != "tcp" {
                 return Err(std::io::Error::other("示例玩家网关要求 tcp 端点").into());
@@ -55,21 +72,33 @@ impl ServiceFactory for PlayerIngressFactory {
                 Duration::from_millis(config.rpc_timeout_ms),
                 64,
             )?);
-            let executor = Arc::new(RpcPlayerExecutor::new(
+            let executor = Arc::new(player::RpcExecutor::new(
                 "player",
-                Arc::new(RendezvousRouter::new(context.directory)),
+                Arc::new(RendezvousRouter::new(Arc::clone(&context.directory))),
                 clients,
             )?);
-            let gateway = Gateway::player(
-                config,
-                SessionOwner {
-                    node_id: context.service.node_id,
-                    service_name: context.service.service_name,
-                },
-                Arc::new(DemoAuthenticator),
-                ownership,
-                executor,
-            )?;
+            let limits = config.runtime_limits();
+            let gateway = Gateway::new(limits, |gateway_context| {
+                let ingress = player::Ingress::new(
+                    gateway_context,
+                    config.clone(),
+                    SessionOwner {
+                        node_id: context.service.node_id,
+                        service_name: context.service.service_name,
+                    },
+                    Arc::new(DemoAuthenticator),
+                    ownership,
+                    executor,
+                )?;
+                let ingress = match tokens {
+                    Some(tokens) => ingress.with_resume_token_codec(tokens),
+                    None => ingress,
+                };
+                match gateway_rpc {
+                    Some(service) => ingress.with_gateway_rpc(context.directory, &service),
+                    None => Ok(ingress),
+                }
+            })?;
             Ok(Box::pin(async move {
                 gateway.serve(listener, context.shutdown).await?;
                 Ok(())

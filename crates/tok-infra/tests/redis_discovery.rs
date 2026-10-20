@@ -45,7 +45,7 @@ fn run(
     directory: &Arc<RedisDirectory>,
     stop: &CancellationToken,
 ) -> tokio::task::AbortHandle {
-    let directory = directory.clone();
+    let directory = Arc::clone(directory);
     let stop = stop.child_token();
     tasks.spawn(async move { directory.run(stop).await })
 }

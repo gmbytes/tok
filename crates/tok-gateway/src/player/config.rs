@@ -1,12 +1,22 @@
-//! PlayerIngress 的协议、session 与租约参数，兼容原有 player_gateway 配置布局。
+//! Ingress 的协议、session 与租约参数，兼容原有 player_gateway 配置布局。
 
 use serde::Deserialize;
 use tok_core::{Error, Result};
 
-/// Player 接入组件的 TCP、串行 session、租约与同网关恢复参数。
+/// Player 接入组件的 TCP、串行 session、租约、恢复与跨网关交接参数。
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
-pub struct PlayerConfig {
+pub struct Config {
+    /// 显式开启跨网关交接，需组装本地共用密钥及内部端点。
+    pub handoff_enabled: bool,
+    /// 目录中的网关内部 RPC 服务名，同节点按 owner.service_name 分发。
+    pub gateway_rpc_service_name: String,
+    /// 整次交接的总期限，单位毫秒。
+    pub handoff_timeout_ms: u64,
+    /// 每节点保留的交接记录数量上限。
+    pub max_handoffs: usize,
+    /// 单次交接快照的 protobuf 编码字节上限。
+    pub max_handoff_bytes: usize,
     /// 同时持有的 TCP 连接数。
     pub max_connections: usize,
     /// 玩家执行目录的最大条目数，关闭且无人使用的条目可回收。
@@ -41,13 +51,16 @@ pub struct PlayerConfig {
     pub disconnect_grace_ms: u64,
     /// 恢复凭证的身份有效期，独立于会话宽限期，单位毫秒。
     pub resume_token_ttl_ms: u64,
-    /// 网关最多保留的有效恢复凭证数；满时新玩家登录返回 CapacityExceeded。
-    pub max_resume_tokens: usize,
 }
 
-impl Default for PlayerConfig {
+impl Default for Config {
     fn default() -> Self {
         Self {
+            handoff_enabled: false,
+            gateway_rpc_service_name: "gateway-rpc".into(),
+            handoff_timeout_ms: 15000,
+            max_handoffs: 16,
+            max_handoff_bytes: 8 * 1024 * 1024,
             max_connections: 128,
             max_sessions: 1024,
             queue_capacity: 64,
@@ -65,21 +78,34 @@ impl Default for PlayerConfig {
             replay_max_bytes: 4_194_304,
             disconnect_grace_ms: 30_000,
             resume_token_ttl_ms: 3_600_000,
-            max_resume_tokens: 16_384,
         }
     }
 }
 
-impl PlayerConfig {
+impl Config {
     /// 从玩家参数提取通用连接和后台任务容量；session 数量限制由玩家目录同时执行。
     pub fn runtime_limits(&self) -> crate::GatewayConfig {
         crate::GatewayConfig {
             max_connections: self.max_connections,
-            max_tasks: self.max_sessions,
+            max_tasks: self
+                .max_sessions
+                .saturating_add(if self.handoff_enabled {
+                    self.max_handoffs
+                } else {
+                    0
+                })
+                .min(65536),
         }
     }
     /// 验证正数、容量上限及租期对调用和续租间隔的覆盖。
     pub fn validate(&self) -> Result<()> {
+        if self.gateway_rpc_service_name.trim().is_empty()
+            || !(1..=60000).contains(&self.handoff_timeout_ms)
+            || !(1..=4096).contains(&self.max_handoffs)
+            || !(65536..=134217728).contains(&self.max_handoff_bytes)
+        {
+            return Err(Error::InvalidConfig("跨网关交接参数无效".into()));
+        }
         if [
             self.max_connections,
             self.max_sessions,
@@ -87,7 +113,6 @@ impl PlayerConfig {
             self.outbound_capacity,
             self.max_timers,
             self.replay_capacity,
-            self.max_resume_tokens,
         ]
         .iter()
         .any(|value| *value == 0 || *value > 65_536)

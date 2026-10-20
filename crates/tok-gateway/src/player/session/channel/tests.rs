@@ -12,7 +12,7 @@ fn message(kind: MessageKind, size: usize) -> LogicalMessage {
     }
 }
 
-fn complete_login(channel: &SessionChannel) -> ConnectionBinding {
+fn complete_login(channel: &Channel) -> Binding {
     channel
         .complete_login(Frame {
             version: VERSION,
@@ -24,7 +24,7 @@ fn complete_login(channel: &SessionChannel) -> ConnectionBinding {
 #[tokio::test]
 async fn login_precedes_publication_and_ack_does_not_wait_for_socket_completion() {
     let (sender, mut queue) = mpsc::channel(8);
-    let channel = SessionChannel::new(sender, &PlayerConfig::default(), CancellationToken::new());
+    let channel = Channel::new(sender, &Config::default(), CancellationToken::new());
     assert_eq!(
         channel
             .publish(message(MessageKind::Notify, 0), 0)
@@ -56,12 +56,12 @@ async fn login_precedes_publication_and_ack_does_not_wait_for_socket_completion(
 
 #[tokio::test]
 async fn normalized_response_cache_and_actual_wire_body_are_identical() {
-    let config = PlayerConfig {
+    let config = Config {
         max_frame_size: 64,
         ..Default::default()
     };
     let (sender, mut queue) = mpsc::channel(8);
-    let channel = SessionChannel::new(sender, &config, CancellationToken::new());
+    let channel = Channel::new(sender, &config, CancellationToken::new());
     complete_login(&channel);
     queue.recv().await.unwrap();
     assert_eq!(
@@ -99,15 +99,15 @@ async fn normalized_response_cache_and_actual_wire_body_are_identical() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn concurrent_publishers_share_one_sequence_and_fifo() {
     let (sender, mut queue) = mpsc::channel(129);
-    let channel = Arc::new(SessionChannel::new(
+    let channel = Arc::new(Channel::new(
         sender,
-        &PlayerConfig::default(),
+        &Config::default(),
         CancellationToken::new(),
     ));
     complete_login(&channel);
     let mut tasks = Vec::new();
     for n in 0..128 {
-        let channel = channel.clone();
+        let channel = Arc::clone(&channel);
         tasks.push(tokio::spawn(async move {
             channel
                 .publish(
@@ -145,7 +145,7 @@ async fn concurrent_publishers_share_one_sequence_and_fifo() {
 #[tokio::test]
 async fn failed_enqueue_detaches_and_preserves_cache_until_session_close() {
     let (sender, mut queue) = mpsc::channel(1);
-    let channel = SessionChannel::new(sender, &PlayerConfig::default(), CancellationToken::new());
+    let channel = Channel::new(sender, &Config::default(), CancellationToken::new());
     complete_login(&channel);
     queue.recv().await.unwrap();
     channel.publish(message(MessageKind::Notify, 0), 0).unwrap();
@@ -173,9 +173,9 @@ async fn failed_enqueue_detaches_and_preserves_cache_until_session_close() {
 async fn grace_deadline_expires_even_without_new_business_or_renewal() {
     let (sender, mut queue) = mpsc::channel(8);
     let cancel = CancellationToken::new();
-    let channel = Arc::new(SessionChannel::new(
+    let channel = Arc::new(Channel::new(
         sender,
-        &PlayerConfig {
+        &Config {
             disconnect_grace_ms: 100,
             ..Default::default()
         },
@@ -185,7 +185,7 @@ async fn grace_deadline_expires_even_without_new_business_or_renewal() {
     queue.recv().await.unwrap();
     channel.detach(&id);
     let expiry = {
-        let channel = channel.clone();
+        let channel = Arc::clone(&channel);
         tokio::spawn(async move { channel.run_grace_timer().await })
     };
     tokio::time::advance(std::time::Duration::from_millis(99)).await;
@@ -199,9 +199,9 @@ async fn grace_deadline_expires_even_without_new_business_or_renewal() {
 #[tokio::test]
 async fn recovery_orders_concurrent_downlink_and_rejects_every_stale_binding_operation() {
     let (sender, mut old_queue) = mpsc::channel(8);
-    let channel = Arc::new(SessionChannel::new(
+    let channel = Arc::new(Channel::new(
         sender,
-        &PlayerConfig::default(),
+        &Config::default(),
         CancellationToken::new(),
     ));
     let old = complete_login(&channel);
@@ -283,9 +283,9 @@ async fn recovery_orders_concurrent_downlink_and_rejects_every_stale_binding_ope
 async fn successful_rebind_cancels_old_grace_deadline_and_late_cleanup_cannot_restart_it() {
     let (sender, mut queue) = mpsc::channel(8);
     let cancel = CancellationToken::new();
-    let channel = Arc::new(SessionChannel::new(
+    let channel = Arc::new(Channel::new(
         sender,
-        &PlayerConfig {
+        &Config {
             disconnect_grace_ms: 100,
             ..Default::default()
         },
@@ -295,7 +295,7 @@ async fn successful_rebind_cancels_old_grace_deadline_and_late_cleanup_cannot_re
     queue.recv().await.unwrap();
     channel.detach(&old);
     let expiry = {
-        let channel = channel.clone();
+        let channel = Arc::clone(&channel);
         tokio::spawn(async move { channel.run_grace_timer().await })
     };
     tokio::time::advance(std::time::Duration::from_millis(99)).await;
@@ -315,9 +315,9 @@ async fn successful_rebind_cancels_old_grace_deadline_and_late_cleanup_cannot_re
 #[tokio::test]
 async fn gap_created_during_replay_never_produces_a_success_marker() {
     let (sender, mut queue) = mpsc::channel(8);
-    let channel = Arc::new(SessionChannel::new(
+    let channel = Arc::new(Channel::new(
         sender,
-        &PlayerConfig {
+        &Config {
             replay_capacity: 1,
             ..Default::default()
         },
@@ -356,4 +356,64 @@ async fn gap_created_during_replay_never_produces_a_success_marker() {
         Some(Content::Notify(_))
     ));
     assert!(codec.read(&mut reader).await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn bound_control_frames_reject_stale_replaying_and_frozen_connections_without_building() {
+    let (sender, mut original) = mpsc::channel(8);
+    let channel = Arc::new(Channel::new(
+        sender,
+        &Config::default(),
+        CancellationToken::new(),
+    ));
+    let old = complete_login(&channel);
+    original.recv().await.unwrap();
+    let (sender, mut queue) = mpsc::channel(8);
+    let current = channel
+        .rebind_connection(sender, 0, protocol::ResumeResponse::default())
+        .unwrap();
+    assert_eq!(
+        channel
+            .send_bound_frame(&old, || panic!("不能为旧连接签发"))
+            .unwrap_err()
+            .code,
+        ErrorCode::SessionReplaced
+    );
+    assert_eq!(
+        channel
+            .send_bound_frame(&current, || panic!("不能在补发期间签发"))
+            .unwrap_err()
+            .code,
+        ErrorCode::InvalidState
+    );
+    let Some(Outbound::Replay(recovery)) = queue.recv().await else {
+        panic!()
+    };
+    let codec = FrameCodec::new(1024, Duration::from_secs(1)).unwrap();
+    let (mut writer, mut reader) = tokio::io::duplex(1024);
+    recovery.write_to(&codec, &mut writer).await.unwrap();
+    assert!(matches!(
+        codec.read(&mut reader).await.unwrap().unwrap().content,
+        Some(Content::Resumed(_))
+    ));
+    assert!(matches!(
+        codec.read(&mut reader).await.unwrap().unwrap().content,
+        Some(Content::Recovered(_))
+    ));
+    channel
+        .send_bound_frame(&current, || {
+            Ok(wrap_frame(Content::ResumeTokenRefreshed(
+                protocol::RefreshResumeTokenResponse::default(),
+            )))
+        })
+        .unwrap();
+    assert!(matches!(queue.recv().await, Some(Outbound::Frame(_, _))));
+    assert_eq!(channel.replay_after(0).unwrap().unwrap().through_seq, 0);
+    assert_eq!(channel.last_request_id().unwrap(), 0);
+    channel.begin_handoff().unwrap();
+    assert!(
+        channel
+            .send_bound_frame(&current, || panic!("冻结后不能签发"))
+            .is_err()
+    );
 }

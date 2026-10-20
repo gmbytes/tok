@@ -24,13 +24,17 @@ pub enum OwnershipBackend {
     /// 默认单进程内存所有权。
     #[default]
     Memory,
-    /// 多网关共享 Redis 所有权，跨网关登录当前仍拒绝接管。
+    /// 多网关共享 Redis 所有权；普通登录拒绝抢占，Resume 可显式协作交接。
     Redis,
 }
 
 /// 业务服务身份、可选初始化工厂及端点引用；实例加锁策略由组装层决定。
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[expect(
+    clippy::module_name_repetitions,
+    reason = "同一模块公开应用、端点和服务等配置类型，保留角色名称区分配置用途。"
+)]
 pub struct ServiceConfig {
     /// 节点内唯一的业务服务名，由游戏定义。
     pub service_name: String,
@@ -51,6 +55,10 @@ impl ServiceConfig {
 /// 节点内可共享的监听端点；协议名由传输实现解释。
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[expect(
+    clippy::module_name_repetitions,
+    reason = "同一模块公开应用、端点和服务等配置类型，保留角色名称区分配置用途。"
+)]
 pub struct EndpointConfig {
     /// 节点内唯一的端点名称。
     pub name: String,
@@ -66,7 +74,14 @@ pub struct EndpointConfig {
 /// 一个游戏进程的配置；未知字段、重复名称与无效引用均被拒绝。
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[expect(
+    clippy::module_name_repetitions,
+    reason = "同一模块公开应用、端点和服务等配置类型，保留角色名称区分配置用途。"
+)]
 pub struct AppConfig {
+    /// 可选的本地固定共享密钥；省略时使用单进程临时密钥。
+    #[serde(default)]
+    pub resume_token: Option<tok_gateway::player::resume_token::Config>,
     /// 部署节点身份，节点内的所有业务服务共享此 ID。
     pub node_id: String,
     /// 服务发现后端选择。
@@ -89,7 +104,7 @@ pub struct AppConfig {
     pub observability: tok_observability::Config,
     /// 玩家 TCP 网关的容量与期限；未组装网关时不创建监听。
     #[serde(default)]
-    pub player_gateway: tok_gateway::player::PlayerConfig,
+    pub player_gateway: tok_gateway::player::Config,
 }
 
 impl AppConfig {
@@ -103,6 +118,18 @@ impl AppConfig {
 
     /// 验证身份、端点和服务绑定，不连接外部依赖。
     pub fn validate(&self) -> Result<()> {
+        if let Some(keys) = &self.resume_token {
+            keys.validate()?;
+        }
+        if self.player_gateway.handoff_enabled
+            && (self.resume_token.is_none()
+                || self.ownership != OwnershipBackend::Redis
+                || self.discovery == DiscoveryBackend::Memory)
+        {
+            return Err(Error::InvalidConfig(
+                "跨进程交接需要本地共用签名密钥、Redis 所有权及多节点发现".into(),
+            ));
+        }
         match (self.ownership, &self.redis_ownership) {
             (OwnershipBackend::Redis, Some(redis)) => {
                 redis.validate()?;

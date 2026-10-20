@@ -1,0 +1,49 @@
+syntax = "proto3";
+package tok.internal.v1;
+import "tok/internal/v1/common.proto";
+
+message GatewayOwner { string node_id = 1; string service_name = 2; }
+message GatewayOwnership { SessionIdentity identity = 1; GatewayOwner owner = 2; }
+message ReplayEntry { uint64 seq = 1; bytes body = 2; uint64 remaining_ms = 3; }
+message ChannelSnapshot {
+  uint64 published_seq = 1;
+  uint64 acknowledged_seq = 2;
+  uint64 replay_floor_seq = 3;
+  uint64 last_request_id = 4;
+  uint64 grace_remaining_ms = 5;
+  repeated ReplayEntry entries = 6;
+}
+message ScheduledTimer { TimerSpec spec = 1; uint64 version = 2; int64 scheduled_at_ms = 3; }
+message ExecutionSnapshot {
+  uint64 last_request_id = 1;
+  uint64 timer_request_id = 2;
+  uint64 timer_version = 3;
+  repeated ScheduledTimer timers = 4;
+}
+message HandoffSnapshot {
+  uint32 version = 1;
+  string snapshot_id = 2;
+  GatewayOwnership source = 3;
+  ChannelSnapshot channel = 4;
+  ExecutionSnapshot execution = 5;
+}
+message HandoffRequest {
+  string handoff_id = 1;
+  GatewayOwnership expected = 2;
+  GatewayOwner target = 3;
+  uint64 ack_seq = 4;
+  string snapshot_id = 5;
+  uint64 budget_ms = 6;
+  string source_service_name = 7;
+}
+message HandoffResponse {
+  HandoffSnapshot snapshot = 1;
+  GatewayOwnership ownership = 2;
+}
+// 网关内部 RPC；会话交接是其中一组管理操作。
+service GatewayRpc {
+  rpc PrepareHandoff(HandoffRequest) returns (HandoffResponse);
+  rpc CommitHandoff(HandoffRequest) returns (HandoffResponse);
+  rpc CancelHandoff(HandoffRequest) returns (HandoffResponse);
+  rpc CompleteHandoff(HandoffRequest) returns (HandoffResponse);
+}

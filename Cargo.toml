@@ -26,6 +26,10 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 redis = { version = "1.7.1", default-features = false, features = ["tokio-comp", "script"] }
 uuid = { version = "1", features = ["v4"] }
+base64 = "0.22.1"
+getrandom = "0.4.3"
+hmac = "0.13.0"
+sha2 = "0.11.0"
 thiserror = "2"
 toml = "1.1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync", "time", "net", "io-util"] }
@@ -53,6 +57,15 @@ missing_docs = "deny"
 [workspace.lints.clippy]
 dbg_macro = "deny"
 todo = "deny"
+await_holding_lock = "deny"
+await_holding_refcell_ref = "deny"
+let_underscore_future = "deny"
+large_futures = "deny"
+unimplemented = "deny"
+module_name_repetitions = "deny"
+clone_on_ref_ptr = "deny"
+unused_async = "deny"
+let_underscore_must_use = "deny"
 
 [workspace.lints.rustdoc]
 broken_intra_doc_links = "deny"

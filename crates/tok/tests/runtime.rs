@@ -32,7 +32,7 @@ struct TestService {
 
 impl ServiceFactory for TestService {
     fn start(&self, context: ServiceContext) -> StartTask {
-        let stopped = self.stopped.clone();
+        let stopped = Arc::clone(&self.stopped);
         match self.behavior {
             Behavior::FailStart => {
                 Box::pin(async { Err(std::io::Error::other("启动失败").into()) })
@@ -40,7 +40,7 @@ impl ServiceFactory for TestService {
             Behavior::SlowStart => Box::pin(pending()),
             Behavior::PanicStart => panic!("测试初始化崩溃"),
             Behavior::Exit => Box::pin(async { Ok(Box::pin(async { Ok(()) }) as ServiceTask) }),
-            Behavior::Panic => Box::pin(async { Ok(Box::pin(panic_service()) as ServiceTask) }),
+            Behavior::Panic => Box::pin(async { Ok(panic_service()) }),
             Behavior::Hang => Box::pin(async { Ok(Box::pin(pending()) as ServiceTask) }),
             Behavior::Wait => Box::pin(async move {
                 Ok(Box::pin(async move {
@@ -53,8 +53,8 @@ impl ServiceFactory for TestService {
     }
 }
 
-async fn panic_service() -> Result<(), tok::runtime::ServiceError> {
-    panic!("测试服务崩溃")
+fn panic_service() -> ServiceTask {
+    Box::pin(async { panic!("测试服务崩溃") })
 }
 
 fn app() -> Application {
@@ -78,7 +78,7 @@ fn register(
         factory_name,
         TestService {
             behavior,
-            stopped: stopped.clone(),
+            stopped: Arc::clone(stopped),
         },
     )
     .unwrap();
@@ -108,7 +108,7 @@ async fn custom_services_use_independent_factories_and_duplicate_names_are_rejec
     assert!(matches!(
         app.register_factory("mail", TestService {
             behavior: Behavior::FailStart,
-            stopped: mail_stopped.clone(),
+            stopped: Arc::clone(&mail_stopped),
         }),
         Err(RuntimeError::DuplicateFactory(name)) if name == "mail"
     ));

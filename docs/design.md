@@ -4,7 +4,7 @@ tok 是一个使用 Rust 开发的游戏服务器框架。框架围绕业务 ID 
 
 本文记录当前设计约定、业务与框架的职责边界，以及后续设计范围。当前以局外执行模型和服务通信为主，存储细节与无缝场景切换留待后续设计。
 
-第二批单进程客户端接入及第三批恢复的分帧、登录、session 状态、重复登录与容量约定见 [局外 TCP 协议与 session 实施约定](client-session.md)。第三批已接通 timer 调度、ACK 缓存与同网关恢复，默认断线宽限期 30 秒；跨网关交接仍待实施。
+第二批单进程客户端接入及第三批恢复的分帧、登录、session 状态、重复登录与容量约定见 [局外 TCP 协议与 session 实施约定](client-session.md)。第三批已接通 timer 调度、ACK 缓存与同网关恢复，默认断线宽限期 30 秒；跨网关交接需显式启用兼容签名密钥及内部端点。
 
 ## 设计范围与术语
 
@@ -47,11 +47,11 @@ player 服务部署在游戏节点上，负责玩家的局外游戏逻辑。其�
 
 ### 统一 Gateway 组装校准
 
-网关采用统一运行框架，按配置选择接入组件。Gateway 负责监听适配、连接容量、后台任务启动与监督、退出收束；PlayerIngress 负责登录协议、玩家所有权、串行 session 与 player RPC；Scene 接入组件后续负责场景定位和异步场景消息，不复制独立网关运行循环。
+网关采用统一运行框架，按配置选择接入组件。Gateway 负责监听适配、连接容量、后台任务启动与监督、退出收束；Ingress 负责登录协议、玩家所有权、串行 session 与 player RPC；Scene 接入组件后续负责场景定位和异步场景消息，不复制独立网关运行循环。
 
-PlayerGateway 与 SceneGateway 在下文表示两类业务角色，不要求两套独立运行时实现。PlayerGateway 的已有 Rust 接口保留为统一 Gateway 的兼容包装；新组装通过 Gateway 与接入组件完成。游戏按名称注册初始化工厂，服务默认按 service_name 查找，可通过可选 factory 字段选择其他名称的工厂；service_name 始终用于服务身份，同一工厂可创建多个不同身份的服务。ServiceConfig 不包含网关专用选择项；具体组件的协议及端点共享约束由组装层检查。同一二进制可以配置多个独立入口，按需拆分部署。
+PlayerGateway 与 SceneGateway 在下文表示两类业务角色，不要求两套独立运行时实现。Rust 组装统一通过 Gateway 与接入组件完成，提供 Gateway::player 便捷入口，不再保留 PlayerGateway 兼容类型。游戏按名称注册初始化工厂，服务默认按 service_name 查找，可通过可选 factory 字段选择其他名称的工厂；service_name 始终用于服务身份，同一工厂可创建多个不同身份的服务。ServiceConfig 不包含网关专用选择项；具体组件的协议及端点共享约束由组装层检查。同一二进制可以配置多个独立入口，按需拆分部署。
 
-协议、认证、session 和恢复语义由组件明确，不在通用 Gateway 中到处判断 player/scene。初期提供 TCP 监听适配和 PlayerIngress；Scene 仍未实现，选择它时必须明确报错。通用传输契约不假定所有适配都是 TCP；未来 UDP/KCP 需提供自己的接入适配，不强行沿用逐连接读写流程。
+协议、认证、session 和恢复语义由组件明确，不在通用 Gateway 中到处判断 player/scene。初期提供 TCP 监听适配和 Ingress；Scene 仍未实现，选择它时必须明确报错。通用传输契约不假定所有适配都是 TCP；未来 UDP/KCP 需提供自己的接入适配，不强行沿用逐连接读写流程。
 
 重构验收保持现有认证、串行执行、下行顺序、容量拒绝、租约失效与退出清理行为，并验证自定义组件能够复用运行时、业务服务名可独立配置、后台与连接任务异常可被统一监督。
 
@@ -61,7 +61,7 @@ PlayerGateway 与 SceneGateway 在下文表示两类业务角色，不要求两�
 
 session 串行执行客户端请求，通过调用游戏节点上的 player 服务完成局外业务逻辑。
 
-同一个 player 在整个网关集群中的有效 session 按所有权租约协调。Redis 后端已提供原子获取、epoch 更新、条件续租和释放；玩家重连到其他网关时，新网关需要先获取该 player 的 session 所有权，再驱动 player 执行。当前网关拒绝接管其他网关的活动租约，正常释放或过期后可建立新会话，完整交接仍待实现。
+同一个 player 在整个网关集群中的有效 session 按所有权租约协调。Redis 后端已提供原子获取、epoch 更新、条件续租和释放；玩家重连到其他网关时，新网关需要先获取该 player 的 session 所有权，再驱动 player 执行。普通登录拒绝接管其他网关的活动租约，正常释放或过期后可建立新会话，兼容签名密钥与内部交接端点开启后，Resume 可通过旧网关协作转移所有权并接续原会话。
 
 重复登录根据当前会话状态尝试增加所有权 epoch，踢出旧 session 并获取所有权。所有权变更需要原子地检查当前状态并更新 epoch，旧 session 不再作为有效的执行入口。epoch 标识所有权代次，与标识逻辑会话的 session_id 分开。
 
@@ -138,7 +138,9 @@ timer RPC 失败按系统级错误记录日志，不自动重试该次触发。�
 
 ### 重连与交接
 
-断线宽限期内 timer 继续运行。同网关恢复沿用当前调度，不重新安装登录时的全量 spec。跨网关交接传输当前 spec、下一次触发时间、调度版本及待执行状态，新所有者接续调度，旧所有者停止产生有效触发。
+断线宽限期内 timer 继续运行。同网关恢复沿用当前调度，不重新安装登录时的全量 spec。跨网关交接先停止新准入与调度，排空已接收的请求和 timer，再传输当前 spec、下一次预定触发时间及调度版本；不迁移执行中的 future 或排队票据。新所有者接续调度，旧所有者停止产生有效触发。
+
+跨网关交接采用本地签名凭证与内部交接 RPC。旧网关封存有界快照，新网关校验并预留容量后，由旧网关串行协调提交或取消，再按完整旧所有权执行原子条件转移。正常交接保留逻辑 session_id 和下行序列、增加 epoch；补发继续使用原编码字节。新通知以冻结边界明确成功或失败，不隐式积压和转发。接管结果不确定时查询确认，不自行恢复旧驱动；旧网关宕机或状态不完整时降级快速重登。具体状态机、资源限制及验收见[跨网关交接约定](client-session.md#第三批第四步跨网关交接)，该能力默认关闭。
 
 旧 session 无法恢复时，通过快速重登重新取得全量 timerSpec。离线期间不维护默认 session timer，由登录业务恢复或结算相关状态，不在重新登录时自动补跑所有历史触发。
 
@@ -280,7 +282,7 @@ PlayerGateway解析消息外层，根据 session 中的可信 player id 调用 p
 
 ## 短线重连与消息补发
 
-本节描述恢复与交接设计。当前已实现在线 timer、统一下行序列、ACK、有界缓存及同网关 token 恢复，默认断线宽限期 30 秒；跨网关交接尚未实现。版本 3 的协议、连接代次、凭证有效期及退化边界见[局外 TCP 协议与 session 实施约定](client-session.md#第三批第三步同网关恢复)。
+本节描述恢复与交接设计。当前已实现在线 timer、统一下行序列、ACK、有界缓存及同网关 token 恢复，默认断线宽限期 30 秒；兼容签名密钥及交接端点显式启用后支持跨网关恢复。版本 3 的协议、连接代次、凭证有效期及退化边界见[局外 TCP 协议与 session 实施约定](client-session.md#第三批第三步同网关恢复)。
 
 重连恢复原逻辑会话。客户端保留界面、业务状态和未完成请求，暂停新的业务请求，可展示网络恢复提示。正常短线重连不经过 SDK 鉴权，也不执行完整登录流程。
 
@@ -290,9 +292,11 @@ Connection 表示一次传输连接或接入绑定；session 表示玩家逻辑�
 
 对于持续连接的接入方式，断线后 session 在可配置的宽限期内保留所有权，继续串行处理 timer 和事件，并缓存下行消息。宽限期结束后才进入离线处理模式。HTTP 适配器报告会话活动，由会话组件根据配置管理有效期，不把单次 HTTP 请求结束视为玩家断线。
 
-服务器签发 resume_token，关联玩家、逻辑会话及有效期。当前同网关实现使用有界内存中的随机不透明凭证，默认身份有效期 1 小时；新登录轮换并撤销同玩家旧凭证，恢复不刷新期限。网关重启后凭证失效，其他网关暂不能验证；跨网关交接阶段需补齐凭证共享或签名验证机制。
+服务器签发 HMAC-SHA256 resume_token，关联玩家、逻辑会话及有效期。签发和验证为同步的本地操作，只使用启动时加载的固定共享密钥，不查询 Redis；多节点配置相同密钥，默认身份有效期 1 小时，恢复不刷新期限。维护时统一更换密钥并重启，不提供运行时轮换，旧 token 失效。已认证在线连接可显式刷新恢复凭证，沿用原 session_id 并重新计算凭证期限，刷新前检查绑定与有效所有权；原 token 到期不影响在线刷新授权。断线后过期凭证不能刷新，须普通鉴权。默认临时密钥在重启后变化，配置稳定密钥时可离线跨网关验证；原网关内存状态丢失仍需快速重登。
 
-客户端在新接入上提交 token，服务器验证后恢复会话。同网关重连复用保留的 session；后续跨网关重连获取或交接 Redis 中的 session 所有权，并失效旧连接。
+顶号由会话协调保证：新登录创建新 session_id、关闭旧入口，并原子更新每玩家最新登录标记；交接保留此标记。快速重登在获取所有权时原子比较原 session_id，旧 token 虽然签名未过期，也不能恢复新会话或在其释放后重新建立会话。Redis 保留最新标记及 epoch，不保存逐 token 记录。
+
+客户端在新接入上提交 token，服务器验证后恢复会话。同网关重连复用保留的 session；跨网关重连获取或交接 Redis 中的 session 所有权，并失效旧连接。
 
 token 的身份有效期与 session 的可恢复窗口分开。session 无法恢复时，仍有效的 token 可以用于快速重登，从登录协议开始恢复业务，无需重新进入 SDK 鉴权。重复登录或快速重登按会话状态处理 epoch 与旧 session；仅恢复原会话时保持原 session_id 和消息序列。
 
@@ -458,7 +462,7 @@ tok/
 | tok-gateway | 局外 session、timer、下行补发与交接，以及局内场景接入、协议与安全适配 |
 | tok | 对外 API 入口、配置、运行时服务组装与生命周期监督 |
 
-tok-gateway 的 runtime 提供统一 Gateway，player、scene 组织不同接入组件，transport、security 和 codec 提供适配。PlayerGateway 和 SceneGateway 表示业务角色，已有 PlayerGateway Rust 类型保留为兼容包装。两类角色均可维护 session，本文“局外／局内”描述默认业务分工。
+tok-gateway 的 runtime 提供统一 Gateway，player、scene 组织不同接入组件，transport、security 和 codec 提供适配。PlayerGateway 和 SceneGateway 表示业务角色，Rust 使用 Gateway::player 或 Gateway 与 Ingress 组装，不保留独立的 PlayerGateway 类型。两类角色均可维护 session，本文“局外／局内”描述默认业务分工。
 
 ```text
 tok-gateway/src/
@@ -473,6 +477,8 @@ tok-gateway/src/
 │   ├── executor.rs
 │   ├── gateway.rs
 │   ├── session.rs
+│   ├── session/handoff.rs
+│   ├── handoff.rs
 │   ├── timer.rs
 │   ├── channel.rs
 │   ├── replay.rs
@@ -486,7 +492,7 @@ tok-gateway/src/
 └── codec/
 ```
 
-player 模块按玩家逻辑会话、串行执行、timer、下行缓存和重连交接组织；scene 模块预留场景接入和场景连接会话。组件共享 Gateway 的连接容量、后台任务监督与退出流程，并按需组合 transport、security 和 codec。两类 session 按各自业务语义设计，不自动套用相同的串行或所有权约定。当前已实现 player 的 TCP 接入、认证、串行执行与 timer 调度，恢复、scene 和安全适配仍待扩展。协议适配器初期作为模块，实际需要独立发布或隔离依赖时再拆 crate。
+player 模块按玩家逻辑会话、串行执行、timer、下行缓存和重连交接组织；scene 模块预留场景接入和场景连接会话。组件共享 Gateway 的连接容量、后台任务监督与退出流程，并按需组合 transport、security 和 codec。两类 session 按各自业务语义设计，不自动套用相同的串行或所有权约定。当前已实现 player 的 TCP 接入、认证、串行执行、timer 调度、ACK 缓存、同网关恢复及显式开启的跨网关交接，scene 和安全适配仍待扩展。协议适配器初期作为模块，实际需要独立发布或隔离依赖时再拆 crate。
 
 依赖保持单向：游戏依赖 tok 组装入口及必要组件；tok 依赖组件 crate；组件依赖 tok-core 或 tok-proto，不反向依赖具体游戏或 tok 组装层。网关通过基础契约使用发现、路由与所有权实现，具体实现由组装层选择。RPC 与事件组件不依赖网关。
 
@@ -494,7 +500,7 @@ player 模块按玩家逻辑会话、串行执行、timer、下行缓存和重�
 
 workspace 统一 edition、工具链、依赖版本、lint 和 release 配置，共享 Cargo.lock。单元测试靠近实现，集成测试放对应 crate 的 tests 目录。Windows amd64 和 Linux amd64 通过 CI 分别验证；本地检查仅证明当前主机平台。
 
-当前实现包括八个框架 crate、示例游戏、TOML 配置验证、内存目录、Redis 开发发现与合并变更通知、bid 亲和路由、Memory 与 Redis session 所有权、服务生命周期、可观测组件、protobuf 生成、共享内部 RPC、客户端 TCP 分帧与注入认证、有界串行 session、timer 更新与调度、下行通知、rustdoc 用户与 API 文档、just 命令和 CI。示例 player 和 guild 共享内部端点，客户端网关经认证身份完成状态读写、计时更新状态和 player 到 guild 的调用；独立网关与游戏进程可通过 Redis 开发发现联调，多个网关可显式共享 Redis 所有权。ServiceContext 可注入发现查询后端，生产 Kubernetes 配置可验证但后端运行仍报尚未实现。Redis Cluster 客户端、跨网关交接、NATS、补发及安全适配后续实现；内存所有权不提供跨进程协调，Redis 租约不承诺异常路径下的绝对互斥，内部上下文字段校验不代替调用身份认证。部署目录暂不提供可运行的 Kubernetes 清单。
+当前实现包括八个框架 crate、示例游戏、TOML 配置验证、内存目录、Redis 开发发现与合并变更通知、bid 亲和路由、Memory 与 Redis session 所有权、服务生命周期、可观测组件、protobuf 生成、共享内部 RPC、客户端 TCP 分帧与注入认证、有界串行 session、timer 更新与调度、下行通知与 ACK 缓存、同网关恢复及跨网关交接、rustdoc 用户与 API 文档、just 命令和 CI。示例 player 和 guild 共享内部端点，客户端网关经认证身份完成状态读写、计时更新状态和 player 到 guild 的调用；独立网关与游戏进程可通过 Redis 开发发现联调，多个网关可显式共享 Redis 所有权。ServiceContext 可注入发现查询后端，生产 Kubernetes 配置可验证但后端运行仍报尚未实现。Redis Cluster 客户端、NATS 及安全适配后续实现；内存所有权不提供跨进程协调，Redis 租约不承诺异常路径下的绝对互斥，内部上下文字段校验不代替调用身份认证。部署目录暂不提供可运行的 Kubernetes 清单。
 
 ## 可观测约定
 

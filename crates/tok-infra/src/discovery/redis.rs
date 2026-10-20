@@ -31,6 +31,10 @@ return redis.call('DEL', KEYS[1])
 /// Redis 开发发现配置；连接 URL 的 Debug 输出隐藏凭据。
 #[derive(Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
+#[expect(
+    clippy::module_name_repetitions,
+    reason = "公开类型保留后端或所有权角色名称，便于调用方区分 Memory 与 Redis 实现。"
+)]
 pub struct RedisDiscoveryConfig {
     /// Redis 连接 URL，开发默认连接本机 6379；不写入日志。
     pub url: String,
@@ -115,6 +119,10 @@ struct Owned {
 ///
 /// 构造不产生任务；先 initialize，再由组装层监督 run。运行错误应停止应用，
 /// run future 被丢弃后不再续租；未能正常撤销的记录由 TTL 清理。
+#[expect(
+    clippy::module_name_repetitions,
+    reason = "公开类型保留后端或所有权角色名称，便于调用方区分 Memory 与 Redis 实现。"
+)]
 pub struct RedisDirectory {
     config: RedisDiscoveryConfig,
     client: Client,

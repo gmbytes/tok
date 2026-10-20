@@ -40,7 +40,7 @@ async fn redis_startup_timeout_does_not_start_or_publish_business() {
             name,
             Factory {
                 fail: false,
-                starts: starts.clone(),
+                starts: Arc::clone(&starts),
             },
         )
         .unwrap();
@@ -99,7 +99,7 @@ struct Inspect {
 }
 impl ServiceFactory for Inspect {
     fn start(&self, context: ServiceContext) -> StartTask {
-        let observed = self.observed.clone();
+        let observed = Arc::clone(&self.observed);
         Box::pin(async move {
             let nodes = context.directory.snapshot("guild")?;
             assert_eq!(nodes[0].node_id, "external");
@@ -133,7 +133,7 @@ async fn service_factories_use_injected_directory_without_unregistering_external
         app.register_factory(
             name,
             Inspect {
-                observed: observed.clone(),
+                observed: Arc::clone(&observed),
             },
         )
         .unwrap();
@@ -162,7 +162,7 @@ async fn bind_failure_happens_before_business_initialization() {
             name,
             Factory {
                 fail: false,
-                starts: starts.clone(),
+                starts: Arc::clone(&starts),
             },
         )
         .unwrap();
@@ -189,7 +189,7 @@ async fn initialization_failure_cleans_up_shared_listener_and_directory() {
         "player",
         Factory {
             fail: false,
-            starts: starts.clone(),
+            starts: Arc::clone(&starts),
         },
     )
     .unwrap();

@@ -8,6 +8,67 @@ use tok_core::{
 use tok_infra::{ownership::MemoryOwnership, routing::route};
 
 struct Directory(Vec<ServiceDescriptor>);
+
+#[tokio::test]
+async fn latest_login_blocks_old_credentials_after_release_but_survives_transfer() {
+    use tok_core::credentials::ResumeClaims;
+    let store = MemoryOwnership::new(2).unwrap();
+    let ttl = Duration::from_secs(2);
+    let first = store
+        .acquire("p".into(), "s1".into(), owner("a"), None, ttl)
+        .await
+        .unwrap();
+    let moved = store.transfer(first, owner("b"), ttl).await.unwrap();
+    store.release(moved).await.unwrap();
+    let claims = |session: &str| ResumeClaims {
+        player_id: "p".into(),
+        session_id: session.into(),
+    };
+    let next = store
+        .acquire_for_relogin(claims("s1"), "s2".into(), owner("b"), None, ttl)
+        .await
+        .unwrap();
+    store.release(next).await.unwrap();
+    assert!(matches!(
+        store
+            .acquire_for_relogin(claims("s1"), "stale".into(), owner("a"), None, ttl)
+            .await,
+        Err(Error::OwnershipConflict)
+    ));
+    let fresh = store
+        .acquire_for_relogin(claims("s2"), "s3".into(), owner("a"), None, ttl)
+        .await
+        .unwrap();
+    assert_eq!(fresh.identity.session_id, "s3");
+}
+
+#[tokio::test]
+async fn memory_transfer_compares_full_identity_and_old_cleanup_preserves_target() {
+    let store = MemoryOwnership::new(8).unwrap();
+    let owner = |node: &str| SessionOwner {
+        node_id: node.into(),
+        service_name: "gateway".into(),
+    };
+    let ttl = Duration::from_secs(3);
+    let old = store
+        .acquire("p".into(), "s".into(), owner("a"), None, ttl)
+        .await
+        .unwrap();
+    let mut wrong = old.clone();
+    wrong.identity.session_id = "different".into();
+    assert!(store.transfer(wrong, owner("b"), ttl).await.is_err());
+    let (a, b) = tokio::join!(
+        store.transfer(old.clone(), owner("b"), ttl),
+        store.transfer(old.clone(), owner("c"), ttl)
+    );
+    assert_eq!(usize::from(a.is_ok()) + usize::from(b.is_ok()), 1);
+    let current = store.lookup("p").await.unwrap().unwrap();
+    assert_eq!(current.identity.session_id, "s");
+    assert!(current.identity.epoch > old.identity.epoch);
+    assert!(!store.release(old.clone()).await.unwrap());
+    assert!(store.renew(old, ttl).await.is_err());
+    assert_eq!(store.lookup("p").await.unwrap(), Some(current));
+}
 impl ServiceDirectory for Directory {
     fn snapshot(&self, _: &str) -> tok_core::Result<Vec<ServiceDescriptor>> {
         Ok(self.0.clone())

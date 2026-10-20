@@ -12,6 +12,10 @@ type Services = BTreeMap<(String, String), ServiceDescriptor>;
 
 /// 单进程多服务共享的服务目录，不访问外部注册后端。
 #[derive(Debug, Clone)]
+#[expect(
+    clippy::module_name_repetitions,
+    reason = "公开类型保留后端或所有权角色名称，便于调用方区分 Memory 与 Redis 实现。"
+)]
 pub struct MemoryDirectory {
     services: Arc<RwLock<Services>>,
     updates: Arc<watch::Sender<u64>>,

@@ -92,6 +92,32 @@ pub async fn smoke(address: std::net::SocketAddr) -> Result<(), Error> {
         &v1::StartProductionRequest {},
     )
     .await?;
+    // 在线连接主动刷新凭证；客户端收到成功回应后替换保存，不改变业务序号。
+    codec
+        .write(
+            &mut stream,
+            &Frame {
+                version: VERSION,
+                content: Some(Content::RefreshResumeToken(
+                    protocol::RefreshResumeTokenRequest { request_id: 7 },
+                )),
+            },
+        )
+        .await?;
+    let refreshed = codec
+        .read(&mut stream)
+        .await?
+        .ok_or_else(|| std::io::Error::other("凭证刷新前连接结束"))?;
+    let Some(Content::ResumeTokenRefreshed(refreshed)) = refreshed.content else {
+        return Err(std::io::Error::other("缺少凭证刷新回应").into());
+    };
+    if refreshed.request_id != 7
+        || refreshed.error_code != 0
+        || refreshed.resume_token.is_empty()
+        || refreshed.resume_token_ttl_ms == 0
+    {
+        return Err(std::io::Error::other("凭证刷新失败").into());
+    }
     // 短线期间生产 timer 继续运行；新连接恢复原会话及下行位置。
     drop(stream);
     tokio::time::sleep(Duration::from_millis(80)).await;
@@ -103,7 +129,7 @@ pub async fn smoke(address: std::net::SocketAddr) -> Result<(), Error> {
                 version: VERSION,
                 content: Some(Content::Resume(protocol::ResumeRequest {
                     request_id: 1,
-                    resume_token: login.resume_token.clone(),
+                    resume_token: refreshed.resume_token.clone(),
                     ack_seq: server_seq,
                 })),
             },
@@ -133,7 +159,7 @@ pub async fn smoke(address: std::net::SocketAddr) -> Result<(), Error> {
         return Err(std::io::Error::other("恢复序号不一致").into());
     }
     tokio::time::timeout(Duration::from_secs(3), async {
-        let mut request_id = resumed.last_request_id.max(6) + 1;
+        let mut request_id = resumed.last_request_id.max(7) + 1;
         loop {
             let state = call::<_, v1::GetPlayerResponse>(
                 &mut stream,

@@ -15,6 +15,8 @@ message Frame {
     ResumeRequest resume = 9;
     ResumeResponse resumed = 10;
     RecoveryComplete recovered = 11;
+    RefreshResumeTokenRequest refresh_resume_token = 12;
+    RefreshResumeTokenResponse resume_token_refreshed = 13;
   }
 }
 message LoginRequest {
@@ -77,4 +79,16 @@ message Ack {
 message ControlError {
   uint64 request_id = 1;
   uint32 error_code = 2;
+}
+
+// 仅当前已认证且恢复完成的连接可刷新，不需要提交旧 token。
+message RefreshResumeTokenRequest {
+  uint64 request_id = 1;
+}
+// 控制回应，不占 server_seq，不进入补发缓存；失败时凭证字段为空。
+message RefreshResumeTokenResponse {
+  uint64 request_id = 1;
+  uint32 error_code = 2;
+  string resume_token = 3;
+  uint64 resume_token_ttl_ms = 4;
 }

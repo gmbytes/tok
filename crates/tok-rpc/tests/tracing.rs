@@ -56,7 +56,7 @@ async fn trace_context_is_propagated_across_the_network_call() {
     let endpoint = RpcEndpoint::new()
         .add_service(
             "guild",
-            RpcService::new("local", "guild", Arc::new(Capture(observed.clone())))
+            RpcService::new("local", "guild", Arc::new(Capture(Arc::clone(&observed))))
                 .unwrap()
                 .into_business(),
         )

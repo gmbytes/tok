@@ -117,7 +117,7 @@ impl HandlerRegistry {
         self.handlers.insert(
             request_message_id,
             Arc::new(move |context, body| {
-                let handler = handler.clone();
+                let handler = Arc::clone(&handler);
                 Box::pin(async move {
                     let request = Req::decode(body.as_slice())
                         .map_err(|_| Status::invalid_argument("游戏消息解码失败"))?;
@@ -159,7 +159,7 @@ impl HandlerRegistry {
         self.timers.insert(
             message_id,
             Arc::new(move |context, body| {
-                let handler = handler.clone();
+                let handler = Arc::clone(&handler);
                 Box::pin(async move {
                     let request = Req::decode(body.as_slice())
                         .map_err(|_| Status::invalid_argument("计时参数解码失败"))?;
@@ -293,6 +293,10 @@ impl RpcService {
             timer,
         };
         let span = tracing::info_span!("rpc_server", node_id = %self.node_id, service_name = %self.service_name, request_id = context.request_id, bid = ?context.bid);
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "追踪父上下文关联失败不能中断已通过验证的业务调用。"
+        )]
         let _ = span.set_parent(parent);
         let started = std::time::Instant::now();
         let request_id = context.request_id;

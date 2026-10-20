@@ -353,7 +353,7 @@ mod tests {
     #[test]
     fn log_reload_changes_output_and_invalid_rules_preserve_filter() {
         let bytes = Arc::new(Mutex::new(Vec::new()));
-        let writer = Buffer(bytes.clone());
+        let writer = Buffer(Arc::clone(&bytes));
         let (filter, handle) =
             tracing_subscriber::reload::Layer::new(parse_filter("info").unwrap());
         let subscriber = tracing_subscriber::registry().with(
@@ -414,7 +414,7 @@ mod tests {
     fn json_logs_contain_trace_correlation_fields() {
         let provider = SdkTracerProvider::builder().build();
         let bytes = Arc::new(Mutex::new(Vec::new()));
-        let writer = Buffer(bytes.clone());
+        let writer = Buffer(Arc::clone(&bytes));
         let subscriber = tracing_subscriber::registry()
             .with(
                 tracing_subscriber::fmt::layer()

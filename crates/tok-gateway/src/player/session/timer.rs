@@ -1,6 +1,6 @@
 //! session 内的有界计时集合、调度版本和周期合并；不为每个 timer 创建任务。
 
-use super::session::Job;
+use super::worker::Job;
 use crate::{ErrorCode, Result};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -15,11 +15,12 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 
 #[derive(Clone)]
-pub(super) struct TimerTicket {
+pub(super) struct Ticket {
     timer_id: String,
     version: u64,
     scheduled_at_ms: i64,
 }
+// 单个 timer 的调度记录，包含规格、版本及本次触发进度。
 #[derive(Clone)]
 struct Entry {
     spec: TimerSpec,
@@ -29,8 +30,10 @@ struct Entry {
     scheduled_at_ms: i64,
     deadline: Instant,
 }
+// 需要在同一锁下协调的调度可变状态，不包含固定配置、时钟及通知工具。
 #[derive(Default)]
-struct State {
+struct SchedulerState {
+    paused: bool,
     version: u64,
     entries: BTreeMap<String, Entry>,
 }
@@ -66,17 +69,97 @@ impl Clock {
     }
 }
 
-pub(super) struct TimerScheduler {
-    state: Mutex<State>,
+pub(super) struct Scheduler {
+    state: Mutex<SchedulerState>,
     changed: Notify,
     clock: Clock,
     max_timers: usize,
     max_timer_bytes: usize,
 }
-impl TimerScheduler {
+impl Scheduler {
+    pub(super) fn pause(&self) {
+        self.lock_state().paused = true;
+        self.changed.notify_one();
+    }
+    pub(super) fn resume(&self) {
+        self.lock_state().paused = false;
+        self.changed.notify_one();
+    }
+    pub(super) fn snapshot(
+        &self,
+        last_request_id: u64,
+        timer_request_id: u64,
+    ) -> Result<tok_rpc::protocol::internal::v1::ExecutionSnapshot> {
+        let state = self.lock_state();
+        if !state.paused || state.entries.values().any(|entry| entry.tick_pending) {
+            return Err(ErrorCode::InvalidState.into());
+        }
+        Ok(tok_rpc::protocol::internal::v1::ExecutionSnapshot {
+            last_request_id,
+            timer_request_id,
+            timer_version: state.version,
+            timers: state
+                .entries
+                .values()
+                .map(|entry| tok_rpc::protocol::internal::v1::ScheduledTimer {
+                    version: entry.version,
+                    scheduled_at_ms: entry.scheduled_at_ms,
+                    spec: Some(tok_rpc::protocol::internal::v1::TimerSpec {
+                        timer_id: entry.spec.timer_id.clone(),
+                        message_id: entry.spec.message_id,
+                        body: entry.spec.body.clone(),
+                        due_at_ms: entry.spec.due_at_ms,
+                        interval_ms: entry.spec.interval_ms,
+                    }),
+                })
+                .collect(),
+        })
+    }
+    pub(super) fn restore(
+        &self,
+        snapshot: &tok_rpc::protocol::internal::v1::ExecutionSnapshot,
+    ) -> Result<()> {
+        let specs = snapshot
+            .timers
+            .iter()
+            .map(|timer| {
+                let spec = timer.spec.as_ref().ok_or(ErrorCode::ResumeUnavailable)?;
+                if timer.version == 0
+                    || timer.version > snapshot.timer_version
+                    || timer.scheduled_at_ms < spec.due_at_ms
+                {
+                    return Err(ErrorCode::ResumeUnavailable.into());
+                }
+                Ok(TimerSpec {
+                    timer_id: spec.timer_id.clone(),
+                    message_id: spec.message_id,
+                    body: spec.body.clone(),
+                    due_at_ms: spec.due_at_ms,
+                    interval_ms: spec.interval_ms,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        self.apply(TimerUpdate::ReplaceAll(specs))?;
+        let mut state = self.lock_state();
+        state.version = snapshot.timer_version;
+        for timer in &snapshot.timers {
+            let spec = timer.spec.as_ref().ok_or(ErrorCode::ResumeUnavailable)?;
+            let entry = state
+                .entries
+                .get_mut(&spec.timer_id)
+                .ok_or(ErrorCode::ResumeUnavailable)?;
+            entry.version = timer.version;
+            entry.scheduled_at_ms = timer.scheduled_at_ms;
+            entry.deadline = self
+                .clock
+                .deadline(timer.scheduled_at_ms)
+                .ok_or(ErrorCode::ResumeUnavailable)?;
+        }
+        Ok(())
+    }
     pub(super) fn new(max_timers: usize, max_timer_bytes: usize) -> Self {
         Self {
-            state: Mutex::new(State::default()),
+            state: Mutex::new(SchedulerState::default()),
             changed: Notify::new(),
             clock: Clock::new(),
             max_timers,
@@ -140,7 +223,7 @@ impl TimerScheduler {
         self.changed.notify_one();
         Ok(())
     }
-    pub(super) fn is_current(&self, ticket: &TimerTicket) -> bool {
+    pub(super) fn is_current(&self, ticket: &Ticket) -> bool {
         self.lock_state()
             .entries
             .get(&ticket.timer_id)
@@ -150,7 +233,7 @@ impl TimerScheduler {
                     && entry.scheduled_at_ms == ticket.scheduled_at_ms
             })
     }
-    pub(super) fn prepare(&self, ticket: &TimerTicket) -> Option<(TimerSpec, TimerTrigger)> {
+    pub(super) fn prepare(&self, ticket: &Ticket) -> Option<(TimerSpec, TimerTrigger)> {
         let state = self.lock_state();
         let entry = state.entries.get(&ticket.timer_id)?;
         if entry.version != ticket.version
@@ -168,7 +251,7 @@ impl TimerScheduler {
             },
         ))
     }
-    pub(super) fn complete_tick(&self, ticket: &TimerTicket) {
+    pub(super) fn complete_tick(&self, ticket: &Ticket) {
         let mut state = self.lock_state();
         let Some(entry) = state.entries.get_mut(&ticket.timer_id) else {
             return;
@@ -199,13 +282,19 @@ impl TimerScheduler {
     pub(super) async fn run(&self, queue: mpsc::Sender<Job>, cancel: CancellationToken) {
         loop {
             let changed = self.changed.notified();
-            let deadline = self
-                .lock_state()
-                .entries
-                .values()
-                .filter(|entry| !entry.tick_pending)
-                .map(|entry| entry.deadline)
-                .min();
+            let deadline = {
+                let state = self.lock_state();
+                if state.paused {
+                    None
+                } else {
+                    state
+                        .entries
+                        .values()
+                        .filter(|entry| !entry.tick_pending)
+                        .map(|entry| entry.deadline)
+                        .min()
+                }
+            };
             let waiting = async {
                 match deadline {
                     Some(deadline) => tokio::time::sleep_until(deadline).await,
@@ -216,6 +305,9 @@ impl TimerScheduler {
             // 满队列只等待一个可取消的容量许可，不丢触发，不自旋，也不创建无限后台任务。
             let permit = tokio::select! { biased; _ = cancel.cancelled() => return, _ = self.changed.notified() => continue, permit = queue.reserve() => match permit { Ok(permit) => permit, Err(_) => return } };
             let mut state = self.lock_state();
+            if state.paused {
+                continue;
+            }
             let next = state
                 .entries
                 .values_mut()
@@ -223,7 +315,7 @@ impl TimerScheduler {
                 .min_by_key(|entry| entry.deadline);
             if let Some(entry) = next {
                 entry.tick_pending = true;
-                permit.send(Job::Timer(TimerTicket {
+                permit.send(Job::Timer(Ticket {
                     timer_id: entry.spec.timer_id.clone(),
                     version: entry.version,
                     scheduled_at_ms: entry.scheduled_at_ms,
@@ -239,7 +331,7 @@ impl TimerScheduler {
         clippy::expect_used,
         reason = "timer 锁中毒后状态完整性未知，必须让受监督任务失败并触发网关清理"
     )]
-    fn lock_state(&self) -> MutexGuard<'_, State> {
+    fn lock_state(&self) -> MutexGuard<'_, SchedulerState> {
         self.state
             .lock()
             .expect("timer 锁已中毒，停止受监督的调度任务")
@@ -256,8 +348,8 @@ mod tests {
 
     #[tokio::test]
     async fn poisoned_state_stops_the_scheduler_instead_of_treating_it_as_empty() {
-        let timers = Arc::new(TimerScheduler::new(4, 1024));
-        let poisoned = timers.clone();
+        let timers = Arc::new(Scheduler::new(4, 1024));
+        let poisoned = Arc::clone(&timers);
         let poisoner = tokio::spawn(async move {
             let _guard = poisoned.state.lock().unwrap();
             panic!("模拟持锁路径崩溃");
@@ -284,7 +376,7 @@ mod tests {
             tokio::task::yield_now().await;
         }
     }
-    async fn ticket(queue: &mut mpsc::Receiver<Job>) -> TimerTicket {
+    async fn ticket(queue: &mut mpsc::Receiver<Job>) -> Ticket {
         match queue.recv().await.unwrap() {
             Job::Timer(ticket) => ticket,
             _ => panic!("预期计时任务"),
@@ -293,11 +385,11 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn replacing_and_cancelling_invalidates_queued_versions() {
-        let timers = Arc::new(TimerScheduler::new(4, 1024));
+        let timers = Arc::new(Scheduler::new(4, 1024));
         let (sender, mut queue) = mpsc::channel(4);
         let cancel = CancellationToken::new();
         let worker = {
-            let timers = timers.clone();
+            let timers = Arc::clone(&timers);
             let cancel = cancel.clone();
             tokio::spawn(async move { timers.run(sender, cancel).await })
         };
@@ -334,12 +426,12 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn busy_periods_merge_and_keep_original_time_base() {
-        let timers = Arc::new(TimerScheduler::new(4, 1024));
+        let timers = Arc::new(Scheduler::new(4, 1024));
         let epoch = timers.clock.now_ms();
         let (sender, mut queue) = mpsc::channel(4);
         let cancel = CancellationToken::new();
         let worker = {
-            let timers = timers.clone();
+            let timers = Arc::clone(&timers);
             let cancel = cancel.clone();
             tokio::spawn(async move { timers.run(sender, cancel).await })
         };
@@ -372,7 +464,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn queue_pressure_does_not_lose_or_duplicate_due_timers() {
-        let timers = Arc::new(TimerScheduler::new(4, 1024));
+        let timers = Arc::new(Scheduler::new(4, 1024));
         let (sender, mut queue) = mpsc::channel(1);
         let cancel = CancellationToken::new();
         timers
@@ -382,7 +474,7 @@ mod tests {
             ]))
             .unwrap();
         let worker = {
-            let timers = timers.clone();
+            let timers = Arc::clone(&timers);
             let cancel = cancel.clone();
             tokio::spawn(async move { timers.run(sender, cancel).await })
         };
@@ -402,7 +494,7 @@ mod tests {
 
     #[test]
     fn invalid_or_oversized_updates_leave_the_entire_set_unchanged() {
-        let timers = TimerScheduler::new(2, 12);
+        let timers = Scheduler::new(2, 12);
         timers
             .apply(TimerUpdate::ReplaceAll(vec![spec("old", 0, None)]))
             .unwrap();

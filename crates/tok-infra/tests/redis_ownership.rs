@@ -21,12 +21,77 @@ fn owner(node: &str) -> SessionOwner {
         service_name: "gateway".into(),
     }
 }
-fn keys(config: &RedisOwnershipConfig) -> [String; 2] {
-    // 约定的测试玩家 p = 0x70；仅删除本次独立 namespace 的两个测试键。
+
+#[tokio::test]
+#[ignore = "需要真实 Redis；通过 just ownership-test 显式运行"]
+async fn transfer_compares_full_owner_and_preserves_large_epoch_precision() {
+    let config = config();
+    let store = RedisOwnership::new(config.clone()).unwrap();
+    seed(&config, "9007199254740992").await;
+    let old = acquire(&store, "s", "a", None, Duration::from_secs(3))
+        .await
+        .unwrap();
+    let mut wrong = old.clone();
+    wrong.owner.node_id = "foreign".into();
+    assert!(
+        store
+            .transfer(wrong, owner("b"), Duration::from_secs(3))
+            .await
+            .is_err()
+    );
+    let (a, b) = tokio::join!(
+        store.transfer(old.clone(), owner("b"), Duration::from_secs(3)),
+        store.transfer(old.clone(), owner("c"), Duration::from_secs(3))
+    );
+    assert_eq!(usize::from(a.is_ok()) + usize::from(b.is_ok()), 1);
+    let current = store.lookup("p").await.unwrap().unwrap();
+    assert_eq!(current.identity.session_id, old.identity.session_id);
+    assert_eq!(current.identity.epoch, 9007199254740994);
+    assert!(!store.release(old.clone()).await.unwrap());
+    assert!(store.renew(old, Duration::from_secs(3)).await.is_err());
+    assert!(store.release(current).await.unwrap());
+    cleanup(&config).await;
+}
+fn keys(config: &RedisOwnershipConfig) -> [String; 3] {
+    // 约定的测试玩家 p = 0x70；仅删除本次独立 namespace 的三个测试键。
     [
         format!("tok:ownership:{{{}:70}}:lease", config.namespace),
         format!("tok:ownership:{{{}:70}}:epoch", config.namespace),
+        format!("tok:ownership:{{{}:70}}:session", config.namespace),
     ]
+}
+
+#[tokio::test]
+#[ignore = "需要真实 Redis；通过 just ownership-test 显式运行"]
+async fn relogin_atomically_rejects_superseded_credentials_after_lease_release() {
+    use tok_core::credentials::ResumeClaims;
+    let config = config();
+    let store = RedisOwnership::new(config.clone()).unwrap();
+    let ttl = Duration::from_secs(2);
+    let first = acquire(&store, "s1", "a", None, ttl).await.unwrap();
+    let moved = store.transfer(first, owner("b"), ttl).await.unwrap();
+    store.release(moved).await.unwrap();
+    let claims = |session: &str| ResumeClaims {
+        player_id: "p".into(),
+        session_id: session.into(),
+    };
+    let next = store
+        .acquire_for_relogin(claims("s1"), "s2".into(), owner("b"), None, ttl)
+        .await
+        .unwrap();
+    store.release(next).await.unwrap();
+    assert!(matches!(
+        store
+            .acquire_for_relogin(claims("s1"), "stale".into(), owner("a"), None, ttl)
+            .await,
+        Err(Error::OwnershipConflict)
+    ));
+    let fresh = store
+        .acquire_for_relogin(claims("s2"), "s3".into(), owner("a"), None, ttl)
+        .await
+        .unwrap();
+    assert_eq!(fresh.identity.session_id, "s3");
+    cleanup(&config).await;
 }
 async fn seed(config: &RedisOwnershipConfig, epoch: &str) {
     let mut connection = redis::Client::open(config.url.as_str())

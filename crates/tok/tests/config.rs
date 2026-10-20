@@ -3,6 +3,35 @@
 use tok::{AppConfig, DiscoveryBackend};
 
 #[test]
+fn handoff_requires_shared_secret_ownership_and_valid_budgets() {
+    let source = include_str!("../../../examples/demo-game/config/redis-handoff-a.toml");
+    assert!(
+        AppConfig::from_toml(source)
+            .unwrap()
+            .player_gateway
+            .handoff_enabled
+    );
+    for invalid in [
+        source.replace("[resume_token]", "[redis_resume_tokens]"),
+        source.replace("ownership = \"redis\"", "ownership = \"memory\""),
+        source.replace(
+            "handoff_enabled = true",
+            "handoff_enabled = true\nhandoff_timeout_ms = 0",
+        ),
+        source.replace(
+            "handoff_enabled = true",
+            "handoff_enabled = true\nmax_handoffs = 0",
+        ),
+    ] {
+        assert!(AppConfig::from_toml(&invalid).is_err());
+    }
+    AppConfig::from_toml(include_str!(
+        "../../../examples/demo-game/config/redis-handoff-b.toml"
+    ))
+    .unwrap();
+}
+
+#[test]
 fn factory_is_optional_and_overrides_service_name() {
     let local = include_str!("../../../examples/demo-game/config/local.toml");
     let source = local.replace(

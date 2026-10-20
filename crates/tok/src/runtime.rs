@@ -42,6 +42,10 @@ pub trait ServiceFactory: Send + Sync {
 
 /// 服务与端点启动、运行监督及退出清理过程的错误。
 #[derive(Debug, thiserror::Error)]
+#[expect(
+    clippy::module_name_repetitions,
+    reason = "公开错误类型明确属于服务运行时，避免与 RPC 和网关错误混淆。"
+)]
 pub enum RuntimeError {
     /// 配置校验或本地目录操作失败。
     #[error(transparent)]
@@ -112,6 +116,10 @@ impl Drop for Registrations {
             readiness.clear();
         }
         for service in self.services.iter().rev() {
+            #[expect(
+                clippy::let_underscore_must_use,
+                reason = "析构时尽力撤销本地注册，目录不可用时不能再次失败中断退出。"
+            )]
             let _ = self
                 .directory
                 .unregister(&service.node_id, &service.service_name);
@@ -142,11 +150,11 @@ impl Application {
         };
         let service_directory: Arc<dyn ServiceDirectory> = redis
             .as_ref()
-            .map(|r| r.clone() as Arc<dyn ServiceDirectory>)
+            .map(|r| Arc::clone(r) as Arc<dyn ServiceDirectory>)
             .unwrap_or_else(|| Arc::new(directory.clone()));
         let registry: Arc<dyn ServiceRegistry> = redis
             .as_ref()
-            .map(|r| r.clone() as Arc<dyn ServiceRegistry>)
+            .map(|r| Arc::clone(r) as Arc<dyn ServiceRegistry>)
             .unwrap_or_else(|| Arc::new(directory.clone()));
         Ok(Self {
             config,
@@ -188,7 +196,7 @@ impl Application {
 
     /// 返回业务调用应使用的发现查询后端。
     pub fn service_directory(&self) -> Arc<dyn ServiceDirectory> {
-        self.service_directory.clone()
+        Arc::clone(&self.service_directory)
     }
 
     /// 将显式绑定的 protobuf 服务交给应用统一监听和监督。
@@ -264,7 +272,7 @@ impl Application {
                     signal = &mut shutdown => return signal.map_err(RuntimeError::Signal),
                     result = redis.initialize() => result?,
                 }
-                let redis = redis.clone();
+                let redis = Arc::clone(redis);
                 let discovery_stop = token.child_token();
                 tasks.spawn(async move {
                     ("redis-discovery".into(), redis.run(discovery_stop).await.map_err(|error| Box::new(error) as ServiceError))
@@ -296,11 +304,11 @@ impl Application {
                 let context = ServiceContext {
                     listen_address,
                     service: service.clone(),
-                    directory: self.service_directory.clone(),
+                    directory: Arc::clone(&self.service_directory),
                     shutdown: token.child_token(),
                 };
-                let factory = self.factories.get(binding.factory_name())
-                    .ok_or_else(|| RuntimeError::MissingFactory(binding.factory_name().into()))?.clone();
+                let factory = Arc::clone(self.factories.get(binding.factory_name())
+                    .ok_or_else(|| RuntimeError::MissingFactory(binding.factory_name().into()))?);
                 let mut starting = JoinSet::new();
                 let started = std::time::Instant::now();
                 let span = tracing::info_span!("service_start", node_id = %self.config.node_id, service_name = %service.service_name);

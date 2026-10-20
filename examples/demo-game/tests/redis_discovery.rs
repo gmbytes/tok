@@ -1,5 +1,6 @@
 //! 真实 Redis 与独立 OS 进程：网关经发现调用游戏，退出、崩溃与重启均可收敛。
 
+use std::sync::Arc;
 use std::{
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
@@ -23,13 +24,25 @@ use tokio_util::sync::CancellationToken;
 struct Process(Child);
 impl Drop for Process {
     fn drop(&mut self) {
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "测试析构时子进程可能已退出，终止失败不能引起二次 panic。"
+        )]
         let _ = self.0.kill();
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "测试析构时子进程可能已回收，等待失败不能引起二次 panic。"
+        )]
         let _ = self.0.wait();
     }
 }
 struct Files(PathBuf);
 impl Drop for Files {
     fn drop(&mut self) {
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "测试析构仅尽力清理自身临时目录，保留原始测试失败。"
+        )]
         let _ = std::fs::remove_dir_all(&self.0);
     }
 }
@@ -134,7 +147,7 @@ async fn two_process_client_smoke_graceful_withdraw_crash_and_restart() {
     observer.initialize().await.unwrap();
     let stop = CancellationToken::new();
     let mut tasks = tokio::task::JoinSet::new();
-    let watcher = observer.clone();
+    let watcher = Arc::clone(&observer);
     let signal = stop.clone();
     tasks.spawn(async move { watcher.run(signal).await });
     let mut game = spawn(&game_file, &["--run-for", "8"]);
@@ -165,6 +178,7 @@ async fn clear_epoch(url: &str, namespace: &str) {
     redis::cmd("DEL")
         .arg(format!("tok:ownership:{{{namespace}:3432}}:lease"))
         .arg(format!("tok:ownership:{{{namespace}:3432}}:epoch"))
+        .arg(format!("tok:ownership:{{{namespace}:3432}}:session"))
         .query_async::<i64>(&mut connection)
         .await
         .unwrap();
@@ -205,6 +219,252 @@ async fn wait_release(store: &RedisOwnership) {
 }
 
 #[tokio::test]
+#[ignore = "需要真实 Redis；通过 just handoff-smoke 显式运行"]
+async fn three_process_handoff_preserves_replay_and_crash_falls_back_to_fast_login() {
+    use demo_game::protocol::{GameMessage, v1};
+    use prost::Message;
+    use tok::gateway::protocol::{BusinessRequest, ResumeRequest};
+    let namespace = format!("handoff-{}", uuid::Uuid::new_v4());
+    let url =
+        std::env::var("TOK_TEST_REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379/".into());
+    let files = Files(std::env::temp_dir().join(&namespace));
+    std::fs::create_dir(&files.0).unwrap();
+    let game_file = files.0.join("game.toml");
+    let a_file = files.0.join("a.toml");
+    let b_file = files.0.join("b.toml");
+    let game_port = port();
+    let a_port = port();
+    let b_port = port();
+    config(&game_file, &namespace, &url, "game", game_port, false);
+    for (file, node, client_port) in [
+        (&a_file, "gateway-a", a_port),
+        (&b_file, "gateway-b", b_port),
+    ] {
+        config(file, &namespace, &url, node, client_port, true);
+        let mut source = std::fs::read_to_string(file)
+            .unwrap()
+            .replace(
+                "[player_gateway]\n",
+                "[player_gateway]\nhandoff_enabled=true\nhandoff_timeout_ms=5000\n",
+            )
+            .replace("disconnect_grace_ms=250", "disconnect_grace_ms=2000");
+        source.push_str(&format!("\n[resume_token]\nsecret_key='1111111111111111111111111111111111111111111111111111111111111111'\n[[endpoints]]\nname='internal'\nprotocol='grpc'\naddress='127.0.0.1:{}'\n[[services]]\nservice_name='gateway-rpc'\nendpoint='internal'\n", port()));
+        std::fs::write(file, source).unwrap();
+    }
+    let observer = RedisDirectory::new(
+        RedisDiscoveryConfig {
+            url: url.clone(),
+            namespace: namespace.clone(),
+            lease_ttl_ms: 1800,
+            refresh_interval_ms: 100,
+            operation_timeout_ms: 500,
+            ..Default::default()
+        },
+        "observer",
+    )
+    .unwrap();
+    observer.initialize().await.unwrap();
+    let stop = CancellationToken::new();
+    let mut tasks = tokio::task::JoinSet::new();
+    let watcher = Arc::clone(&observer);
+    let signal = stop.clone();
+    tasks.spawn(async move { watcher.run(signal).await });
+    let _game = spawn(&game_file, &["--run-for", "60"]);
+    let _a = spawn(&a_file, &["--run-for", "60"]);
+    let mut b = spawn(&b_file, &["--run-for", "60"]);
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !observer
+            .snapshot("gateway-rpc")
+            .is_ok_and(|nodes| nodes.len() == 2)
+            || !observer
+                .snapshot("player")
+                .is_ok_and(|nodes| nodes.len() == 1)
+        {
+            tokio::time::sleep(Duration::from_millis(30)).await;
+        }
+    })
+    .await
+    .unwrap();
+    // 各网关本地发现缓存也需要一次同步；通过真实请求确认业务已可用。
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    let store = RedisOwnership::new(RedisOwnershipConfig {
+        url: url.clone(),
+        namespace: namespace.clone(),
+        operation_timeout_ms: 500,
+    })
+    .unwrap();
+    let (mut original, login) = login(a_port).await;
+    assert_eq!(login.error_code, 0);
+    let codec = FrameCodec::new(1048576, Duration::from_secs(6)).unwrap();
+    let mut responses = Vec::new();
+    for (id, message_id, body) in [
+        (
+            2,
+            v1::SetPlayerRequest::MESSAGE_ID,
+            v1::SetPlayerRequest { value: 99 }.encode_to_vec(),
+        ),
+        (
+            3,
+            v1::StartProductionRequest::MESSAGE_ID,
+            v1::StartProductionRequest {}.encode_to_vec(),
+        ),
+    ] {
+        codec
+            .write(
+                &mut original,
+                &Frame {
+                    version: VERSION,
+                    content: Some(Content::Request(BusinessRequest {
+                        request_id: id,
+                        message_id,
+                        body,
+                    })),
+                },
+            )
+            .await
+            .unwrap();
+        let frame = codec.read(&mut original).await.unwrap().unwrap();
+        assert!(
+            matches!(&frame.content, Some(Content::Response(response)) if response.error_code == 0)
+        );
+        responses.push(frame);
+    }
+    let mut target = tokio::net::TcpStream::connect(("127.0.0.1", b_port))
+        .await
+        .unwrap();
+    codec
+        .write(
+            &mut target,
+            &Frame {
+                version: VERSION,
+                content: Some(Content::Resume(ResumeRequest {
+                    request_id: 1,
+                    resume_token: login.resume_token.clone(),
+                    ack_seq: 0,
+                })),
+            },
+        )
+        .await
+        .unwrap();
+    let Some(Content::Resumed(resumed)) = codec.read(&mut target).await.unwrap().unwrap().content
+    else {
+        panic!("缺少恢复回应")
+    };
+    assert_eq!(resumed.error_code, 0);
+    assert_eq!(resumed.session_id, login.session_id);
+    assert!(resumed.epoch > login.epoch);
+    assert_eq!(resumed.last_request_id, 3);
+    for original in responses {
+        assert_eq!(codec.read(&mut target).await.unwrap().unwrap(), original);
+    }
+    assert!(matches!(
+        codec.read(&mut target).await.unwrap().unwrap().content,
+        Some(Content::Recovered(_))
+    ));
+    assert_eq!(
+        store.lookup("42").await.unwrap().unwrap().owner.node_id,
+        "gateway-b"
+    );
+    assert!(codec.read(&mut original).await.unwrap().is_none());
+    tokio::time::sleep(Duration::from_millis(120)).await;
+    codec
+        .write(
+            &mut target,
+            &Frame {
+                version: VERSION,
+                content: Some(Content::Request(BusinessRequest {
+                    request_id: 4,
+                    message_id: v1::GetPlayerRequest::MESSAGE_ID,
+                    body: v1::GetPlayerRequest { player_id: 0 }.encode_to_vec(),
+                })),
+            },
+        )
+        .await
+        .unwrap();
+    let Some(Content::Response(response)) = codec.read(&mut target).await.unwrap().unwrap().content
+    else {
+        panic!("缺少业务回应")
+    };
+    assert_eq!(response.error_code, 0);
+    assert_eq!(response.server_seq, 3);
+    assert_eq!(
+        v1::GetPlayerResponse::decode(response.body.as_slice())
+            .unwrap()
+            .value,
+        100
+    );
+    // 目标网关刷新后，源网关可独立验证新凭证并用于宕机降级。
+    codec
+        .write(
+            &mut target,
+            &Frame {
+                version: VERSION,
+                content: Some(Content::RefreshResumeToken(
+                    tok::gateway::protocol::RefreshResumeTokenRequest { request_id: 5 },
+                )),
+            },
+        )
+        .await
+        .unwrap();
+    let Some(Content::ResumeTokenRefreshed(refreshed)) =
+        codec.read(&mut target).await.unwrap().unwrap().content
+    else {
+        panic!("缺少凭证刷新回应")
+    };
+    assert_eq!(refreshed.error_code, 0);
+    assert!(!refreshed.resume_token.is_empty());
+    b.0.kill().unwrap();
+    b.0.wait().unwrap();
+    let mut fallback = tokio::net::TcpStream::connect(("127.0.0.1", a_port))
+        .await
+        .unwrap();
+    codec
+        .write(
+            &mut fallback,
+            &Frame {
+                version: VERSION,
+                content: Some(Content::Resume(ResumeRequest {
+                    request_id: 1,
+                    resume_token: refreshed.resume_token.clone(),
+                    ack_seq: 0,
+                })),
+            },
+        )
+        .await
+        .unwrap();
+    assert!(
+        matches!(codec.read(&mut fallback).await.unwrap().unwrap().content, Some(Content::Resumed(response)) if response.error_code == ErrorCode::ResumeUnavailable as u32)
+    );
+    wait_release(&store).await;
+    codec
+        .write(
+            &mut fallback,
+            &Frame {
+                version: VERSION,
+                content: Some(Content::Login(LoginRequest {
+                    request_id: 2,
+                    credential: String::new(),
+                    resume_token: refreshed.resume_token.clone(),
+                })),
+            },
+        )
+        .await
+        .unwrap();
+    let Some(Content::LoggedIn(next)) = codec.read(&mut fallback).await.unwrap().unwrap().content
+    else {
+        panic!("缺少快速重登回应")
+    };
+    assert_eq!(next.error_code, 0);
+    assert_ne!(next.session_id, login.session_id);
+    assert!(next.epoch > resumed.epoch);
+    drop(fallback);
+    wait_release(&store).await;
+    stop.cancel();
+    tasks.join_next().await.unwrap().unwrap().unwrap();
+    clear_epoch(&url, &namespace).await;
+}
+
+#[tokio::test]
 #[ignore = "需要真实 Redis；通过 just ownership-smoke 显式运行"]
 async fn independent_gateway_processes_share_ownership_and_stop_on_lease_loss() {
     let namespace = format!("gateways-{}", uuid::Uuid::new_v4());
@@ -236,7 +496,7 @@ async fn independent_gateway_processes_share_ownership_and_stop_on_lease_loss() 
     observer.initialize().await.unwrap();
     let stop = CancellationToken::new();
     let mut tasks = tokio::task::JoinSet::new();
-    let watcher = observer.clone();
+    let watcher = Arc::clone(&observer);
     let signal = stop.clone();
     tasks.spawn(async move { watcher.run(signal).await });
     let _game = spawn(&game_file, &["--run-for", "60"]);

@@ -39,7 +39,40 @@ pub struct GatewayContext {
     launches: mpsc::Sender<GatewayTask>,
     capacity: Arc<Semaphore>,
 }
+
+/// 已预留的后台任务容量；丢弃时归还，可用于改变所有权前检查资源。
+pub struct GatewayTaskReservation {
+    context: GatewayContext,
+    permit: tokio::sync::OwnedSemaphorePermit,
+}
+impl GatewayTaskReservation {
+    /// 使用已预留容量提交受监督任务。
+    pub async fn launch(self, task: GatewayTask) -> std::io::Result<()> {
+        let permit = self.permit;
+        let task: GatewayTask = Box::pin(async move {
+            let _permit = permit;
+            task.await
+        });
+        tokio::select! {
+            biased;
+            _ = self.context.shutdown.cancelled() => Err(std::io::Error::other("网关正在退出")),
+            result = self.context.launches.send(task) => result.map_err(|_| std::io::Error::other("网关任务入口已关闭")),
+        }
+    }
+}
 impl GatewayContext {
+    /// 预留一个后台任务名额；满时立即失败，不启动任务。
+    pub fn reserve(&self) -> std::io::Result<GatewayTaskReservation> {
+        let permit = Arc::clone(&self.capacity)
+            .try_acquire_owned()
+            .map_err(|_| {
+                std::io::Error::new(std::io::ErrorKind::WouldBlock, "网关后台任务容量已满")
+            })?;
+        Ok(GatewayTaskReservation {
+            context: self.clone(),
+            permit,
+        })
+    }
     /// 网关关闭时取消；组件应派生子 token 管理自己的会话。
     pub fn cancellation(&self) -> CancellationToken {
         self.shutdown.clone()
@@ -47,18 +80,7 @@ impl GatewayContext {
 
     /// 提交后台任务；容量满立即失败，提交成功不表示任务已开始执行。
     pub async fn launch(&self, task: GatewayTask) -> std::io::Result<()> {
-        let permit = self.capacity.clone().try_acquire_owned().map_err(|_| {
-            std::io::Error::new(std::io::ErrorKind::WouldBlock, "网关后台任务容量已满")
-        })?;
-        let task: GatewayTask = Box::pin(async move {
-            let _permit = permit;
-            task.await
-        });
-        tokio::select! {
-            biased;
-            _ = self.shutdown.cancelled() => Err(std::io::Error::other("网关正在退出")),
-            result = self.launches.send(task) => result.map_err(|_| std::io::Error::other("网关任务入口已关闭")),
-        }
+        self.reserve()?.launch(task).await
     }
 }
 
@@ -111,7 +133,7 @@ impl<I: GatewayIngress> Gateway<I> {
             launches,
         })
     }
-    /// 访问已组装的接入组件，如取得 PlayerIngress 的 session 查询句柄。
+    /// 访问已组装的接入组件，如取得 Ingress 的 session 查询句柄。
     pub fn ingress(&self) -> &I {
         &self.ingress
     }
@@ -125,7 +147,7 @@ impl<I: GatewayIngress> Gateway<I> {
     where
         T: GatewayTransport<Connection = I::Connection>,
     {
-        let _stop = Stop(self.ingress.clone(), self.context.shutdown.clone());
+        let _stop = Stop(Arc::clone(&self.ingress), self.context.shutdown.clone());
         let capacity = Arc::new(Semaphore::new(self.config.max_connections));
         let mut connections = JoinSet::new();
         let mut tasks = JoinSet::new();
@@ -147,11 +169,11 @@ impl<I: GatewayIngress> Gateway<I> {
                 }
                 accepted = transport.accept() => {
                     let connection = match accepted { Ok(connection) => connection, Err(error) => break Err(error) };
-                    let permit = match capacity.clone().try_acquire_owned() {
+                    let permit = match Arc::clone(&capacity).try_acquire_owned() {
                         Ok(permit) => permit,
                         Err(_) => { metrics::counter!("tok_gateway_connections_rejected_total").increment(1); drop(connection); continue; }
                     };
-                    let ingress = self.ingress.clone();
+                    let ingress = Arc::clone(&self.ingress);
                     let signal = self.context.shutdown.child_token();
                     connections.spawn(async move {
                         let _permit = permit;

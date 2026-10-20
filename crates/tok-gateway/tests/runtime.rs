@@ -15,6 +15,10 @@ struct Connection {
 }
 impl Drop for Connection {
     fn drop(&mut self) {
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "析构清理通知的接收方允许已退出，不能在 Drop 中再次失败。"
+        )]
         let _ = self.dropped.send(self.id);
     }
 }
@@ -54,7 +58,7 @@ impl GatewayIngress for Ingress {
         self.stopped.fetch_add(1, Ordering::SeqCst);
     }
     fn finish(&self) -> GatewayTask {
-        let finished = self.finished.clone();
+        let finished = Arc::clone(&self.finished);
         Box::pin(async move {
             finished.store(true, Ordering::SeqCst);
             Ok(())
@@ -89,8 +93,8 @@ impl Fixture {
                 context = Some(runtime);
                 Ok(Ingress {
                     started,
-                    stopped: stopped.clone(),
-                    finished: finished.clone(),
+                    stopped: Arc::clone(&stopped),
+                    finished: Arc::clone(&finished),
                 })
             },
         )
@@ -162,6 +166,10 @@ async fn custom_ingress_uses_runtime_capacity_and_clean_shutdown() {
     fixture
         .context
         .launch(Box::pin(async move {
+            #[expect(
+                clippy::let_underscore_must_use,
+                reason = "监督任务可能先被取消，启动确认接收方允许已经退出。"
+            )]
             let _ = began.send(());
             signal.cancelled().await;
             Ok(())
@@ -222,11 +230,15 @@ async fn dropping_runtime_future_cancels_ingress_and_background_tasks() {
         }
     }
     let dropped = Arc::new(AtomicBool::new(false));
-    let guard = Dropped(dropped.clone());
+    let guard = Dropped(Arc::clone(&dropped));
     fixture
         .context
         .launch(Box::pin(async move {
             let _guard = guard;
+            #[expect(
+                clippy::let_underscore_must_use,
+                reason = "退出竞争测试允许等待方先退出，任务守卫负责后续清理。"
+            )]
             let _ = started.send(());
             std::future::pending::<()>().await;
             Ok(())

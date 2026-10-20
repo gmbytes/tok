@@ -1,9 +1,7 @@
 //! 会话通信通道：连接绑定、请求准入、下行发布、确认缓存及断线恢复。
 
-use super::{
-    PlayerConfig,
-    replay::{ReplayBatch, ReplayCache},
-};
+use super::replay::{ReplayBatch, ReplayCache};
+use crate::player::Config;
 use crate::{
     ErrorCode, Result,
     codec::{FrameCodec, VERSION},
@@ -32,18 +30,20 @@ pub(crate) type OutboundSender = mpsc::Sender<Outbound>;
 
 #[derive(Clone)]
 // 一次连接绑定的代次和取消令牌；不是纯数值 ID，也不是恢复凭证。
-pub(super) struct ConnectionBinding {
+pub(super) struct Binding {
     generation: u64,
     pub(super) cancellation: CancellationToken,
 }
 
 struct AttachedConnection {
-    binding: ConnectionBinding,
+    binding: Binding,
     outbound_sender: OutboundSender,
     replaying: bool,
 }
 
-struct State {
+// 需要在同一锁下协调的通道可变状态，不包含固定配置及自身支持并发访问的同步工具。
+struct ChannelState {
+    handoff: bool,
     logged_in: bool,
     closed: bool,
     generation: u64,
@@ -54,21 +54,136 @@ struct State {
 }
 
 // 管理逻辑 session 与可替换连接之间的通信状态，不执行业务或调度业务 timer。
-pub(super) struct SessionChannel {
+pub(super) struct Channel {
     max_frame_size: usize,
     disconnect_grace: Duration,
     session_cancel: CancellationToken,
     binding_changed: Notify,
-    state: Mutex<State>,
+    state: Mutex<ChannelState>,
 }
 
-impl SessionChannel {
+impl Channel {
+    pub(super) fn check_resume_position(&self, ack: u64) -> Result<()> {
+        let mut state = self.state.lock().map_err(|_| ErrorCode::Internal)?;
+        if state.closed || state.handoff {
+            return Err(ErrorCode::ResumeUnavailable.into());
+        }
+        if ack > state.replay_cache.last_published_seq() {
+            return Err(ErrorCode::InvalidRequest.into());
+        }
+        state
+            .replay_cache
+            .replay_after(ack)
+            .ok_or(ErrorCode::ResumeUnavailable)?;
+        Ok(())
+    }
+    pub(super) fn admit_internal<T>(&self, enqueue: impl FnOnce() -> Result<T>) -> Result<T> {
+        let state = self.state.lock().map_err(|_| ErrorCode::Internal)?;
+        if state.closed {
+            return Err(ErrorCode::SessionClosed.into());
+        }
+        if !state.logged_in || state.handoff {
+            return Err(ErrorCode::InvalidState.into());
+        }
+        enqueue()
+    }
+    pub(super) fn begin_handoff(&self) -> Result<()> {
+        let mut state = self.state.lock().map_err(|_| ErrorCode::Internal)?;
+        if state.closed
+            || !state.logged_in
+            || state.handoff
+            || state
+                .grace_deadline
+                .is_some_and(|deadline| deadline <= Instant::now())
+        {
+            return Err(ErrorCode::ResumeUnavailable.into());
+        }
+        state.handoff = true;
+        self.detach_locked(&mut state);
+        if state.closed {
+            return Err(ErrorCode::ResumeUnavailable.into());
+        }
+        Ok(())
+    }
+    pub(super) fn cancel_handoff(&self) -> Result<()> {
+        let mut state = self.state.lock().map_err(|_| ErrorCode::Internal)?;
+        if state.closed
+            || state
+                .grace_deadline
+                .is_some_and(|deadline| deadline <= Instant::now())
+        {
+            return Err(ErrorCode::ResumeUnavailable.into());
+        }
+        state.handoff = false;
+        Ok(())
+    }
+    pub(super) fn snapshot(
+        &self,
+        ack: u64,
+    ) -> Result<tok_rpc::protocol::internal::v1::ChannelSnapshot> {
+        let mut state = self.state.lock().map_err(|_| ErrorCode::Internal)?;
+        if state.closed || !state.handoff {
+            return Err(ErrorCode::ResumeUnavailable.into());
+        }
+        if state.replay_cache.replay_after(ack).is_none() {
+            return Err(ErrorCode::ResumeUnavailable.into());
+        }
+        let mut snapshot = state.replay_cache.snapshot();
+        snapshot.last_request_id = state.last_request_id;
+        snapshot.grace_remaining_ms = state
+            .grace_deadline
+            .map(|deadline| {
+                deadline
+                    .saturating_duration_since(Instant::now())
+                    .as_millis() as u64
+            })
+            .unwrap_or(0);
+        if snapshot.grace_remaining_ms == 0 {
+            return Err(ErrorCode::ResumeUnavailable.into());
+        }
+        Ok(snapshot)
+    }
+    pub(super) fn restore(
+        snapshot: &tok_rpc::protocol::internal::v1::ChannelSnapshot,
+        elapsed: Duration,
+        config: &Config,
+        cancel: CancellationToken,
+        sender: OutboundSender,
+    ) -> Result<Self> {
+        let cache = ReplayCache::restore(config, snapshot, elapsed)?;
+        for entry in &snapshot.entries {
+            let frame =
+                Frame::decode(entry.body.as_slice()).map_err(|_| ErrorCode::ResumeUnavailable)?;
+            let seq = match frame.content {
+                Some(Content::Response(response)) => response.server_seq,
+                Some(Content::Notify(notify)) => notify.server_seq,
+                _ => return Err(ErrorCode::ResumeUnavailable.into()),
+            };
+            if frame.version != VERSION || seq != entry.seq {
+                return Err(ErrorCode::ResumeUnavailable.into());
+            }
+        }
+        let grace = Duration::from_millis(snapshot.grace_remaining_ms).saturating_sub(elapsed);
+        if grace.is_zero() {
+            return Err(ErrorCode::ResumeUnavailable.into());
+        }
+        let channel = Self::new(sender, config, cancel);
+        {
+            let mut state = channel.state.lock().map_err(|_| ErrorCode::Internal)?;
+            state.logged_in = true;
+            state.connection = None;
+            state.last_request_id = snapshot.last_request_id;
+            state.replay_cache = cache;
+            state.grace_deadline = Some(Instant::now() + grace);
+        }
+        Ok(channel)
+    }
     pub(super) fn new(
         outbound_sender: OutboundSender,
-        config: &PlayerConfig,
+        config: &Config,
         session_cancel: CancellationToken,
     ) -> Self {
-        let binding = ConnectionBinding {
+        let binding = Binding {
             generation: 1,
             cancellation: session_cancel.child_token(),
         };
@@ -77,7 +192,8 @@ impl SessionChannel {
             disconnect_grace: Duration::from_millis(config.disconnect_grace_ms),
             session_cancel,
             binding_changed: Notify::new(),
-            state: Mutex::new(State {
+            state: Mutex::new(ChannelState {
+                handoff: false,
                 logged_in: false,
                 closed: false,
                 generation: 1,
@@ -94,8 +210,8 @@ impl SessionChannel {
     }
 
     fn require_current_binding<'a>(
-        state: &'a State,
-        binding: &ConnectionBinding,
+        state: &'a ChannelState,
+        binding: &Binding,
     ) -> Result<&'a AttachedConnection> {
         if state.closed {
             return Err(ErrorCode::SessionClosed.into());
@@ -111,7 +227,7 @@ impl SessionChannel {
         Ok(connection)
     }
 
-    pub(super) fn complete_login(&self, login: Frame) -> Result<ConnectionBinding> {
+    pub(super) fn complete_login(&self, login: Frame) -> Result<Binding> {
         let mut state = self.state.lock().map_err(|_| ErrorCode::Internal)?;
         if state.closed || state.logged_in {
             return Err(ErrorCode::SessionClosed.into());
@@ -130,24 +246,37 @@ impl SessionChannel {
         Ok(binding)
     }
 
-    pub(super) fn ensure_logged_in(&self) -> Result<()> {
+    // 校验绑定并在同一锁内生成、入队控制回应，旧连接或交接/补发期间不能签发凭证。
+    pub(super) fn send_bound_frame(
+        &self,
+        binding: &Binding,
+        build: impl FnOnce() -> Result<Frame>,
+    ) -> Result<()> {
         let state = self.state.lock().map_err(|_| ErrorCode::Internal)?;
-        if state.closed {
-            Err(ErrorCode::SessionClosed.into())
-        } else if !state.logged_in {
-            Err(ErrorCode::InvalidState.into())
-        } else {
-            Ok(())
+        let connection = Self::require_current_binding(&state, binding)?;
+        if !state.logged_in || state.handoff || connection.replaying {
+            return Err(ErrorCode::InvalidState.into());
         }
+        let frame = build()?;
+        if frame.encoded_len() > self.max_frame_size {
+            return Err(ErrorCode::FrameTooLarge.into());
+        }
+        connection
+            .outbound_sender
+            .try_send(Outbound::Frame(frame, None))
+            .map_err(|_| ErrorCode::SessionClosed.into())
     }
 
     pub(super) fn admit_request<T>(
         &self,
-        binding: &ConnectionBinding,
+        binding: &Binding,
         request_id: u64,
         enqueue: impl FnOnce() -> Result<T>,
     ) -> Result<T> {
         let mut state = self.state.lock().map_err(|_| ErrorCode::Internal)?;
+        if state.handoff {
+            return Err(ErrorCode::InvalidState.into());
+        }
         if Self::require_current_binding(&state, binding)?.replaying {
             return Err(ErrorCode::InvalidState.into());
         }
@@ -174,11 +303,14 @@ impl SessionChannel {
     // Some(binding) 校验消息来源仍为当前连接；None 用于 session 内部完成的回应或通知。
     pub(super) fn publish_from(
         &self,
-        binding: Option<&ConnectionBinding>,
+        binding: Option<&Binding>,
         mut message: LogicalMessage,
         request_message_id: u32,
     ) -> Result<()> {
         let mut state = self.state.lock().map_err(|_| ErrorCode::Internal)?;
+        if state.handoff && message.kind == MessageKind::Notify {
+            return Err(ErrorCode::InvalidState.into());
+        }
         if let Some(binding) = binding {
             Self::require_current_binding(&state, binding)?;
             state.last_request_id = state.last_request_id.max(message.request_id);
@@ -204,7 +336,7 @@ impl SessionChannel {
             }
         }
         let body: Arc<[u8]> = frame.encode_to_vec().into();
-        state.replay_cache.push(seq, body.clone());
+        state.replay_cache.push(seq, Arc::clone(&body));
         if let Some(connection) = &state.connection
             && !connection.replaying
             && connection
@@ -220,7 +352,7 @@ impl SessionChannel {
         Ok(())
     }
 
-    pub(super) fn acknowledge(&self, binding: &ConnectionBinding, seq: u64) -> Result<()> {
+    pub(super) fn acknowledge(&self, binding: &Binding, seq: u64) -> Result<()> {
         let mut state = self.state.lock().map_err(|_| ErrorCode::Internal)?;
         Self::require_current_binding(&state, binding)?;
         state.replay_cache.acknowledge(seq)
@@ -239,9 +371,10 @@ impl SessionChannel {
         outbound_sender: OutboundSender,
         ack: u64,
         mut response: protocol::ResumeResponse,
-    ) -> Result<ConnectionBinding> {
+    ) -> Result<Binding> {
         let mut state = self.state.lock().map_err(|_| ErrorCode::Internal)?;
         if state.closed
+            || state.handoff
             || !state.logged_in
             || state
                 .grace_deadline
@@ -268,7 +401,7 @@ impl SessionChannel {
         if let Some(old) = state.connection.take() {
             old.binding.cancellation.cancel();
         }
-        let binding = ConnectionBinding {
+        let binding = Binding {
             generation,
             cancellation: self.session_cancel.child_token(),
         };
@@ -281,7 +414,7 @@ impl SessionChannel {
         });
         if outbound_sender
             .try_send(Outbound::Replay(ReplayPlan {
-                channel: self.clone(),
+                channel: Arc::clone(self),
                 binding: binding.clone(),
                 response,
                 batch,
@@ -295,7 +428,7 @@ impl SessionChannel {
         Ok(binding)
     }
 
-    fn next_replay_batch(&self, binding: &ConnectionBinding, cursor: u64) -> Result<ReplayBatch> {
+    fn next_replay_batch(&self, binding: &Binding, cursor: u64) -> Result<ReplayBatch> {
         let mut state = self.state.lock().map_err(|_| ErrorCode::Internal)?;
         Self::require_current_binding(&state, binding)?;
         let batch = state
@@ -313,7 +446,7 @@ impl SessionChannel {
         Ok(batch)
     }
 
-    fn detach_locked(&self, state: &mut State) {
+    fn detach_locked(&self, state: &mut ChannelState) {
         if let Some(connection) = state.connection.take() {
             connection.binding.cancellation.cancel();
             state.grace_deadline = Some(Instant::now() + self.disconnect_grace);
@@ -324,7 +457,7 @@ impl SessionChannel {
         }
     }
 
-    pub(super) fn detach(&self, binding: &ConnectionBinding) {
+    pub(super) fn detach(&self, binding: &Binding) {
         if let Ok(mut state) = self.state.lock()
             && Self::require_current_binding(&state, binding).is_ok()
         {
@@ -333,7 +466,7 @@ impl SessionChannel {
     }
 
     // 协议错误终止整个逻辑会话；旧连接不能通过此入口关闭已重绑定的会话。
-    pub(super) fn close_bound_session(&self, binding: &ConnectionBinding) {
+    pub(super) fn close_bound_session(&self, binding: &Binding) {
         if let Ok(mut state) = self.state.lock()
             && Self::require_current_binding(&state, binding).is_ok()
         {
@@ -341,7 +474,7 @@ impl SessionChannel {
         }
     }
 
-    fn close_locked(&self, state: &mut State) {
+    fn close_locked(&self, state: &mut ChannelState) {
         state.closed = true;
         if let Some(connection) = state.connection.take() {
             connection.binding.cancellation.cancel();
@@ -383,8 +516,8 @@ impl SessionChannel {
 
 // 写循环执行的恢复回应、连续补发和完成标记计划，不是整个 session 恢复状态机。
 pub(crate) struct ReplayPlan {
-    channel: Arc<SessionChannel>,
-    binding: ConnectionBinding,
+    channel: Arc<Channel>,
+    binding: Binding,
     response: protocol::ResumeResponse,
     batch: ReplayBatch,
 }

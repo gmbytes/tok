@@ -46,6 +46,27 @@ pub fn application(config: AppConfig) -> Result<Application, Error> {
             )?)
         }
     };
+    let gateway_rpc =
+        tok::gateway::rpc::GatewayRpcService::new(config.player_gateway.max_handoff_bytes)?;
+    let tokens: Arc<dyn tok::core::credentials::ResumeTokenCodec> =
+        Arc::new(match config.resume_token.clone() {
+            Some(keys) => tok::gateway::player::resume_token::SignedResumeTokens::new(keys)?,
+            None => tok::gateway::player::resume_token::SignedResumeTokens::ephemeral()?,
+        });
+    if config.player_gateway.handoff_enabled
+        && !config.services.iter().any(|service| {
+            service.service_name == config.player_gateway.gateway_rpc_service_name
+                && service.factory_name() == "gateway-rpc"
+                && config.endpoints.iter().any(|endpoint| {
+                    endpoint.name == service.endpoint && endpoint.protocol == "grpc"
+                })
+        })
+    {
+        return Err(tok::core::Error::InvalidConfig(
+            "跨网关交接需要配置内部 gateway-rpc 服务".into(),
+        )
+        .into());
+    }
     for service in &config.services {
         let endpoint = config
             .endpoints
@@ -73,7 +94,7 @@ pub fn application(config: AppConfig) -> Result<Application, Error> {
             "scene-ingress" => {
                 return Err(tok::core::Error::NotImplemented("Scene 网关接入组件").into());
             }
-            "player" | "guild" => {
+            "player" | "guild" | "gateway-rpc" => {
                 if endpoint.protocol != "grpc" {
                     return Err(tok::core::Error::InvalidConfig(
                         "示例业务组件要求 grpc 端点".into(),
@@ -91,10 +112,13 @@ pub fn application(config: AppConfig) -> Result<Application, Error> {
     }
     app.register_factory(
         "player-ingress",
-        gateway::PlayerIngressFactory::new(config.player_gateway.clone(), ownership),
+        gateway::PlayerIngressFactory::new(config.player_gateway.clone(), ownership)
+            .with_resume_token_codec(tokens)
+            .with_gateway_rpc(gateway_rpc.clone()),
     )?;
     app.register_factory("player", LifecycleService)?;
     app.register_factory("guild", LifecycleService)?;
+    app.register_factory("gateway-rpc", LifecycleService)?;
     let state = Arc::new(player::State::new(config.player_gateway.max_sessions)?);
     for endpoint in &config.endpoints {
         if endpoint.protocol != "grpc" {
@@ -108,12 +132,18 @@ pub fn application(config: AppConfig) -> Result<Application, Error> {
             .filter(|service| service.endpoint == endpoint.name)
         {
             rpc = match service.factory_name() {
+                "gateway-rpc" => {
+                    rpc.add_service(&service.service_name, gateway_rpc.clone().into_rpc())?
+                }
                 "player" => rpc.add_service(
                     &service.service_name,
                     RpcService::new(
                         &config.node_id,
                         &service.service_name,
-                        Arc::new(player::handlers(state.clone(), app.service_directory())?),
+                        Arc::new(player::handlers(
+                            Arc::clone(&state),
+                            app.service_directory(),
+                        )?),
                     )?
                     .into_player(),
                 )?,
