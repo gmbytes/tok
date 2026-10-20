@@ -130,6 +130,7 @@ impl Fixture {
             pipeline: crate::player::pipeline::test_pipeline(),
             execution_budget: std::time::Duration::from_millis(Config::default().rpc_timeout_ms),
             downlink_gate: tokio::sync::Mutex::new(()),
+            topic_gate: tokio::sync::Mutex::new(()),
             timers: Arc::new(timer::Scheduler::new(128, 1048576)),
             initial_execution: None,
             ownership: lease,

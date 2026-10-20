@@ -13,7 +13,7 @@ use crate::{
 };
 use prost::Message;
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     sync::{Arc, Mutex, OnceLock},
     time::Duration,
 };
@@ -56,6 +56,9 @@ struct AttachedConnection {
 struct ChannelState {
     changes: Vec<super::extension::Change>,
     topics: BTreeSet<String>,
+    topic_interests: BTreeMap<String, Vec<tok_events::interest::Lease>>,
+    pending_topics: BTreeMap<String, (u64, CancellationToken)>,
+    topic_revision: u64,
     handoff: bool,
     logged_in: bool,
     closed: bool,
@@ -66,10 +69,18 @@ struct ChannelState {
     replay_cache: ReplayCache,
 }
 
+pub(super) struct TopicJoin {
+    pub(super) version: u64,
+    generation: u64,
+    pub(super) cancel: CancellationToken,
+    pub(super) binding: CancellationToken,
+}
+
 // 管理逻辑 session 与可替换连接之间的通信状态，不执行业务或调度业务 timer。
 pub(super) struct Channel {
     max_frame_size: usize,
     max_topics: usize,
+    topic_operations: tokio::sync::Semaphore,
     disconnect_grace: Duration,
     session_cancel: CancellationToken,
     binding_changed: Notify,
@@ -187,32 +198,131 @@ impl Channel {
         }
         Ok(())
     }
-    pub(super) fn change_topic(&self, name: &str, join: bool) -> Result<()> {
-        if name.trim().is_empty() || name.len() > 256 {
-            return Err(ErrorCode::InvalidRequest.into());
-        }
+    pub(super) fn reserve_topic_operation(&self) -> Result<tokio::sync::SemaphorePermit<'_>> {
+        self.topic_operations
+            .try_acquire()
+            .map_err(|_| ErrorCode::CapacityExceeded.into())
+    }
+    pub(super) fn begin_topic(&self, name: &str) -> Result<Option<TopicJoin>> {
+        tok_events::Topic::named(name).map_err(|_| ErrorCode::InvalidRequest)?;
         let mut state = self.state.lock().map_err(|_| ErrorCode::Internal)?;
         if state.closed {
             return Err(ErrorCode::SessionClosed.into());
         }
-        if !state.logged_in || state.handoff {
+        if state.handoff {
             return Err(ErrorCode::InvalidState.into());
         }
-        if join {
-            if !state.topics.contains(name) && state.topics.len() >= self.max_topics {
-                return Err(ErrorCode::CapacityExceeded.into());
+        if state.topics.contains(name) {
+            if state
+                .topic_interests
+                .get(name)
+                .is_some_and(|leases| leases.iter().any(|lease| !lease.is_ready()))
+            {
+                return Err(ErrorCode::Unavailable.into());
             }
-            if let Some(topic_membership) = self.topic_membership.get() {
-                topic_membership.join(name)?;
-            }
-            state.topics.insert(name.into());
-        } else {
-            if let Some(topic_membership) = self.topic_membership.get() {
-                topic_membership.leave(name)?;
-            }
-            state.topics.remove(name);
+            return Ok(None);
+        }
+        if state.topics.len() + state.pending_topics.len() >= self.max_topics {
+            return Err(ErrorCode::CapacityExceeded.into());
+        }
+        state.topic_revision = state
+            .topic_revision
+            .checked_add(1)
+            .ok_or(ErrorCode::Internal)?;
+        let version = state.topic_revision;
+        let cancel = self.session_cancel.child_token();
+        state
+            .pending_topics
+            .insert(name.into(), (version, cancel.clone()));
+        Ok(Some(TopicJoin {
+            version,
+            generation: state.generation,
+            cancel,
+            binding: state
+                .connection
+                .as_ref()
+                .map(|connection| connection.binding.cancellation.clone())
+                .unwrap_or_else(|| self.session_cancel.child_token()),
+        }))
+    }
+    pub(super) fn abort_topic(&self, name: &str, version: u64) {
+        if let Ok(mut state) = self.state.lock()
+            && state
+                .pending_topics
+                .get(name)
+                .is_some_and(|(current, _)| *current == version)
+            && let Some((_, cancel)) = state.pending_topics.remove(name)
+        {
+            cancel.cancel();
+        }
+    }
+    pub(super) fn activate_topic(
+        &self,
+        name: &str,
+        ticket: &TopicJoin,
+        leases: Vec<tok_events::interest::Lease>,
+    ) -> Result<()> {
+        let mut state = self.state.lock().map_err(|_| ErrorCode::Internal)?;
+        if state.closed || self.session_cancel.is_cancelled() {
+            return Err(ErrorCode::SessionClosed.into());
+        }
+        if state.handoff
+            || state.generation != ticket.generation
+            || ticket.binding.is_cancelled()
+            || !state
+                .pending_topics
+                .get(name)
+                .is_some_and(|(version, _)| *version == ticket.version)
+        {
+            return Err(ErrorCode::InvalidState.into());
+        }
+        if let Some(membership) = self.topic_membership.get() {
+            membership.join(name)?;
+        }
+        state.pending_topics.remove(name);
+        state.topic_interests.insert(name.into(), leases);
+        state.topics.insert(name.into());
+        Ok(())
+    }
+    pub(super) fn check_interests(&self) -> Result<()> {
+        let state = self.state.lock().map_err(|_| ErrorCode::Internal)?;
+        if state
+            .topic_interests
+            .values()
+            .flatten()
+            .any(|lease| !lease.is_ready())
+        {
+            return Err(ErrorCode::Unavailable.into());
         }
         Ok(())
+    }
+    pub(super) fn install_interests(
+        &self,
+        interests: BTreeMap<String, Vec<tok_events::interest::Lease>>,
+    ) -> Result<()> {
+        self.state
+            .lock()
+            .map_err(|_| ErrorCode::Internal)?
+            .topic_interests = interests;
+        Ok(())
+    }
+    pub(super) fn remove_topic(&self, name: &str) -> Result<Vec<tok_events::interest::Lease>> {
+        tok_events::Topic::named(name).map_err(|_| ErrorCode::InvalidRequest)?;
+        let mut state = self.state.lock().map_err(|_| ErrorCode::Internal)?;
+        if state.closed {
+            return Err(ErrorCode::SessionClosed.into());
+        }
+        if state.handoff {
+            return Err(ErrorCode::InvalidState.into());
+        }
+        if let Some(membership) = self.topic_membership.get() {
+            membership.leave(name)?;
+        }
+        state.topics.remove(name);
+        if let Some((_, cancel)) = state.pending_topics.remove(name) {
+            cancel.cancel();
+        }
+        Ok(state.topic_interests.remove(name).unwrap_or_default())
     }
     pub(super) fn admit_event<T>(
         &self,
@@ -324,7 +434,7 @@ impl Channel {
             || snapshot
                 .topics
                 .iter()
-                .any(|name| name.trim().is_empty() || name.len() > 256)
+                .any(|name| tok_events::Topic::named(name).is_err())
             || snapshot.topics.iter().collect::<BTreeSet<_>>().len() != snapshot.topics.len()
         {
             return Err(ErrorCode::ResumeUnavailable.into());
@@ -369,6 +479,7 @@ impl Channel {
         Self {
             max_frame_size: config.max_frame_size,
             max_topics: config.max_topics,
+            topic_operations: tokio::sync::Semaphore::new(config.max_topics),
             disconnect_grace: Duration::from_millis(config.disconnect_grace_ms),
             session_cancel,
             binding_changed: Notify::new(),
@@ -377,6 +488,9 @@ impl Channel {
             state: Mutex::new(ChannelState {
                 changes: Vec::new(),
                 topics: BTreeSet::new(),
+                topic_interests: BTreeMap::new(),
+                pending_topics: BTreeMap::new(),
+                topic_revision: 0,
                 handoff: false,
                 logged_in: false,
                 closed: false,
@@ -714,6 +828,10 @@ impl Channel {
             topic_membership.clear(&state.topics);
         }
         state.topics.clear();
+        state.topic_interests.clear();
+        for (_, (_, cancel)) in std::mem::take(&mut state.pending_topics) {
+            cancel.cancel();
+        }
         if let Some(connection) = state.connection.take() {
             state.changes.push(super::extension::Change::Detached {
                 generation: connection.binding.generation(),

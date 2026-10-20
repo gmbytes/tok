@@ -1,26 +1,26 @@
 # 当前实现状态
 
-核对日期：2026-10-20。P1 基线为 `f54b545`，文档基线为 `2552274`；P2 已提交为 `c6ffdc3`，P3 已提交为 `368fc74`；P4 已提交为 `e8dda17`；P5 已完成传输 topic 路由，尚未提交。本页描述代码现状，目标设计见[总体设计](design.md)与[服务运行模型](service-runtime.md)，迁移顺序见[实施计划](implementation-plan.md)。
+核对日期：2026-10-20。P1 基线为 `f54b545`，文档基线为 `2552274`；P2 已提交为 `c6ffdc3`，P3 已提交为 `368fc74`；P4 已提交为 `e8dda17`；P5 已提交为 `bb015ad`；P6 已完成动态兴趣与主题策略，尚未提交。本页描述代码现状，目标设计见[总体设计](design.md)与[服务运行模型](service-runtime.md)，迁移顺序见[实施计划](implementation-plan.md)。
 
 ## 已实现与本轮缺口
 
 | 范围 | 当前能力与代码依据 | 方向校正仍需完成 |
 | --- | --- | --- |
 | 应用组装 | [应用组装](../crates/tok/src/application.rs) 使用下层 Factory / Builder，保留共享端点、Binding 扩展、发现注册和应用级期限 | P4 已扩充 gateway/session 生命周期，P7 收敛完整应用装配入口 |
-| 执行模型 | P1 提供 [execution::Context](../crates/tok-core/src/execution/context.rs) 与 [tok-service](../crates/tok-service/src/lib.rs) 类型化执行 Layer，RPC、事件及 RPC timer 路由已接入 | P4 已迁移 gateway/session 业务入口和扩展；动态兴趣仍待 P6 |
+| 执行模型 | P1 提供 [execution::Context](../crates/tok-core/src/execution/context.rs) 与 [tok-service](../crates/tok-service/src/lib.rs) 类型化执行 Layer，RPC、事件及 RPC timer 路由已接入 | P4 已迁移 gateway/session 业务入口和扩展；P6 已接通绑定组件的动态兴趣 |
 | RPC | [tok-rpc](../crates/tok-rpc/src/lib.rs) 提供共享端点、强类型分发、请求锁、追踪、无自动重试客户端 | 方法、事件与 timer 使用共同 Request / Layer；网关准入及新下行链已由 P4 接入 |
 | 本地事件 | [Registry](../crates/tok-events/src/registry.rs) 按类型及稳定名有序多处理者，本地可跨 await 借用状态，远程显式解码后执行同一链 | 完整服务装配便捷入口在 P7 收敛 |
-| NATS | [Bus](../crates/tok-events/src/nats.rs) 按 topic/事件类型订阅，组件选择 Exact / All 兴趣及 group，串行处理及容量/期限有界 | 固定兴趣已接通；会话动态兴趣待 P6 |
+| NATS | [Bus](../crates/tok-events/src/nats.rs) 按 topic/事件类型订阅，组件选择 Exact / All 兴趣及 group，串行处理及容量/期限有界 | 固定与会话兴趣经 Pool 共享引用，任务复用通用监督 |
 | gateway | [Gateway](../crates/tok-gateway/src/server.rs) 复用通用 Supervisor 管理后台任务，连接使用独立容量并纳入结束等待，Ingress 提供认证和 session 管理 | P4 已提供完整网关范围句柄、快照与状态扩展，消息 Layer 使用通用执行协议 |
 | session | 串行请求、timer 与内部事件，完整身份、所有权续租、下行序列、ACK 缓存、恢复与交接 | P4 已接入共同上下文和处理链、生命周期回调及显式扩展快照；保留现有协议边界 |
-| topic | [主题索引](../crates/tok-gateway/src/player/session/subscriptions.rs) 按本地会话成员筛选，支持加入/退出及交接恢复 | P5 已提供 NATS topic 路由，尚无成员引用合并订阅、聊天/区服自动订阅策略 |
+| topic | [主题索引](../crates/tok-gateway/src/player/session/subscriptions.rs) 筛选本地成员，[兴趣协调](../crates/tok-events/src/interest.rs) 聚合固定及会话引用，支持异步加入/退出与交接 | P6 已提供组件绑定、异步成员变更及可信初始主题；按在线状态释放兴趣的可选优化未提供 |
 | 发现与协调 | Memory / Redis 发现、session 所有权及请求级锁；路由读取本地目录 | 本轮沿用既有语义；Redis Cluster 客户端仍待实现 |
 | 可观测 | tracing、动态过滤、Prometheus、OTLP、RPC/NATS 追踪传播 | 在统一执行入口复用现有设施，维持有限指标标签 |
 | 工程 | 九个框架 crate（含 P1 新增 tok-service）、demo、TOML、protobuf 构建期生成、rustdoc、just、Windows/Linux CI、LF 检查 | 持续验证迁移，不先增加没有实现用途的 crate 或配置 |
 
 ## 容易混淆的现状
 
-当前 NATS subject 是 `tok.events.<namespace>.<topic-token>.<event_type>`，topic-token 由适配器安全编码。Event::topic 默认全局，可固定或根据事件字段派生；Envelope 自动取得并校验主题。Subscriber 显式选择 Exact 或 All 兴趣及可选 group，没有默认按 player_id 建立订阅。demo 各网关独立订阅固定 `realm:demo`；当前 Target::Topic、join_topic / leave_topic 仍仅维护本地成员，不自动改变 NATS 订阅，动态聚合属于 P6。
+当前 NATS subject 是 `tok.events.<namespace>.<topic-token>.<event_type>`，topic-token 由适配器安全编码。Event::topic 默认全局，可固定或根据事件字段派生；Envelope 自动取得并校验主题。Subscriber 显式选择 Exact 或 All 兴趣及可选 group，没有默认按 player_id 建立订阅。demo 各网关根据可信初始策略加入 `realm:demo`，Pool 按组件及主题聚合订阅；join_topic / leave_topic 是有界异步操作。只对显式绑定的组件建立传输兴趣，未绑定的本地成员操作不自动订阅。
 
 Envelope<E> 是强类型事件封装，Message 是带编码正文的运行时表示，EventEnvelope 是 protobuf 网络封装。本地 dispatch 接收带执行上下文的 Envelope 借用，远程解码后进入同一处理表。
 
@@ -46,7 +46,7 @@ Memory 只用于单进程协调；多进程可选择 Redis。租约与 RPC 的�
 
 P1 上下文边界校正：移除通用 `target`；`operation` 明确为服务内稳定入口标识，`service` 只标识当前执行服务。实体身份按需通过类型化输入/扩展提供；路由输入、选定端点及熔断状态分离，契约见[服务运行模型](service-runtime.md#操作身份路由与熔断边界)。通用路由器和熔断器尚未实施，不引入通用路由器或熔断器。
 
-P1 执行原型已经提供，不代表全部运行模型统一。P2 命名已收敛为 application 应用组装、lifecycle::Builder 服务构建、Init 初始化参数和 Gateway::tasks 通用句柄；通用工厂与任务生命周期已区分 task 任务范围和 lifecycle 消费式服务编排；P3 已接通 RPC/事件/timer 共同执行链，gateway 扩展已由 P4 完成，P5 已完成传输路由，动态订阅和完整组装属于 P6/P7 的工作。JetStream、离线玩家加载、跨节点去重辅助、通用玩家归属中继、Kubernetes 发现与部署、生产安全、Redis Cluster 和 Scene 接入属于后续范围。配置可校验或模块已预留不等于后端可运行。
+P1 执行原型已经提供，不代表全部运行模型统一。P2 命名已收敛为 application 应用组装、lifecycle::Builder 服务构建、Init 初始化参数和 Gateway::tasks 通用句柄；通用工厂与任务生命周期已区分 task 任务范围和 lifecycle 消费式服务编排；P3 已接通 RPC/事件/timer 共同执行链，gateway 扩展已由 P4 完成，P5 已完成传输路由，P6 已完成动态订阅，完整组装与整体清理验收属于 P7。JetStream、离线玩家加载、跨节点去重辅助、通用玩家归属中继、Kubernetes 发现与部署、生产安全、Redis Cluster 和 Scene 接入属于后续范围。配置可校验或模块已预留不等于后端可运行。
 
 ## 验证记录与复现
 
@@ -84,4 +84,12 @@ P4 已提交为 `e8dda17`。未运行 release 构建或 Linux 本地验证。下
 
 真实 NATS 14 项专项通过（tok-events 13 项及双网关 1 项），覆盖固定/所有主题兴趣、环境和类型隔离、同组分担与跨组独立，以及 subject/正文主题或类型伪造。events-smoke、rpc-smoke、client-smoke、nats-smoke 通过。全目标 Clippy、workspace rustdoc、11 项指南文档测试、格式、UTF-8/LF 和 81 处仓库内文档链接/锚点检查通过。
 
-以上为事件契约决定路由的 Topic API 验证；P5 尚未提交。本批未重复运行 Redis 专项、release 或 Linux 本地验证。动态会话兴趣、引用合并与自动主题策略仍留在 P6。
+以上为事件契约决定路由的 Topic API 验证；P5 已提交为 `bb015ad`。本批未重复运行 Redis 专项、release 或 Linux 本地验证。动态会话兴趣、引用合并与自动主题策略仍留在 P6。
+
+### P6 验收记录（2026-10-20 Windows）
+
+工作区 243 项测试通过（含 12 项指南示例及 2 项编译失败文档测试）。新增 7 项兴趣协调测试、3 项会话/策略测试、2 项交接测试与 1 项指南示例，覆盖并发建立共享、取消等待者、固定引用保留、容量/超时/失败回滚、旧订阅清理后再建立、后台故障上报、Pool 弱持有、等待加入时退出/重连、多个组件部分失败、宽限期与同网关恢复、登录前初始策略、目标就绪后才提交及失败取消。
+
+真实 NATS 15 项专项通过（通用事件 13 项、双网关 2 项），新增多人共享动态主题、跨网关独立接收、不同主题隔离、最后退出与固定兴趣保留；既有代理测试补充建立操作/探测 SID 容量和失败释放。真实 Redis 发现 2 项及发现双进程/共享所有权/三进程交接 3 项通过，共 20 项外部专项。events、execution、lifecycle、RPC、客户端和 NATS 六个 smoke 通过；最后的弱持有调整另通过完整工作区和相关 NATS 回归。
+
+全目标 Clippy、workspace rustdoc、格式、UTF-8/LF 和仓库内文档链接检查通过。示例已使用可信初始区服策略，指南演示聊天兴趣与独立固定引用。P6 尚未提交；下一批为 P7 完整迁移清理与汇总验收。未运行 release 构建或 Linux 本地验证，不将 Windows 结果替代 CI。在线成员为零时退订的可选优化未提供；当前保留宽限期与冻结期间的兴趣，不增加即时事件补收承诺。

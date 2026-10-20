@@ -11,7 +11,7 @@ tok 是实验性的 Rust 游戏服务器框架。游戏通过本 crate 组装组
 | 服务与处理链共同构建 | Factory / Supervisor 与 gateway 作用域能力已接通 | P1–P4 已实施，P7 汇总应用装配 |
 | 消息、事件、timer 共用上下文与 Layer | RPC 及 gateway 的准入、请求、事件、timer、新下行均使用共同协议 | P3/P4 已实施 |
 | 本地与远程共用事件接口 | 同一 Registry、Envelope 与类型化 Tower 链；解码器显式安装 | P3 已实施 |
-| topic 参与传输并动态聚合 | Topic / TopicFilter 参与 NATS 路由；join_topic / leave_topic 仍是本地成员操作 | P5 已实施，P6 动态兴趣待实施 |
+| topic 参与传输并动态聚合 | Topic / TopicFilter 路由，Pool 聚合所绑定组件的成员兴趣，异步 join/leave | P5/P6 已实施 |
 | 生命周期、查询和状态扩展 | gateway、管理器、会话快照与结束等待，显式状态工厂及交接适配 | P4 已实施 |
 
 下文示例保持可编译，不使用尚未提供的统一 Builder 或异步主题接口。实际迁移后再按对应批次替换示例；不靠兼容别名长期维护两套模型。
@@ -950,7 +950,7 @@ ID 限制为 1 到 128 个可打印 ASCII 非空白字节，追踪头每字段�
 
 ## Core NATS 即时事件
 
-本节介绍当前按 topic 和类型建立的固定兴趣订阅。P5 已接通传输路由，本地与远程注册表及 gateway/session 处理链沿用共同协议；会话成员驱动的动态聊天/区服订阅仍待 P6。
+本节介绍当前按 topic 和类型建立的固定兴趣订阅。P5 已接通传输路由，本地与远程注册表及 gateway/session 处理链沿用共同协议；P6 已提供按组件绑定的会话兴趣聚合，不按 player_id 自动订阅。
 
 任何服务都可以使用 [`events::nats::Bus::publish_event`] 发布，用 [`events::Registry`] 订阅自己关心的类型。
 目标由业务正文表达，订阅者自行解释；总线不要求 player、session 或 RPC。
@@ -1022,10 +1022,10 @@ Core NATS 拒绝 Persistent，不静默降级；JetStream、离线加载和去�
 
 ### 游戏自定义网关处理
 
-以下是当前闭包捕获句柄的组装方式；共同事件上下文和 gateway/session 处理链均已接通，会话动态兴趣聚合留在 P6，不代表仅捕获 SessionManager 已满足完整目标。
+共同事件上下文和 gateway/session 处理链已接通；固定订阅可直接组装，动态主题通过 interest::Pool 与所选组件绑定，处理者使用相同 Registry。
 
 [`events::Subscriber`] 将 Handler 与可选 group 组合为独立订阅组件；同一网关可安装多个组件，各自选择类型、消费组和处理行为。
-[`gateway::player::events::forward`] 提供基本的玩家转发处理者，游戏负责从强类型正文选择 Target，原始事件进入 session FIFO。
+[`gateway::player::events::forward`] 提供基本的玩家转发处理者，游戏从完整 Envelope 的 topic 或正文选择 Target，原始事件进入 session FIFO。
 [`gateway::player::events::notify`] 提供广播通知处理者，游戏负责选择 Target 和通知正文，并指定客户端消息 ID。
 这两个内置处理者返回 Registry，可交给 Subscriber 组装；自定义 Registry 或 Handler 使用同一抽象，没有固定的组件种类枚举。
 示例将玩家转发与通知分别组装为两个组件；None 只是该示例本地筛选方式的选择，不是网关限制。
@@ -1038,7 +1038,7 @@ Ingress 不依赖 NATS，也不限制只能安装一个事件消费任务；可�
 - `Action::Notify { message_id, body }`：显式转换为客户端协议通知，不执行 player；成功准入后沿 server_seq 进入补发缓存。
 - `Action::Forward(payload)`：服务器事件排入 session 原有 FIFO，与请求和 timer 串行；不产生客户端 Response。
 
-此处 topic 是游戏内用于筛选会话的订阅主题，例如 `guild:7`；NATS subject 按事件类型路由到订阅组件，两者不要求一一对应。内部 `channel::Channel` 则管理会话通信与连接，三者职责独立。
+此处 Target::Topic 是用于筛选本地会话的主题，例如 `guild:7`；NATS 按 Event::topic 和事件类型路由。通过 Pool 绑定后，成员主题驱动该组件的具体传输兴趣；业务仍显式决定如何映射投递目标。内部 `channel::Channel` 则管理会话通信与连接，三者职责独立。
 
 `Target` 支持 Players、Topic、All，仅筛选本地在线且未冻结、未恢复的会话，未知或离线玩家不拉起。
 这些目标和动作是网关本地 API，不是通用事件传输字段。通知正文可以和事件正文完全不同。
@@ -1058,7 +1058,7 @@ GatewayIngress、Handler、SessionManager 服务器 API、Executor 分别覆盖�
 客户端请求不能选择内部事件名称、广播动作、目标或 timer 来源。游戏可以让明确注册且完成业务校验的请求主动发布事件。
 内部 gRPC 和 NATS 的可信性依赖部署及认证，不能仅靠字段校验阻止持有内部凭据的调用者。
 
-可信服务器通过 SessionHandle::join_topic / leave_topic 管理成员，默认每会话 64 个，最多 1024 个，主题名最多 256 字节。
+可信服务器通过异步 SessionHandle::join_topic / leave_topic 管理成员，默认每会话 64 个，最多 1024 个，主题名最多 256 字节；等待中的加入也占用有界操作容量。
 同网关恢复保留，新登录重建，交接随版本 1 快照迁移；冻结期间拒绝修改，旧句柄不能影响新会话。
 没有客户端主题管理协议。客户端 Frame 仍为版本 3。
 
@@ -1073,14 +1073,15 @@ max_message_bytes = 1048576
 subscription_capacity = 64
 client_capacity = 128
 max_subscriptions = 32
+max_pending_subscriptions = 8
 max_buffer_bytes = 134217728
 handler_timeout_ms = 5000
 ```
 
-`max_message_bytes` 包含事件正文与追踪头，总上限 1 MiB。每个活动的类型订阅按 `subscription_capacity × max_message_bytes` 预留缓冲预算，
+`max_message_bytes` 包含事件正文与追踪头，总上限 1 MiB。每个活动的 topic/类型订阅按 `subscription_capacity × max_message_bytes` 预留缓冲预算，
 总额不得超过 max_buffer_bytes；同名类型的多个 group 分别占用。数量或预算不足在初始化时拒绝，退订/丢弃后释放。
 这是对配置范围内排队正文的保守预留，不是进程堆内存硬限额，不包含 SDK 元数据、在途解码和无效超大输入。
-max_subscriptions 限制总类型订阅数；client_capacity 控制命令缓冲与并发发布，handler_timeout_ms 约束当前 handler。
+max_subscriptions 限制实际 topic/类型订阅数，max_pending_subscriptions 限制建立操作和探测 SID；client_capacity 控制命令缓冲与并发发布，handler_timeout_ms 约束当前 handler。
 连接/发布的 operation_timeout_ms 与 handler 等待期限分别管理。
 配置校验不连接 NATS，URL 凭据不进入 Debug 或框架错误。坏包拒绝并记录，队列容量不足快速拒绝，不积压重试。
 W3C traceparent / tracestate 使用标准 NATS headers；发布、网关接收、session 排队和内部 RPC 保持关联，指标不使用玩家 ID 标签。
@@ -1088,6 +1089,61 @@ W3C traceparent / tracestate 使用标准 NATS headers；发布、网关接收�
 `just nats-test` 使用 TOK_TEST_NATS_URL（默认本机 4222）验证真实 NATS、独立网关、坏包、断线、过载、无回环发布和订阅就绪确认。
 `just nats-smoke` 使用 events.toml 真实登录客户端，发布 AddValue 后由游戏网关订阅者转发给 player；发布 ValueChanged 后由订阅者转换为 ValueNotice。
 示例通知 ID 在 proto 枚举中定义，内部 AddValue 没有客户端消息 ID；普通配置不启用 NATS，不依赖消息服务器。
+
+### 动态兴趣与可信初始主题
+
+`events::interest::Pool` 接收传输适配、组件模板和通用任务句柄，以组件名与具体 Topic 合并引用；每个组件保留自己的类型、group、身份和上下文。模板的主题在 acquire 时替换为 Exact，不先建立 All 订阅。同名组件中多个会话共享同一次建立与消费，不同组件不合并 handler。
+
+Pool 不创建自己的运行循环；调用方必须持续驱动所传任务范围。初始化期获取固定兴趣用 `Init.service.tasks()`，该范围由服务 Builder 在初始化期间驱动；不要等待尚未 serve 的 Gateway::tasks。后台消费异常向监督者上报，不隐藏重试。
+
+```rust,no_run
+use std::sync::Arc;
+use tok::{events::{self, Event, Topic, TopicFilter}, gateway::player::{Ingress, events::{Target, notify}}};
+
+#[derive(Clone, PartialEq, prost::Message)]
+struct ChatMessage {
+    #[prost(uint64, tag="1")]
+    channel_id: u64,
+    #[prost(bytes, tag="2")]
+    body: Vec<u8>,
+}
+impl Event for ChatMessage {
+    const NAME: &'static str = "chat.message.v1";
+    fn topic(&self) -> Result<Topic, events::Error> {
+        Topic::named(format!("chat:{}", self.channel_id))
+    }
+}
+# async fn assemble(init: &tok::service::lifecycle::Init, ingress: Ingress, bus: events::nats::Bus, chat_message_id: u32)
+# -> Result<(Ingress, events::interest::Lease), Box<dyn std::error::Error + Send + Sync>> {
+// 由可信游戏策略选择初始频道；生产可从已验证身份和状态计算。
+let ingress = ingress.with_topic_policy(|_request| Ok(vec!["chat:7".into()]));
+let sessions = ingress.sessions();
+let capabilities = sessions.extensions();
+let handlers = notify::<ChatMessage, _>(sessions, chat_message_id, |event| {
+    let topic = event.topic.as_str().ok_or(events::Error::InvalidInput("聊天缺少 topic"))?;
+    Ok((Target::Topic(topic.into()), event.payload.body.clone()))
+})?;
+let subscriber = events::Subscriber::new(init.identity.clone(), Arc::new(handlers),
+    TopicFilter::Exact(Topic::default()), None)?.with_extensions(capabilities);
+let pool = events::interest::Pool::new(Default::default(), Arc::new(bus),
+    init.service.tasks(), [("chat.notify".into(), subscriber)])?;
+// 固定兴趣是独立引用；即使没有会话成员也保留，服务退出时释放此 Lease。
+let fixed = pool.acquire("chat.notify", Topic::named("chat:0")?).await?;
+let ingress = ingress.with_topic_interests(pool, vec!["chat.notify".into()])?;
+# Ok((ingress, fixed))
+# }
+```
+
+固定兴趣和会话兴趣分别持有 Lease；最后一个引用释放后取消消费并有界清理，同一主题的后续获取等待旧订阅清理，避免重叠消费。Drop 撤销本引用，`release().await` 在自己是最后一个引用时等待退出。Pool 的 snapshot 可观察兴趣、引用和等待数；组件绑定和 Lease 都弱持有 Pool，避免经处理者、目录和会话成员形成引用环；Ingress 或服务组装层必须持有 Pool。
+
+`join_topic(...).await` 等待所有绑定组件就绪，然后重验 session、连接代次、冻结及成员状态再激活。中途退出、关闭、重连或部分组件失败，只撤销本次引用，不删除其他成员或固定兴趣。`leave_topic(...).await` 先让本地成员失效，再有界释放引用；超时不恢复成员。没有绑定组件时，成员操作仍然有效，但不建立传输订阅。
+
+新登录的 `with_topic_policy` 在已认证并取得会话身份后执行；返回有界主题列表，在开放登录前通过同一异步成员入口完成。策略必须短小且不阻塞；失败会关闭新会话并按原流程释放所有权，不返回成功登录。
+
+当前选择保留整个逻辑会话生命期内的成员和兴趣：临时断线的宽限期不退群，冻结也不释放源端兴趣；离线/冻结时仍由会话准入拒绝即时事件。恢复前核对保留兴趣就绪，业务数据不补收。交接目标在提交前准备快照中的兴趣，提交前不登记目标会话；取消释放目标预留，提交后源端关闭释放引用。只迁移主题名，不迁移 SID、引用计数或 future，不承诺冻结窗口无丢失。按在线成员释放兴趣的可选优化尚未提供。
+
+Pool 配置限制组件、活动/建立中/退出中的兴趣、等待操作及期限；公共任务范围限制排队与运行，不另设无界命令队列。NATS 另限制实际 topic/类型 SID、缓冲和同时建立操作；临时探测 SID 由 max_pending_subscriptions 限制，实际 SDK SID 上界为 max_subscriptions + max_pending_subscriptions。
+
 
 ## 统一 Gateway 与接入组件
 

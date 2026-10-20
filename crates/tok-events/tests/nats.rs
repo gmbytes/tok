@@ -938,6 +938,7 @@ async fn publishing_needs_no_reply_but_subscription_setup_requires_broker_readin
             url: format!("nats://{auth}127.0.0.1:{proxy_port}/{path}"),
             client_capacity: 1,
             operation_timeout_ms: 300,
+            max_pending_subscriptions: 1,
             ..config
         })
         .await
@@ -974,21 +975,42 @@ async fn publishing_needs_no_reply_but_subscription_setup_requires_broker_readin
         before,
         "发布不能创建临时回环订阅"
     );
-    // 同样的网络条件下，新订阅必须等待 broker 就绪确认，最终按预算失败。
-    assert!(matches!(
-        bus.subscribe(
-            tok_events::Subscriber::new(
-                tok_core::service::Identity {
-                    node_id: "test".into(),
-                    service_name: "events".into()
-                },
-                Arc::new(Capture::default()),
-                tok_events::TopicFilter::Exact(tok_events::Topic::default()),
-                None
-            )
-            .unwrap()
+    // 第一份建立等待 broker；探测 SID 也有容量，第二份不能继续创建探测。
+    let subscriber = || {
+        tok_events::Subscriber::new(
+            tok_core::service::Identity {
+                node_id: "test".into(),
+                service_name: "events".into(),
+            },
+            Arc::new(Capture::default()),
+            tok_events::TopicFilter::Exact(tok_events::Topic::default()),
+            None,
         )
-        .await,
+        .unwrap()
+    };
+    let opening = tokio::spawn({
+        let bus = Arc::clone(&bus);
+        let subscriber = subscriber();
+        async move { bus.subscribe(subscriber).await }
+    });
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while subscriptions.load(Ordering::SeqCst) == before {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(matches!(
+        bus.subscribe(subscriber()).await,
+        Err(tok_events::Error::CapacityExceeded)
+    ));
+    assert!(matches!(
+        opening.await.unwrap(),
+        Err(tok_events::Error::Unavailable("NATS 订阅超时"))
+    ));
+    // 建立失败释放本次探测名额，后续显式建立可进入就绪等待，而不是容量泄漏。
+    assert!(matches!(
+        bus.subscribe(subscriber()).await,
         Err(tok_events::Error::Unavailable("NATS 订阅超时"))
     ));
     // 订阅初始化失败不影响客户端继续接受发布，也不重发之前的事件。

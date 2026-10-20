@@ -148,6 +148,7 @@ impl Executor for TestExecutor {
 }
 
 struct Fixture {
+    interests: Option<tok_events::interest::Pool>,
     address: std::net::SocketAddr,
     token: CancellationToken,
     task: Option<JoinHandle<std::io::Result<()>>>,
@@ -171,6 +172,14 @@ impl Fixture {
         backend: impl FnOnce(Arc<MemoryOwnership>) -> Arc<dyn OwnershipStore>,
         events: Option<&tok_events::nats::Bus>,
     ) -> Self {
+        Self::with_dynamic_events(config, backend, events, false).await
+    }
+    async fn with_dynamic_events(
+        config: Config,
+        backend: impl FnOnce(Arc<MemoryOwnership>) -> Arc<dyn OwnershipStore>,
+        events: Option<&tok_events::nats::Bus>,
+        dynamic: bool,
+    ) -> Self {
         let (started, receiver) = mpsc::unbounded_channel();
         let tracker = Arc::new(Tracker {
             events: Mutex::new(Vec::new()),
@@ -186,8 +195,10 @@ impl Fixture {
         if events.is_some() {
             limits.max_tasks += 1;
         }
+        let mut interests = None;
         let gateway = Gateway::new(tok_core_identity(), limits, |context| {
-            tok_gateway::player::Ingress::new(
+            let tasks = context.tasks();
+            let ingress = tok_gateway::player::Ingress::new(
                 context,
                 config,
                 SessionOwner {
@@ -197,10 +208,30 @@ impl Fixture {
                 Arc::new(Auth),
                 backend(Arc::clone(&ownership)),
                 Arc::new(TestExecutor(Arc::clone(&tracker))),
-            )
+            )?;
+            if dynamic {
+                let subscriber = tok_events::Subscriber::new(
+                    tok_core_identity(),
+                    Arc::new(game_subscriber(ingress.sessions())),
+                    tok_events::TopicFilter::All,
+                    None,
+                )
+                .unwrap();
+                let pool = tok_events::interest::Pool::new(
+                    Default::default(),
+                    Arc::new(events.unwrap().clone()),
+                    tasks,
+                    [("game".into(), subscriber)],
+                )
+                .unwrap();
+                interests = Some(pool.clone());
+                ingress.with_topic_interests(pool, vec!["game".into()])
+            } else {
+                Ok(ingress)
+            }
         })
         .unwrap();
-        if let Some(events) = events {
+        if let Some(events) = events.filter(|_| !dynamic) {
             let subscription = events
                 .subscribe(
                     tok_events::Subscriber::new(
@@ -209,7 +240,7 @@ impl Fixture {
                             service_name: "events".into(),
                         },
                         Arc::new(game_subscriber(gateway.ingress().sessions())),
-                        tok_events::TopicFilter::Exact(tok_events::Topic::default()),
+                        tok_events::TopicFilter::All,
                         None,
                     )
                     .unwrap(),
@@ -235,6 +266,7 @@ impl Fixture {
         let token = CancellationToken::new();
         let task = tokio::spawn(gateway.serve(listener, token.clone()));
         Self {
+            interests,
             address,
             token,
             task: Some(task),
@@ -1493,6 +1525,12 @@ struct GameEvent {
 }
 impl tok_events::Event for GameEvent {
     const NAME: &'static str = "test.game.event";
+    fn topic(&self) -> std::result::Result<tok_events::Topic, tok_events::Error> {
+        self.topic.as_ref().map_or_else(
+            || Ok(tok_events::Topic::default()),
+            tok_events::Topic::named,
+        )
+    }
 }
 fn publication(delivery: tok_gateway::player::events::Delivery) -> tok_events::Message {
     use tok_gateway::player::events::{Action, Target};
@@ -1629,10 +1667,10 @@ async fn broadcast_filters_topics_and_offline_sessions_without_executing_player(
     assert_eq!(one.login(1, "1").await.error_code, 0);
     assert_eq!(two.login(1, "2").await.error_code, 0);
     let handle = fixture.sessions.session("1").unwrap().unwrap();
-    handle.join_topic("guild:7").unwrap();
-    handle.join_topic("guild:7").unwrap();
+    handle.join_topic("guild:7").await.unwrap();
+    handle.join_topic("guild:7").await.unwrap();
     assert_eq!(
-        handle.join_topic("guild:8").unwrap_err().code,
+        handle.join_topic("guild:8").await.unwrap_err().code,
         ErrorCode::CapacityExceeded
     );
     let message = event_message(
@@ -1647,7 +1685,7 @@ async fn broadcast_filters_topics_and_offline_sessions_without_executing_player(
         matches!(one.read().await,Content::Notify(notify) if notify.server_seq==1 && notify.body==b"notice")
     );
     assert_eq!(fixture.tracker.calls.load(Ordering::SeqCst), 0);
-    handle.leave_topic("guild:7").unwrap();
+    handle.leave_topic("guild:7").await.unwrap();
     assert_eq!(
         fixture.sessions.deliver(&message).await.unwrap().admitted,
         0
@@ -1698,7 +1736,7 @@ async fn large_topic_delivery_yields_and_rechecks_membership_after_resuming() {
         let mut client = fixture.connect().await;
         assert_eq!(client.login(1, &player).await.error_code, 0);
         let handle = fixture.sessions.session(&player).unwrap().unwrap();
-        handle.join_topic("large").unwrap();
+        handle.join_topic("large").await.unwrap();
         handles.push(handle);
         clients.push(client);
     }
@@ -1712,7 +1750,7 @@ async fn large_topic_delivery_yields_and_rechecks_membership_after_resuming() {
     assert!(first.is_pending(), "大规模投递必须让出调度");
     // 暂停期间退出主题不受索引/会话锁阻塞；快照中的剩余目标必须重新校验。
     for handle in &handles {
-        handle.leave_topic("large").unwrap();
+        handle.leave_topic("large").await.unwrap();
     }
     let report = pending.await.unwrap();
     assert_eq!(report.admitted, 64);
@@ -1731,7 +1769,7 @@ async fn topic_index_survives_resume_and_cleans_up_replaced_and_closed_sessions(
     let mut first = fixture.connect().await;
     let login = first.login(1, "1").await;
     let old = fixture.sessions.session("1").unwrap().unwrap();
-    old.join_topic("guild:7").unwrap();
+    old.join_topic("guild:7").await.unwrap();
     drop(first);
     let mut resumed = fixture.connect().await;
     assert_eq!(
@@ -1756,8 +1794,8 @@ async fn topic_index_survives_resume_and_cleans_up_replaced_and_closed_sessions(
         0
     );
     let current = fixture.sessions.session("1").unwrap().unwrap();
-    current.join_topic("guild:7").unwrap();
-    assert!(old.leave_topic("guild:7").is_err());
+    current.join_topic("guild:7").await.unwrap();
+    assert!(old.leave_topic("guild:7").await.is_err());
     old.close();
     assert_eq!(
         fixture.sessions.deliver(&delivery).await.unwrap().admitted,
@@ -1800,6 +1838,7 @@ async fn nats_independent_gateways_route_all_players_topics_and_forward_to_their
         .unwrap()
         .unwrap()
         .join_topic("guild:7")
+        .await
         .unwrap();
     let all = event_message(
         tok_gateway::player::events::Target::All,
@@ -1980,4 +2019,97 @@ fn tok_core_identity() -> tok_core::service::Identity {
         node_id: "local".into(),
         service_name: "player-gateway".into(),
     }
+}
+
+#[tokio::test]
+#[ignore = "需要真实 NATS；通过 just nats-test 显式运行"]
+async fn nats_independent_gateways_share_dynamic_topics_and_keep_fixed_interest_separate() {
+    use tok_events::{
+        Topic,
+        nats::{Bus, Config as NatsConfig},
+    };
+    use tok_gateway::player::events::Target;
+    let config_nats = NatsConfig {
+        namespace: format!("topics-{}", uuid::Uuid::new_v4()),
+        max_message_bytes: 4096,
+        ..Default::default()
+    };
+    let bus = Bus::connect(config_nats).await.unwrap();
+    let a = Fixture::with_dynamic_events(config(), |memory| memory, Some(&bus), true).await;
+    let b = Fixture::with_dynamic_events(config(), |memory| memory, Some(&bus), true).await;
+    let mut one = a.connect().await;
+    one.login(1, "1").await;
+    let mut two = a.connect().await;
+    two.login(1, "2").await;
+    let mut three = b.connect().await;
+    three.login(1, "3").await;
+    let first = a.sessions.session("1").unwrap().unwrap();
+    let second = a.sessions.session("2").unwrap().unwrap();
+    let third = b.sessions.session("3").unwrap().unwrap();
+    first.join_topic("chat:7").await.unwrap();
+    second.join_topic("chat:7").await.unwrap();
+    third.join_topic("chat:7").await.unwrap();
+    let pool_a = a.interests.as_ref().unwrap();
+    let pool_b = b.interests.as_ref().unwrap();
+    assert_eq!(pool_a.snapshot().unwrap().interests, 1);
+    assert_eq!(pool_a.snapshot().unwrap().references, 2);
+    assert_eq!(pool_b.snapshot().unwrap().interests, 1);
+    let fixed = pool_a
+        .acquire("game", Topic::named("chat:7").unwrap())
+        .await
+        .unwrap();
+    bus.publish(&publication(event_message(
+        Target::Topic("chat:7".into()),
+        TestKind::Broadcast,
+        b"first",
+    )))
+    .await
+    .unwrap();
+    for client in [&mut one, &mut two, &mut three] {
+        assert!(
+            matches!(client.read().await, Content::Notify(message) if message.body == b"first")
+        );
+    }
+    first.leave_topic("chat:7").await.unwrap();
+    bus.publish(&publication(event_message(
+        Target::Topic("chat:7".into()),
+        TestKind::Broadcast,
+        b"second",
+    )))
+    .await
+    .unwrap();
+    for client in [&mut two, &mut three] {
+        assert!(
+            matches!(client.read().await, Content::Notify(message) if message.body == b"second")
+        );
+    }
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), one.read())
+            .await
+            .is_err()
+    );
+    second.leave_topic("chat:7").await.unwrap();
+    assert_eq!(pool_a.snapshot().unwrap().references, 1);
+    third.leave_topic("chat:7").await.unwrap();
+    assert_eq!(pool_b.snapshot().unwrap().interests, 0);
+    fixed.release().await.unwrap();
+    assert_eq!(pool_a.snapshot().unwrap().interests, 0);
+    first.join_topic("chat:7").await.unwrap();
+    third.join_topic("chat:8").await.unwrap();
+    bus.publish(&publication(event_message(
+        Target::Topic("chat:7".into()),
+        TestKind::Broadcast,
+        b"isolated",
+    )))
+    .await
+    .unwrap();
+    assert!(matches!(one.read().await, Content::Notify(message) if message.body == b"isolated"));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), three.read())
+            .await
+            .is_err()
+    );
+    a.finish().await;
+    b.finish().await;
+    bus.close().await.unwrap();
 }

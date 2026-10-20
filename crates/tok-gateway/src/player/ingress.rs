@@ -16,6 +16,7 @@ pub const MAX_CREDENTIAL_BYTES: usize = 1024;
 
 /// 玩家接入语义，连接及 session 任务交给统一 Gateway 启动和监督。
 pub struct Ingress {
+    topic_interests: Option<tok_events::interest::Pool>,
     config: Arc<Config>,
     authenticator: Arc<dyn Authenticator>,
     sessions: SessionManager,
@@ -23,6 +24,31 @@ pub struct Ingress {
     rpc: Option<crate::rpc::GatewayRpcService>,
 }
 impl Ingress {
+    /// 根据已认证身份与本地能力计算初始主题，登录开放前通过同一异步成员入口完成。
+    /// 回调必须短小且不阻塞；交接保留原主题，不重新应用新登录策略。
+    pub fn with_topic_policy<F>(mut self, policy: F) -> Self
+    where
+        F: Fn(tok_service::Request<tok_core::SessionIdentity>) -> Result<Vec<String>>
+            + Send
+            + Sync
+            + 'static,
+    {
+        self.sessions = self.sessions.with_topic_policy(policy);
+        self
+    }
+
+    /// 绑定跟随会话成员主题的组件，固定兴趣由组装层独立持有；接入前仅允许安装一次。
+    /// Pool 的模板可捕获此 Ingress 的 sessions；弱绑定避免反向引用环。
+    pub fn with_topic_interests(
+        mut self,
+        pool: tok_events::interest::Pool,
+        components: Vec<String>,
+    ) -> Result<Self> {
+        self.sessions.bind_topic_interests(&pool, components)?;
+        self.topic_interests = Some(pool);
+        Ok(self)
+    }
+
     /// 安装每会话扩展状态、生命周期通知与显式交接快照适配。
     pub fn with_session_extension(
         mut self,
@@ -89,6 +115,7 @@ impl Ingress {
             shutdown,
         )?;
         Ok(Self {
+            topic_interests: None,
             config,
             authenticator,
             sessions,

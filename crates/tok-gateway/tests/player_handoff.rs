@@ -1,4 +1,6 @@
 //! 真实 TCP/gRPC 双网关交接与失败边界；常规测试不依赖外部服务。
+#[path = "support/topics.rs"]
+mod topic_support;
 
 use std::{
     sync::{
@@ -186,6 +188,11 @@ impl Executor for Execution {
         })
     }
 }
+#[derive(Default)]
+struct FixtureOptions {
+    extension: Option<Arc<dyn tok_gateway::player::session::extension::Factory>>,
+    topics: Option<Arc<topic_support::TopicTransport>>,
+}
 struct Fixture {
     address: std::net::SocketAddr,
     rpc_address: std::net::SocketAddr,
@@ -230,11 +237,35 @@ impl Fixture {
         config: Config,
         extension: Option<Arc<dyn tok_gateway::player::session::extension::Factory>>,
     ) -> Self {
+        Self::configured_options(
+            node,
+            directory,
+            ownership,
+            tokens,
+            execution,
+            config,
+            FixtureOptions {
+                extension,
+                topics: None,
+            },
+        )
+        .await
+    }
+    async fn configured_options(
+        node: &str,
+        directory: Arc<MemoryDirectory>,
+        ownership: Arc<dyn OwnershipStore>,
+        tokens: Arc<dyn ResumeTokenCodec>,
+        execution: Arc<Execution>,
+        config: Config,
+        options: FixtureOptions,
+    ) -> Self {
         let service = GatewayRpcService::new(config.max_handoff_bytes).unwrap();
         let gateway = Gateway::new(
             tok_core_identity(node),
             config.gateway_limits(),
             |context| {
+                let tasks = context.tasks();
                 let ingress = Ingress::new(
                     context,
                     config,
@@ -250,8 +281,13 @@ impl Fixture {
                 let ingress =
                     ingress.with_gateway_rpc(Arc::<MemoryDirectory>::clone(&directory), &service);
                 // 注册发生在完整组装之后，链式配置顺序不能让内部 RPC 看到旧工厂。
-                match extension {
-                    Some(extension) => ingress.with_session_extension(extension),
+                let ingress = match options.extension {
+                    Some(extension) => ingress.with_session_extension(extension)?,
+                    None => ingress,
+                };
+                match options.topics {
+                    Some(topics) => ingress
+                        .with_topic_interests(topics.pool(tasks), vec!["a".into(), "b".into()]),
                     None => Ok(ingress),
                 }
             },
@@ -435,7 +471,7 @@ async fn handoff_replays_original_response_preserves_identity_and_runs_timer_onc
     .await;
     let (mut stream, login) = login(&a).await;
     let source = a.sessions.session("42").unwrap().unwrap();
-    source.join_topic("guild:7").unwrap();
+    source.join_topic("guild:7").await.unwrap();
     let event = tok_gateway::player::events::Delivery {
         target: tok_gateway::player::events::Target::Topic("guild:7".into()),
         action: tok_gateway::player::events::Action::Forward(Arc::new(tok_events::Message {
@@ -474,7 +510,7 @@ async fn handoff_replays_original_response_preserves_identity_and_runs_timer_onc
     };
     assert_eq!(replayed, original);
     assert!(matches!(read(&mut stream).await, Content::Recovered(_)));
-    assert!(source.join_topic("stale").is_err());
+    assert!(source.join_topic("stale").await.is_err());
     assert_eq!(b.sessions.deliver(&event).await.unwrap().admitted, 1);
     tokio::time::timeout(Duration::from_secs(2), async {
         while execution.events.lock().unwrap().len() != 2 {
@@ -606,7 +642,7 @@ async fn cancelled_snapshot_cannot_commit_and_old_session_can_resume() {
     .await;
     let (stream, login) = login(&a).await;
     let source = a.sessions.session("42").unwrap().unwrap();
-    source.join_topic("retained").unwrap();
+    source.join_topic("retained").await.unwrap();
 
     let mut client = rpc(&a).await;
     let mut request = prepare_request(&login, &uuid::Uuid::new_v4().to_string());
@@ -628,7 +664,7 @@ async fn cancelled_snapshot_cannot_commit_and_old_session_can_resume() {
     assert_eq!(snapshot.version, 1);
     assert_eq!(snapshot.channel.as_ref().unwrap().topics, vec!["retained"]);
     assert_eq!(
-        source.join_topic("during-freeze").unwrap_err().code,
+        source.join_topic("during-freeze").await.unwrap_err().code,
         tok_gateway::ErrorCode::InvalidState
     );
     assert_eq!(
@@ -673,8 +709,8 @@ async fn cancelled_snapshot_cannot_commit_and_old_session_can_resume() {
         "a"
     );
 
-    source.leave_topic("retained").unwrap();
-    source.join_topic("after-cancel").unwrap();
+    source.leave_topic("retained").await.unwrap();
+    source.join_topic("after-cancel").await.unwrap();
     drop(stream);
     drop(restored);
     a.stop().await;
@@ -1279,6 +1315,151 @@ async fn restore_failure_after_commit_releases_target_without_reopening_source()
     assert!(ownership.lookup("42").await.unwrap().is_none());
     drop(stream);
     drop(rejected);
+    a.stop().await;
+    b.stop().await;
+}
+
+#[tokio::test]
+async fn target_waits_for_topic_readiness_before_transfer_and_source_releases_after_commit() {
+    let directory = Arc::new(MemoryDirectory::default());
+    let ownership = Arc::new(MemoryOwnership::new(8).unwrap());
+    let tokens: Arc<dyn ResumeTokenCodec> =
+        Arc::new(tok_gateway::player::resume_token::SignedResumeTokens::ephemeral().unwrap());
+    let execution = Arc::new(Execution::default());
+    let source_transport = Arc::new(topic_support::TopicTransport::new());
+    let target_transport = Arc::new(topic_support::TopicTransport::new());
+    source_transport.permits.add_permits(2);
+    let config = Config {
+        handoff_enabled: true,
+        handoff_timeout_ms: 1500,
+        ..Default::default()
+    };
+    let a = Fixture::configured_options(
+        "a",
+        Arc::clone(&directory),
+        Arc::<MemoryOwnership>::clone(&ownership),
+        Arc::clone(&tokens),
+        Arc::clone(&execution),
+        config.clone(),
+        FixtureOptions {
+            topics: Some(Arc::clone(&source_transport)),
+            ..Default::default()
+        },
+    )
+    .await;
+    let b = Fixture::configured_options(
+        "b",
+        directory,
+        Arc::<MemoryOwnership>::clone(&ownership),
+        tokens,
+        execution,
+        config,
+        FixtureOptions {
+            topics: Some(Arc::clone(&target_transport)),
+            ..Default::default()
+        },
+    )
+    .await;
+    let (stream, login) = login(&a).await;
+    let source = a.sessions.session("42").unwrap().unwrap();
+    source.join_topic("room").await.unwrap();
+    drop(stream);
+    let attempt = tokio::spawn(async move {
+        let stream = resume(&b, &login).await;
+        (b, stream)
+    });
+    target_transport.entered.notified().await;
+    assert_eq!(
+        ownership.lookup("42").await.unwrap().unwrap().owner.node_id,
+        "a"
+    );
+    assert_eq!(source_transport.active.load(Ordering::SeqCst), 2);
+    target_transport.permits.add_permits(2);
+    let (b, mut stream) = attempt.await.unwrap();
+    assert!(
+        matches!(read(&mut stream).await, Content::Resumed(response) if response.error_code == 0)
+    );
+    assert!(matches!(read(&mut stream).await, Content::Recovered(_)));
+    source.wait_finished().await;
+    assert_eq!(source_transport.active.load(Ordering::SeqCst), 0);
+    assert_eq!(target_transport.active.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        b.sessions
+            .session("42")
+            .unwrap()
+            .unwrap()
+            .snapshot()
+            .unwrap()
+            .topics,
+        vec!["room"]
+    );
+    a.stop().await;
+    b.stop().await;
+    assert_eq!(target_transport.active.load(Ordering::SeqCst), 0);
+}
+#[tokio::test]
+async fn target_topic_failure_cancels_preparation_without_transferring_ownership() {
+    let directory = Arc::new(MemoryDirectory::default());
+    let ownership = Arc::new(MemoryOwnership::new(8).unwrap());
+    let tokens: Arc<dyn ResumeTokenCodec> =
+        Arc::new(tok_gateway::player::resume_token::SignedResumeTokens::ephemeral().unwrap());
+    let execution = Arc::new(Execution::default());
+    let source_transport = Arc::new(topic_support::TopicTransport::new());
+    let target_transport = Arc::new(topic_support::TopicTransport::new());
+    source_transport.permits.add_permits(2);
+    target_transport.permits.add_permits(1);
+    target_transport.fail_at.store(1, Ordering::SeqCst);
+    let config = Config {
+        handoff_enabled: true,
+        handoff_timeout_ms: 1500,
+        ..Default::default()
+    };
+    let a = Fixture::configured_options(
+        "a",
+        Arc::clone(&directory),
+        Arc::<MemoryOwnership>::clone(&ownership),
+        Arc::clone(&tokens),
+        Arc::clone(&execution),
+        config.clone(),
+        FixtureOptions {
+            topics: Some(Arc::clone(&source_transport)),
+            ..Default::default()
+        },
+    )
+    .await;
+    let b = Fixture::configured_options(
+        "b",
+        directory,
+        Arc::<MemoryOwnership>::clone(&ownership),
+        tokens,
+        execution,
+        config,
+        FixtureOptions {
+            topics: Some(Arc::clone(&target_transport)),
+            ..Default::default()
+        },
+    )
+    .await;
+    let (stream, login) = login(&a).await;
+    let source = a.sessions.session("42").unwrap().unwrap();
+    source.join_topic("room").await.unwrap();
+    drop(stream);
+    let mut failed = resume(&b, &login).await;
+    assert!(
+        matches!(read(&mut failed).await, Content::Resumed(response) if response.error_code != 0)
+    );
+    assert_eq!(
+        ownership.lookup("42").await.unwrap().unwrap().owner.node_id,
+        "a"
+    );
+    assert_eq!(source_transport.active.load(Ordering::SeqCst), 2);
+    assert_eq!(target_transport.active.load(Ordering::SeqCst), 0);
+    let mut restored = resume(&a, &login).await;
+    assert!(
+        matches!(read(&mut restored).await, Content::Resumed(response) if response.error_code == 0)
+    );
+    assert!(matches!(read(&mut restored).await, Content::Recovered(_)));
+    assert_eq!(source.snapshot().unwrap().topics, vec!["room"]);
     a.stop().await;
     b.stop().await;
 }

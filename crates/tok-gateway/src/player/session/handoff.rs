@@ -555,6 +555,20 @@ pub(super) async fn receive(
             manager.inner.config.max_timer_bytes,
         ));
         timers.restore(execution)?;
+        // 取得所有权之前建立传输兴趣；尚未登记目标会话，不允许向它投递。
+        let mut interests = std::collections::BTreeMap::new();
+        if let Some(bindings) = manager.inner.topic_interests.get() {
+            for topic in &channel_snapshot.topics {
+                let leases = tokio::select! {
+                    biased;
+                    () = manager.inner.shutdown.cancelled() => return Err(ErrorCode::SessionClosed.into()),
+                    result = timeout_at(deadline, bindings.acquire(topic)) => result.map_err(|_| ErrorCode::Timeout)??,
+                };
+                interests.insert(topic.clone(), leases);
+            }
+        }
+        channel.install_interests(interests)?;
+        channel.check_interests()?;
         request.snapshot_id = snapshot.snapshot_id.clone();
         let committed = timeout_at(deadline, client.commit_handoff(request.clone())).await;
         let acquired = match committed {
@@ -613,6 +627,7 @@ pub(super) async fn receive(
             pipeline: Arc::clone(&manager.inner.pipeline),
             execution_budget: Duration::from_millis(manager.inner.config.rpc_timeout_ms),
             downlink_gate: tokio::sync::Mutex::new(()),
+            topic_gate: tokio::sync::Mutex::new(()),
             timers,
             initial_execution: Some(execution.clone()),
             ownership: acquired,

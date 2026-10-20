@@ -27,6 +27,9 @@ pub struct Config {
     pub client_capacity: usize,
     /// 连接上活动的 topic/事件类型订阅总数上限，包含不同 group 的独立订阅。
     pub max_subscriptions: usize,
+    /// 同时建立订阅的操作数；每个操作另占一个临时就绪探测 SID。
+    /// 实际 SDK SID 上界为 max_subscriptions + max_pending_subscriptions。
+    pub max_pending_subscriptions: usize,
     /// 订阅缓冲预算，按 topic/类型兴趣数 × subscription_capacity × max_message_bytes 预留。
     /// 约束配置范围内消息的正文缓冲，不包含 SDK 元数据、临时编码及无效超大输入。
     pub max_buffer_bytes: usize,
@@ -43,6 +46,7 @@ impl Default for Config {
             subscription_capacity: 64,
             client_capacity: 128,
             max_subscriptions: 32,
+            max_pending_subscriptions: 8,
             max_buffer_bytes: 128 * 1024 * 1024,
             handler_timeout_ms: 5000,
         }
@@ -58,6 +62,7 @@ impl std::fmt::Debug for Config {
             .field("subscription_capacity", &self.subscription_capacity)
             .field("client_capacity", &self.client_capacity)
             .field("max_subscriptions", &self.max_subscriptions)
+            .field("max_pending_subscriptions", &self.max_pending_subscriptions)
             .field("max_buffer_bytes", &self.max_buffer_bytes)
             .field("handler_timeout_ms", &self.handler_timeout_ms)
             .finish()
@@ -81,6 +86,7 @@ impl Config {
                 self.subscription_capacity,
                 self.client_capacity,
                 self.max_subscriptions,
+                self.max_pending_subscriptions,
             ]
             .iter()
             .any(|capacity| !(1..=65536).contains(capacity))
@@ -103,6 +109,7 @@ pub struct Bus {
     failed: CancellationToken,
     publishing: Arc<tokio::sync::Semaphore>,
     subscription: Arc<tokio::sync::Semaphore>,
+    setups: Arc<tokio::sync::Semaphore>,
     buffer: Arc<tokio::sync::Semaphore>,
     consumers_failed: CancellationToken,
 }
@@ -145,6 +152,9 @@ impl Bus {
         .map_err(|_| Error::Unavailable("NATS 连接失败"))?;
         let publishing = Arc::new(tokio::sync::Semaphore::new(config.client_capacity));
         let subscription = Arc::new(tokio::sync::Semaphore::new(config.max_subscriptions));
+        let setups = Arc::new(tokio::sync::Semaphore::new(
+            config.max_pending_subscriptions,
+        ));
         let buffer = Arc::new(tokio::sync::Semaphore::new(config.max_buffer_bytes));
         Ok(Self {
             client,
@@ -152,6 +162,7 @@ impl Bus {
             failed,
             publishing,
             subscription,
+            setups,
             buffer,
             consumers_failed,
         })
@@ -302,6 +313,10 @@ impl Bus {
         if let Some(group) = group {
             crate::validate_name(group)?;
         }
+        let _setup = self
+            .setups
+            .try_acquire()
+            .map_err(|_| Error::CapacityExceeded)?;
         let names = handler.event_types();
         if names.is_empty() || names.len() > self.config.max_subscriptions {
             return Err(Error::InvalidInput("订阅类型集合为空或超出上限"));
@@ -457,5 +472,18 @@ impl Subscription {
             tracing::error!("NATS 退订未完成，交由订阅析构继续清理");
         }
         result
+    }
+}
+
+impl crate::interest::Transport for Bus {
+    fn subscribe(
+        &self,
+        subscriber: crate::Subscriber,
+        stop: CancellationToken,
+    ) -> crate::Task<'_, crate::Task<'static, ()>> {
+        Box::pin(async move {
+            let subscription = Bus::subscribe(self, subscriber).await?;
+            Ok(Box::pin(subscription.run(stop)) as crate::Task<'static, ()>)
+        })
     }
 }

@@ -35,6 +35,11 @@ impl Subscriber {
             group: group.map(str::to_owned),
         })
     }
+    /// 为固定或动态兴趣选择主题范围；保留事件类型、身份、能力及消费组。
+    pub fn with_topics(mut self, topics: TopicFilter) -> Self {
+        self.topics = topics;
+        self
+    }
     /// 安装本服务的本地能力，接收时复制到执行上下文，不向远端传播。
     pub fn with_extensions(mut self, extensions: tok_core::execution::Extensions) -> Self {
         self.extensions = extensions;

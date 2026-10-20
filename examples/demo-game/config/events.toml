@@ -59,5 +59,6 @@ max_message_bytes = 1048576
 subscription_capacity = 64
 client_capacity = 128
 max_subscriptions = 32
+max_pending_subscriptions = 8
 max_buffer_bytes = 134217728
 handler_timeout_ms = 5000

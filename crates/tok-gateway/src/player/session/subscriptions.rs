@@ -125,6 +125,7 @@ mod tests {
             pipeline: crate::player::pipeline::test_pipeline(),
             execution_budget: std::time::Duration::from_millis(Config::default().rpc_timeout_ms),
             downlink_gate: tokio::sync::Mutex::new(()),
+            topic_gate: tokio::sync::Mutex::new(()),
             timers: Arc::new(Scheduler::new(8, 4096)),
             initial_execution: None,
             ownership: SessionOwnership {
@@ -162,24 +163,24 @@ mod tests {
         (SessionHandle(state), outgoing)
     }
 
-    #[test]
-    fn membership_updates_and_old_generation_cleanup_preserve_current_members() {
+    #[tokio::test]
+    async fn membership_updates_and_old_generation_cleanup_preserve_current_members() {
         let index = Arc::new(Index::default());
         let (old, _old_output) = session(&index, "1", 1);
         let (current, _current_output) = session(&index, "1", 2);
         let (other, _other_output) = session(&index, "2", 1);
-        old.join_topic("guild:7").unwrap();
-        current.join_topic("guild:7").unwrap();
-        current.join_topic("guild:7").unwrap();
-        other.join_topic("guild:8").unwrap();
+        old.join_topic("guild:7").await.unwrap();
+        current.join_topic("guild:7").await.unwrap();
+        current.join_topic("guild:7").await.unwrap();
+        other.join_topic("guild:8").await.unwrap();
         assert_eq!(index.members("guild:7").unwrap().len(), 2);
         old.close();
         let members = index.members("guild:7").unwrap();
         assert_eq!(members.len(), 1);
         assert_eq!(members[0].identity().epoch, 2);
         drop(members);
-        assert!(old.join_topic("guild:7").is_err());
-        current.leave_topic("guild:7").unwrap();
+        assert!(old.join_topic("guild:7").await.is_err());
+        current.leave_topic("guild:7").await.unwrap();
         assert!(index.members("guild:7").unwrap().is_empty());
         assert_eq!(index.members("guild:8").unwrap().len(), 1);
         drop(other);
@@ -190,9 +191,9 @@ mod tests {
     async fn index_does_not_keep_sessions_alive_and_admission_rechecks_stale_snapshots() {
         let index = Arc::new(Index::default());
         let (handle, mut output) = session(&index, "1", 1);
-        handle.join_topic("guild:7").unwrap();
+        handle.join_topic("guild:7").await.unwrap();
         let candidates = index.members("guild:7").unwrap();
-        handle.leave_topic("guild:7").unwrap();
+        handle.leave_topic("guild:7").await.unwrap();
         assert!(
             candidates[0]
                 .notify_event(9, b"stale", Some("guild:7"))
@@ -211,7 +212,7 @@ mod tests {
                 .is_empty()
         );
         drop(candidates);
-        handle.join_topic("guild:7").unwrap();
+        handle.join_topic("guild:7").await.unwrap();
         let weak = Arc::downgrade(&handle.0);
         drop(handle);
         assert!(weak.upgrade().is_none());

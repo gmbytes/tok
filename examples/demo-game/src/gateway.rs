@@ -101,10 +101,11 @@ impl Factory for PlayerIngressFactory {
                 .with_event_layer(middleware::Observe)
                 .with_timer_layer(middleware::Observe)
                 .with_downlink_layer(middleware::Observe);
-            let mut limits = config.gateway_limits();
-            if events.is_some() {
-                limits.max_tasks += 2;
-            }
+            let limits = config.gateway_limits();
+            let bus = match events {
+                Some(events) => Some(tok::events::nats::Bus::connect(events).await?),
+                None => None,
+            };
             let gateway = Gateway::new_in(limits, &init, |gateway_context| {
                 let ingress = player::Ingress::new(
                     gateway_context,
@@ -123,53 +124,55 @@ impl Factory for PlayerIngressFactory {
                     Some(tokens) => ingress.with_resume_token_codec(tokens),
                     None => ingress,
                 };
-                match gateway_rpc {
-                    Some(service) => Ok(ingress.with_gateway_rpc(binding.directory, &service)),
-                    None => Ok(ingress),
-                }
-            })?;
-            let bus = if let Some(events) = events {
-                let bus = tok::events::nats::Bus::connect(events).await?;
-                let sessions = gateway.ingress().sessions();
-                // 这两个内置处理者只查本地会话，因此示例为各节点独立订阅。
-                // 自定义组件可以选择 group，并自行完成目标路由或其他业务处理。
-                let capabilities = sessions.extensions();
-                let topics = tok::events::TopicFilter::Exact(tok::events::Topic::named(
-                    crate::events::TOPIC,
-                )?);
-                let components = [
-                    crate::events::player_forwarder(
-                        init.identity.clone(),
-                        sessions.clone(),
-                        topics.clone(),
-                        None,
-                    )?,
-                    crate::events::value_notifier(init.identity.clone(), sessions, topics, None)?,
-                ];
-                let mut subscriptions = Vec::new();
-                for component in components {
-                    subscriptions.push(
-                        bus.subscribe(component.with_extensions(capabilities.clone()))
-                            .await?,
+                let ingress = match gateway_rpc {
+                    Some(service) => ingress.with_gateway_rpc(binding.directory, &service),
+                    None => ingress,
+                };
+                if let Some(bus) = &bus {
+                    let ingress =
+                        ingress.with_topic_policy(|_| Ok(vec![crate::events::TOPIC.into()]));
+                    let sessions = ingress.sessions();
+                    let capabilities = sessions.extensions();
+                    let topics = tok::events::TopicFilter::Exact(tok::events::Topic::default());
+                    // 内置组件只投递本地成员，各网关独立消费；同组组件须自行承担目标路由。
+                    let components = vec![
+                        (
+                            "player.forward".into(),
+                            crate::events::player_forwarder(
+                                init.identity.clone(),
+                                sessions.clone(),
+                                topics.clone(),
+                                None,
+                            )
+                            .map_err(|_| tok::gateway::ErrorCode::InvalidRequest)?
+                            .with_extensions(capabilities.clone()),
+                        ),
+                        (
+                            "player.notify".into(),
+                            crate::events::value_notifier(
+                                init.identity.clone(),
+                                sessions,
+                                topics,
+                                None,
+                            )
+                            .map_err(|_| tok::gateway::ErrorCode::InvalidRequest)?
+                            .with_extensions(capabilities),
+                        ),
+                    ];
+                    let pool = tok::events::interest::Pool::new(
+                        Default::default(),
+                        Arc::new(bus.clone()),
+                        init.service.tasks(),
+                        components,
+                    )
+                    .map_err(|_| tok::gateway::ErrorCode::InvalidRequest)?;
+                    return ingress.with_topic_interests(
+                        pool,
+                        vec!["player.forward".into(), "player.notify".into()],
                     );
                 }
-                for subscription in subscriptions {
-                    let tasks = gateway.tasks();
-                    let stop = tasks.cancellation();
-                    tasks
-                        .launch(
-                            "event-subscription",
-                            Box::pin(async move {
-                                subscription.run(stop).await?;
-                                Ok(())
-                            }),
-                        )
-                        .await?;
-                }
-                Some(bus)
-            } else {
-                None
-            };
+                Ok(ingress)
+            })?;
             Ok(Box::pin(async move {
                 let result = gateway.serve(listener, init.service.cancellation()).await;
                 if let Some(bus) = bus {

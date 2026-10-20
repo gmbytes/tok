@@ -1,4 +1,6 @@
 //! 完整接入路径验证能力、异步中间件、生命周期及下行补发边界。
+#[path = "support/topics.rs"]
+mod topic_support;
 use std::{
     future::Future,
     pin::Pin,
@@ -339,6 +341,21 @@ impl Fixture {
         Self::configured(gate, false).await
     }
     async fn configured(gate: Option<Arc<Gate>>, initialize_failure: bool) -> Self {
+        Self::configured_topics(gate, initialize_failure, None).await
+    }
+    async fn configured_topics(
+        gate: Option<Arc<Gate>>,
+        initialize_failure: bool,
+        topics: Option<Arc<topic_support::TopicTransport>>,
+    ) -> Self {
+        Self::configured_policy(gate, initialize_failure, topics, None).await
+    }
+    async fn configured_policy(
+        gate: Option<Arc<Gate>>,
+        initialize_failure: bool,
+        topics: Option<Arc<topic_support::TopicTransport>>,
+        policy: Option<Vec<String>>,
+    ) -> Self {
         let counts = Arc::new(Counts::default());
         let captured = Arc::clone(&counts);
         let (sender, receiver) = tokio::sync::oneshot::channel();
@@ -357,6 +374,8 @@ impl Fixture {
             let counts = Arc::clone(&captured);
             let sender = Arc::clone(&sender);
             let gate = gate.clone();
+            let topics = topics.clone();
+            let policy = policy.clone();
             Box::pin(async move {
                 let config = Config {
                     rpc_timeout_ms: 1000,
@@ -379,7 +398,7 @@ impl Fixture {
                 let gateway = Gateway::new_in(config.gateway_limits(), &init, |handle| {
                     let mut capabilities = Extensions::default();
                     capabilities.insert(ManagerData);
-                    Ingress::new(
+                    let ingress = Ingress::new(
                         handle,
                         config,
                         SessionOwner {
@@ -395,7 +414,21 @@ impl Fixture {
                     .with_session_extension(Arc::new(StateFactory {
                         counts,
                         initialize_failure,
-                    }))
+                    }))?;
+                    let ingress = match policy {
+                        Some(topics) => ingress.with_topic_policy(move |request| {
+                            assert_eq!(request.input.player_id, "1");
+                            Ok(topics.clone())
+                        }),
+                        None => ingress,
+                    };
+                    match &topics {
+                        Some(topics) => ingress.with_topic_interests(
+                            topics.pool(init.service.tasks()),
+                            vec!["a".into(), "b".into()],
+                        ),
+                        None => Ok(ingress),
+                    }
                 })?;
                 let listener = TcpListener::bind("127.0.0.1:0").await?;
                 let address = listener.local_addr()?;
@@ -649,7 +682,7 @@ async fn topic_membership_is_rechecked_after_async_downlink_before_assigning_seq
     let mut client = fixture.connect().await;
     client.login().await;
     let session = fixture.manager.session("1").unwrap().unwrap();
-    session.join_topic("room").unwrap();
+    session.join_topic("room").await.unwrap();
     let manager = fixture.manager.clone();
     let delivery = tokio::spawn(async move {
         manager
@@ -664,7 +697,7 @@ async fn topic_membership_is_rechecked_after_async_downlink_before_assigning_seq
             .unwrap()
     });
     gate.entered.notified().await;
-    session.leave_topic("room").unwrap();
+    session.leave_topic("room").await.unwrap();
     gate.permits.add_permits(1);
     let report = delivery.await.unwrap();
     assert_eq!(report.skipped, 1);
@@ -723,4 +756,136 @@ async fn reconnect_cancels_old_binding_admission_without_closing_the_logical_ses
         matches!(second.read().await,Content::Response(response) if response.request_id==3 && response.server_seq==1)
     );
     fixture.stop().await;
+}
+
+#[tokio::test]
+async fn pending_topic_join_is_cancelled_by_leave_and_reconnect_without_stale_membership() {
+    let transport = Arc::new(topic_support::TopicTransport::new());
+    let fixture = Fixture::configured_topics(None, false, Some(Arc::clone(&transport))).await;
+    let mut first = fixture.connect().await;
+    let login = first.login().await;
+    let session = fixture.manager.session("1").unwrap().unwrap();
+    let join = tokio::spawn({
+        let session = session.clone();
+        async move { session.join_topic("room").await }
+    });
+    transport.entered.notified().await;
+    session.leave_topic("room").await.unwrap();
+    assert!(join.await.unwrap().is_err());
+    assert!(session.snapshot().unwrap().topics.is_empty());
+    let next = tokio::spawn({
+        let session = session.clone();
+        async move { session.join_topic("room").await }
+    });
+    transport.entered.notified().await;
+    let mut second = fixture.connect().await;
+    second.resume(login.resume_token).await;
+    assert!(matches!(second.read().await, Content::Recovered(_)));
+    assert!(next.await.unwrap().is_err());
+    transport.permits.add_permits(4);
+    session.join_topic("room").await.unwrap();
+    assert_eq!(session.snapshot().unwrap().topics, vec!["room"]);
+    session.leave_topic("room").await.unwrap();
+    assert_eq!(transport.active.load(Ordering::SeqCst), 0);
+    fixture.stop().await;
+}
+#[tokio::test]
+async fn partially_ready_topic_bindings_roll_back_without_publishing_membership() {
+    let transport = Arc::new(topic_support::TopicTransport::new());
+    transport.fail_at.store(2, Ordering::SeqCst);
+    transport.permits.add_permits(2);
+    let fixture = Fixture::configured_topics(None, false, Some(Arc::clone(&transport))).await;
+    let mut client = fixture.connect().await;
+    let login = client.login().await;
+    let session = fixture.manager.session("1").unwrap().unwrap();
+    assert!(session.join_topic("room").await.is_err());
+    assert!(session.snapshot().unwrap().topics.is_empty());
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while transport.active.load(Ordering::SeqCst) != 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    transport.permits.add_permits(2);
+    session.join_topic("room").await.unwrap();
+    assert_eq!(transport.active.load(Ordering::SeqCst), 2);
+    drop(client);
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while session.snapshot().unwrap().phase != SessionPhase::Detached {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(transport.active.load(Ordering::SeqCst), 2);
+    let starts = transport.starts.load(Ordering::SeqCst);
+    let mut resumed = fixture.connect().await;
+    resumed.resume(login.resume_token).await;
+    assert!(matches!(resumed.read().await, Content::Recovered(_)));
+    assert_eq!(transport.starts.load(Ordering::SeqCst), starts);
+    session.close();
+    session.wait_finished().await;
+    fixture.stop().await;
+    assert_eq!(transport.active.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn trusted_initial_topics_are_ready_before_login_and_failure_closes_unpublished_session() {
+    for failure in [false, true] {
+        let transport = Arc::new(topic_support::TopicTransport::new());
+        transport.permits.add_permits(2);
+        if failure {
+            transport.fail_at.store(2, Ordering::SeqCst);
+        }
+        let fixture = Fixture::configured_policy(
+            None,
+            false,
+            Some(Arc::clone(&transport)),
+            Some(vec!["realm:trusted".into()]),
+        )
+        .await;
+        let mut client = fixture.connect().await;
+        client
+            .send(Content::Login(protocol::LoginRequest {
+                request_id: 1,
+                credential: "1".into(),
+                resume_token: String::new(),
+            }))
+            .await;
+        let Content::LoggedIn(response) = client.read().await else {
+            panic!()
+        };
+        if failure {
+            assert_ne!(response.error_code, 0);
+            tokio::time::timeout(Duration::from_secs(1), async {
+                loop {
+                    if fixture.ownership.lookup("1").await.unwrap().is_none()
+                        && transport.active.load(Ordering::SeqCst) == 0
+                    {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+        } else {
+            assert_eq!(response.error_code, 0);
+            assert_eq!(transport.active.load(Ordering::SeqCst), 2);
+            assert_eq!(
+                fixture
+                    .manager
+                    .session("1")
+                    .unwrap()
+                    .unwrap()
+                    .snapshot()
+                    .unwrap()
+                    .topics,
+                vec!["realm:trusted"]
+            );
+        }
+        fixture.stop().await;
+        assert_eq!(transport.active.load(Ordering::SeqCst), 0);
+    }
 }

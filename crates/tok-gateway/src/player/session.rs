@@ -10,6 +10,7 @@ mod replay;
 mod state;
 mod subscriptions;
 mod timer;
+mod topics;
 mod worker;
 
 pub(super) use handle::BoundSession;

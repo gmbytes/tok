@@ -102,20 +102,64 @@ struct EventTarget {
     topic: Option<String>,
 }
 
-impl SessionHandle {
-    /// 加入可信服务器指定的事件主题；同一 session 恢复和交接保留，数量有界。
-    pub fn join_topic(&self, topic: &str) -> Result<()> {
-        if self.0.cancel.is_cancelled() {
-            return Err(ErrorCode::SessionClosed.into());
-        }
-        self.0.channel.change_topic(topic, true)
+struct PendingTopic {
+    channel: Arc<channel::Channel>,
+    name: String,
+    version: u64,
+}
+impl Drop for PendingTopic {
+    fn drop(&mut self) {
+        self.channel.abort_topic(&self.name, self.version);
     }
-    /// 退出事件主题；不存在时成功，冻结或已关闭的会话拒绝修改。
-    pub fn leave_topic(&self, topic: &str) -> Result<()> {
+}
+impl SessionHandle {
+    /// 等待所有绑定组件的主题兴趣就绪后加入成员，最终重验当前连接代次。
+    /// 宽限期保留成员与兴趣；客户端没有直接调用入口。
+    pub async fn join_topic(&self, topic: &str) -> Result<()> {
+        let _operation = self.0.channel.reserve_topic_operation()?;
+        let work = async {
+            let _gate = self.0.topic_gate.lock().await;
+            let Some(ticket) = self.0.channel.begin_topic(topic)? else {
+                return Ok(());
+            };
+            let _pending = PendingTopic {
+                channel: Arc::clone(&self.0.channel),
+                name: topic.into(),
+                version: ticket.version,
+            };
+            let bindings = self
+                .0
+                .manager
+                .upgrade()
+                .and_then(|manager| manager.topic_interests.get().cloned());
+            let leases = tokio::select! {
+                biased;
+                () = ticket.cancel.cancelled() => return Err(ErrorCode::InvalidState.into()),
+                () = ticket.binding.cancelled() => return Err(ErrorCode::SessionReplaced.into()),
+                result = async { match bindings { Some(bindings) => bindings.acquire(topic).await, None => Ok(Vec::new()) } } => result?,
+            };
+            self.0.channel.activate_topic(topic, &ticket, leases)
+        };
+        tokio::select! {
+            biased;
+            () = self.0.cancel.cancelled() => Err(ErrorCode::SessionClosed.into()),
+            result = tokio::time::timeout(self.0.execution_budget, work) => result.map_err(|_| ErrorCode::Timeout)?,
+        }
+    }
+    /// 先移除本地资格，再释放自身兴趣引用；最后一个引用等待有限退订。
+    pub async fn leave_topic(&self, topic: &str) -> Result<()> {
         if self.0.cancel.is_cancelled() {
             return Err(ErrorCode::SessionClosed.into());
         }
-        self.0.channel.change_topic(topic, false)
+        let leases = self.0.channel.remove_topic(topic)?;
+        tokio::time::timeout(self.0.execution_budget, async {
+            for lease in leases {
+                lease.release().await.map_err(|_| ErrorCode::Unavailable)?;
+            }
+            Ok(())
+        })
+        .await
+        .map_err(|_| ErrorCode::Timeout)?
     }
     /// 将内部事件排入原 session 队列；只接收在线、非恢复和非冻结会话，不产生客户端回应。
     pub fn post_event(&self, event: Arc<tok_events::Message>) -> Result<()> {

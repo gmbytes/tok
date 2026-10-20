@@ -38,6 +38,9 @@ struct Registry {
     process_instance_id: u128,
 }
 
+type TopicPolicy =
+    dyn Fn(tok_service::Request<tok_core::SessionIdentity>) -> Result<Vec<String>> + Send + Sync;
+
 /// 有界的玩家会话目录，由 Ingress 构造并通过 sessions 获取。
 ///
 /// 持有者不能直接创建未认证的 session；不同玩家的登录协调锁互相独立。
@@ -48,6 +51,8 @@ pub struct SessionManager {
 
 #[derive(Clone)]
 pub(super) struct ManagerState {
+    topic_policy: Option<Arc<TopicPolicy>>,
+    pub(super) topic_interests: Arc<std::sync::OnceLock<super::topics::Bindings>>,
     pub(super) extension: Arc<dyn super::extension::Factory>,
     pub(super) activities: Arc<super::state::Activities>,
     pub(super) handoffs: Arc<handoff::Handoffs>,
@@ -76,6 +81,8 @@ impl SessionManager {
     ) -> Result<Self> {
         Ok(Self {
             inner: Arc::new(ManagerState {
+                topic_policy: None,
+                topic_interests: Arc::default(),
                 extension: Arc::new(super::extension::Empty),
                 activities: Arc::default(),
                 handoffs: Arc::new(handoff::Handoffs::new(config.max_handoffs)),
@@ -102,6 +109,37 @@ impl SessionManager {
                 shutdown,
             }),
         })
+    }
+
+    pub(in crate::player) fn with_topic_policy<F>(mut self, policy: F) -> Self
+    where
+        F: Fn(tok_service::Request<tok_core::SessionIdentity>) -> Result<Vec<String>>
+            + Send
+            + Sync
+            + 'static,
+    {
+        Arc::make_mut(&mut self.inner).topic_policy = Some(Arc::new(policy));
+        self
+    }
+    pub(in crate::player) fn bind_topic_interests(
+        &self,
+        pool: &tok_events::interest::Pool,
+        components: Vec<String>,
+    ) -> Result<()> {
+        let bindings = super::topics::Bindings::new(pool, components)?;
+        let slots = self
+            .inner
+            .registry
+            .slots
+            .lock()
+            .map_err(|_| ErrorCode::Internal)?;
+        if !slots.is_empty() {
+            return Err(ErrorCode::InvalidState.into());
+        }
+        self.inner
+            .topic_interests
+            .set(bindings)
+            .map_err(|_| ErrorCode::InvalidState.into())
     }
 
     pub(in crate::player) fn authenticate_resume_token(
@@ -358,6 +396,7 @@ impl SessionManager {
         {
             return Err(ErrorCode::ResumeUnavailable.into());
         }
+        session_state.channel.check_interests()?;
         let identity = &session_state.ownership.identity;
         let response = crate::protocol::ResumeResponse {
             request_id,
@@ -577,6 +616,7 @@ impl SessionManager {
             pipeline: Arc::clone(&self.inner.pipeline),
             execution_budget: timeout,
             downlink_gate: tokio::sync::Mutex::new(()),
+            topic_gate: tokio::sync::Mutex::new(()),
             timers: Arc::new(timer::Scheduler::new(
                 self.inner.config.max_timers,
                 self.inner.config.max_timer_bytes,
@@ -636,8 +676,33 @@ impl SessionManager {
         if session_state.cancel.is_cancelled() {
             return Err(ErrorCode::SessionClosed.into());
         }
+        let handle = SessionHandle(Arc::clone(&session_state));
+        if let Some(policy) = &self.inner.topic_policy {
+            let result = tokio::time::timeout(timeout, async {
+                let topics = policy(tok_service::Request::new(
+                    handle.context(
+                        "player/session/topics".into(),
+                        tok_core::execution::Source::Internal,
+                    )?,
+                    handle.identity().clone(),
+                ))?;
+                if topics.len() > self.inner.config.max_topics {
+                    return Err(ErrorCode::CapacityExceeded.into());
+                }
+                for topic in topics {
+                    handle.join_topic(&topic).await?;
+                }
+                Ok(())
+            })
+            .await
+            .unwrap_or(Err(ErrorCode::Timeout.into()));
+            if let Err(error) = result {
+                handle.close();
+                return Err(error);
+            }
+        }
         let _ = opening.disarm();
-        Ok(SessionHandle(session_state))
+        Ok(handle)
     }
 
     pub(crate) fn close_all(&self) {

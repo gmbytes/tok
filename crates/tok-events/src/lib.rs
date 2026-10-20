@@ -4,6 +4,7 @@
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
 
 mod contract;
+pub mod interest;
 mod message;
 pub mod nats;
 mod registry;
@@ -26,7 +27,7 @@ pub enum DeliveryPolicy {
 }
 
 /// 事件契约、分发组装和传输错误；本地订阅者的业务错误仍原样返回。
-#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+#[derive(Clone, Debug, thiserror::Error, PartialEq, Eq)]
 pub enum Error {
     /// 执行范围已取消或期限耗尽。
     #[error(transparent)]

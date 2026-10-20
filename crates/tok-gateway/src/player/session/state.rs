@@ -30,6 +30,7 @@ pub(super) struct SessionState {
     pub(super) extensions: tok_core::execution::Extensions,
     pub(super) pipeline: Arc<crate::player::Pipeline>,
     pub(super) execution_budget: std::time::Duration,
+    pub(super) topic_gate: tokio::sync::Mutex<()>,
     pub(super) downlink_gate: tokio::sync::Mutex<()>,
     pub(super) timers: Arc<timer::Scheduler>,
     pub(super) initial_execution: Option<tok_rpc::protocol::internal::v1::ExecutionSnapshot>,
