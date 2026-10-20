@@ -51,6 +51,7 @@ impl Authenticator for Auth {
 }
 
 struct Tracker {
+    events: Mutex<Vec<u64>>,
     calls: AtomicUsize,
     total: AtomicUsize,
     peak_total: AtomicUsize,
@@ -67,6 +68,31 @@ impl Drop for Inflight {
 }
 struct TestExecutor(Arc<Tracker>);
 impl Executor for TestExecutor {
+    fn execute_event(
+        &self,
+        identity: SessionIdentity,
+        request_id: u64,
+        event: Arc<tok_events::Message>,
+    ) -> tok_gateway::player::EventTask<'_> {
+        Box::pin(async move {
+            self.0.events.lock().unwrap().push(request_id);
+            let reply = self
+                .execute_request(
+                    identity,
+                    LogicalMessage {
+                        kind: MessageKind::Request,
+                        message_id: 1,
+                        request_id,
+                        server_seq: None,
+                        error_code: 0,
+                        body: event.body.clone(),
+                    },
+                )
+                .await?;
+            Ok(reply.timers)
+        })
+    }
+
     fn execute_request(&self, identity: SessionIdentity, request: LogicalMessage) -> Task<'_> {
         Box::pin(async move {
             self.0.calls.fetch_add(1, Ordering::SeqCst);
@@ -124,8 +150,16 @@ impl Fixture {
         config: Config,
         backend: impl FnOnce(Arc<MemoryOwnership>) -> Arc<dyn OwnershipStore>,
     ) -> Self {
+        Self::with_backend_and_events(config, backend, None).await
+    }
+    async fn with_backend_and_events(
+        config: Config,
+        backend: impl FnOnce(Arc<MemoryOwnership>) -> Arc<dyn OwnershipStore>,
+        events: Option<&tok_events::nats::Bus>,
+    ) -> Self {
         let (started, receiver) = mpsc::unbounded_channel();
         let tracker = Arc::new(Tracker {
+            events: Mutex::new(Vec::new()),
             calls: AtomicUsize::new(0),
             total: AtomicUsize::new(0),
             peak_total: AtomicUsize::new(0),
@@ -134,17 +168,44 @@ impl Fixture {
             permits: Semaphore::new(0),
         });
         let ownership = Arc::new(MemoryOwnership::new(config.max_sessions).unwrap());
-        let gateway = Gateway::player(
-            config,
-            SessionOwner {
-                node_id: "local".into(),
-                service_name: "player-gateway".into(),
-            },
-            Arc::new(Auth),
-            backend(Arc::clone(&ownership)),
-            Arc::new(TestExecutor(Arc::clone(&tracker))),
-        )
+        let mut limits = config.runtime_limits();
+        if events.is_some() {
+            limits.max_tasks += 1;
+        }
+        let gateway = Gateway::new(limits, |context| {
+            tok_gateway::player::Ingress::new(
+                context,
+                config,
+                SessionOwner {
+                    node_id: "local".into(),
+                    service_name: "player-gateway".into(),
+                },
+                Arc::new(Auth),
+                backend(Arc::clone(&ownership)),
+                Arc::new(TestExecutor(Arc::clone(&tracker))),
+            )
+        })
         .unwrap();
+        if let Some(events) = events {
+            let subscription = events
+                .subscribe(
+                    tok_events::Subscriber::new(
+                        Arc::new(game_subscriber(gateway.ingress().sessions())),
+                        None,
+                    )
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+            let context = gateway.context();
+            let stop = context.cancellation();
+            context
+                .launch(Box::pin(async move {
+                    subscription.run(stop).await.map_err(std::io::Error::other)
+                }))
+                .await
+                .unwrap();
+        }
         let sessions = gateway.ingress().sessions();
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -1359,5 +1420,461 @@ async fn refresh_cannot_issue_credentials_after_ownership_is_lost() {
     }
     assert!(fixture.sessions.session("1").unwrap().is_none());
     assert!(!login.resume_token.is_empty());
+    fixture.finish().await;
+}
+
+#[derive(Clone, Copy)]
+enum TestKind {
+    Broadcast,
+    Forward,
+}
+fn event_message(
+    target: tok_gateway::player::events::Target,
+    kind: TestKind,
+    body: &[u8],
+) -> tok_gateway::player::events::Delivery {
+    use tok_gateway::player::events::{Action, Delivery};
+    Delivery {
+        target,
+        action: match kind {
+            TestKind::Broadcast => Action::Notify {
+                message_id: 10,
+                body: body.to_vec(),
+            },
+            TestKind::Forward => Action::Forward(Arc::new(tok_events::Message {
+                event_id: tok_events::EventId::generate(),
+                event_type: "test.event".into(),
+                body: body.to_vec(),
+                trace_context: Default::default(),
+            })),
+        },
+    }
+}
+// 游戏定义自己的事件正文和网关策略，传输层不认识玩家目标。
+#[derive(Clone, PartialEq, prost::Message)]
+struct GameEvent {
+    #[prost(string, repeated, tag = "1")]
+    players: Vec<String>,
+    #[prost(string, optional, tag = "2")]
+    topic: Option<String>,
+    #[prost(bool, tag = "3")]
+    notify: bool,
+    #[prost(bytes, tag = "4")]
+    body: Vec<u8>,
+}
+impl tok_events::Event for GameEvent {
+    const NAME: &'static str = "test.game.event";
+}
+fn publication(delivery: tok_gateway::player::events::Delivery) -> tok_events::Message {
+    use tok_gateway::player::events::{Action, Target};
+    let (notify, body) = match delivery.action {
+        Action::Notify { body, .. } => (true, body),
+        Action::Forward(event) => (false, event.body.clone()),
+    };
+    let mut game = GameEvent {
+        players: vec![],
+        topic: None,
+        notify,
+        body,
+    };
+    match delivery.target {
+        Target::All => {}
+        Target::Players(players) => game.players = players,
+        Target::Topic(topic) => game.topic = Some(topic),
+    }
+    tok_events::Message::new(
+        tok_events::Envelope::new(tok_events::EventId::generate(), game).unwrap(),
+    )
+    .unwrap()
+}
+fn game_subscriber(sessions: SessionManager) -> tok_events::Registry {
+    let mut handlers = tok_events::Registry::new(1).unwrap();
+    handlers
+        .register::<GameEvent, _, _>(move |_, event| {
+            let sessions = sessions.clone();
+            async move {
+                use tok_gateway::player::events::Target;
+                let target = if let Some(topic) = event.topic {
+                    Target::Topic(topic)
+                } else if event.players.is_empty() {
+                    Target::All
+                } else {
+                    Target::Players(event.players)
+                };
+                let kind = if event.notify {
+                    TestKind::Broadcast
+                } else {
+                    TestKind::Forward
+                };
+                let report = sessions
+                    .deliver(&event_message(target, kind, &event.body))
+                    .await
+                    .map_err(|_| tok_events::Error::Unavailable("游戏事件准入失败"))?;
+                Ok(report.into())
+            }
+        })
+        .unwrap();
+    handlers
+}
+
+#[tokio::test]
+async fn client_cannot_submit_server_events_or_send_notify_frames() {
+    let fixture = Fixture::new(config()).await;
+    let mut client = fixture.connect().await;
+    assert_eq!(client.login(1, "1").await.error_code, 0);
+    let event = publication(event_message(
+        tok_gateway::player::events::Target::All,
+        TestKind::Forward,
+        b"forged",
+    ));
+    // 即使业务正文是完整 broker 事件编码，也只能走普通请求表。
+    client.request(2, 999, &event.encode(4096).unwrap()).await;
+    assert!(
+        matches!(client.read().await, Content::Response(response) if response.error_code == ErrorCode::UnknownMessage as u32)
+    );
+    assert!(fixture.tracker.events.lock().unwrap().is_empty());
+    // Notify 只允许下行；伪造合法帧不能取得服务器事件发送权限。
+    client
+        .send(Content::Notify(protocol::Notify {
+            message_id: 10,
+            body: b"forged".to_vec(),
+            server_seq: 1,
+        }))
+        .await;
+    assert!(
+        matches!(client.read().await, Content::Error(error) if error.error_code == ErrorCode::InvalidState as u32)
+    );
+    assert!(fixture.tracker.events.lock().unwrap().is_empty());
+    fixture.finish().await;
+}
+#[tokio::test]
+async fn events_share_request_fifo_have_independent_sequence_and_respect_queue_capacity() {
+    let mut fixture = Fixture::new(Config {
+        queue_capacity: 1,
+        ..config()
+    })
+    .await;
+    let mut client = fixture.connect().await;
+    assert_eq!(client.login(1, "1").await.error_code, 0);
+    client.request(2, 1, b"block").await;
+    fixture.started.recv().await.unwrap();
+    let message = event_message(
+        tok_gateway::player::events::Target::Players(vec!["1".into(), "1".into()]),
+        TestKind::Forward,
+        b"event",
+    );
+    assert_eq!(
+        fixture.sessions.deliver(&message).await.unwrap().admitted,
+        1
+    );
+    assert_eq!(
+        fixture.sessions.deliver(&message).await.unwrap().rejected,
+        1
+    );
+    assert!(fixture.tracker.events.lock().unwrap().is_empty());
+    fixture.tracker.permits.add_permits(1);
+    assert!(matches!(client.read().await, Content::Response(response) if response.request_id==2));
+    fixture.started.recv().await.unwrap();
+    client.request(3, 1, b"next").await;
+    assert!(
+        matches!(client.read().await,Content::Response(response) if response.request_id==3 && response.server_seq==2)
+    );
+    assert_eq!(*fixture.tracker.events.lock().unwrap(), vec![1]);
+    assert_eq!(
+        fixture.tracker.players.lock().unwrap().get("1").unwrap().1,
+        1
+    );
+    fixture.finish().await;
+}
+#[tokio::test]
+async fn broadcast_filters_topics_and_offline_sessions_without_executing_player() {
+    let fixture = Fixture::new(Config {
+        max_topics: 1,
+        ..config()
+    })
+    .await;
+    let mut one = fixture.connect().await;
+    let mut two = fixture.connect().await;
+    assert_eq!(one.login(1, "1").await.error_code, 0);
+    assert_eq!(two.login(1, "2").await.error_code, 0);
+    let handle = fixture.sessions.session("1").unwrap().unwrap();
+    handle.join_topic("guild:7").unwrap();
+    handle.join_topic("guild:7").unwrap();
+    assert_eq!(
+        handle.join_topic("guild:8").unwrap_err().code,
+        ErrorCode::CapacityExceeded
+    );
+    let message = event_message(
+        tok_gateway::player::events::Target::Topic("guild:7".into()),
+        TestKind::Broadcast,
+        b"notice",
+    );
+    let report = fixture.sessions.deliver(&message).await.unwrap();
+    assert_eq!(report.admitted, 1);
+    assert_eq!(report.skipped, 0);
+    assert!(
+        matches!(one.read().await,Content::Notify(notify) if notify.server_seq==1 && notify.body==b"notice")
+    );
+    assert_eq!(fixture.tracker.calls.load(Ordering::SeqCst), 0);
+    handle.leave_topic("guild:7").unwrap();
+    assert_eq!(
+        fixture.sessions.deliver(&message).await.unwrap().admitted,
+        0
+    );
+    let all = event_message(
+        tok_gateway::player::events::Target::All,
+        TestKind::Broadcast,
+        b"all",
+    );
+    assert_eq!(fixture.sessions.deliver(&all).await.unwrap().admitted, 2);
+    assert!(matches!(one.read().await, Content::Notify(_)));
+    assert!(matches!(two.read().await, Content::Notify(_)));
+    drop(one);
+    drop(two);
+    // 等到 TCP 解绑完成；宽限期保留的 session 不接收新事件，也不消耗下行序号。
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    assert_eq!(fixture.sessions.deliver(&all).await.unwrap().admitted, 0);
+    assert_eq!(
+        fixture
+            .sessions
+            .deliver(&event_message(
+                tok_gateway::player::events::Target::Players(vec!["offline".into()]),
+                TestKind::Forward,
+                b"skip"
+            ))
+            .await
+            .unwrap()
+            .skipped,
+        1
+    );
+    assert_eq!(fixture.tracker.calls.load(Ordering::SeqCst), 0);
+    fixture.finish().await;
+}
+
+#[tokio::test]
+async fn large_topic_delivery_yields_and_rechecks_membership_after_resuming() {
+    use std::{future::Future, task::Poll};
+    let fixture = Fixture::new(Config {
+        max_sessions: 65,
+        max_connections: 65,
+        ..config()
+    })
+    .await;
+    let mut clients = Vec::new();
+    let mut handles = Vec::new();
+    for player in 1..=65 {
+        let player = player.to_string();
+        let mut client = fixture.connect().await;
+        assert_eq!(client.login(1, &player).await.error_code, 0);
+        let handle = fixture.sessions.session(&player).unwrap().unwrap();
+        handle.join_topic("large").unwrap();
+        handles.push(handle);
+        clients.push(client);
+    }
+    let delivery = event_message(
+        tok_gateway::player::events::Target::Topic("large".into()),
+        TestKind::Broadcast,
+        b"batch",
+    );
+    let mut pending = Box::pin(fixture.sessions.deliver(&delivery));
+    let first = std::future::poll_fn(|cx| Poll::Ready(pending.as_mut().poll(cx))).await;
+    assert!(first.is_pending(), "大规模投递必须让出调度");
+    // 暂停期间退出主题不受索引/会话锁阻塞；快照中的剩余目标必须重新校验。
+    for handle in &handles {
+        handle.leave_topic("large").unwrap();
+    }
+    let report = pending.await.unwrap();
+    assert_eq!(report.admitted, 64);
+    assert_eq!(report.skipped, 1);
+    assert_eq!(fixture.tracker.calls.load(Ordering::SeqCst), 0);
+    fixture.finish().await;
+}
+
+#[tokio::test]
+async fn topic_index_survives_resume_and_cleans_up_replaced_and_closed_sessions() {
+    let fixture = Fixture::new(Config {
+        disconnect_grace_ms: 2000,
+        ..config()
+    })
+    .await;
+    let mut first = fixture.connect().await;
+    let login = first.login(1, "1").await;
+    let old = fixture.sessions.session("1").unwrap().unwrap();
+    old.join_topic("guild:7").unwrap();
+    drop(first);
+    let mut resumed = fixture.connect().await;
+    assert_eq!(
+        resumed.resume(1, &login.resume_token, 0).await.error_code,
+        0
+    );
+    assert!(matches!(resumed.read().await, Content::Recovered(_)));
+    let delivery = event_message(
+        tok_gateway::player::events::Target::Topic("guild:7".into()),
+        TestKind::Broadcast,
+        b"notice",
+    );
+    assert_eq!(
+        fixture.sessions.deliver(&delivery).await.unwrap().admitted,
+        1
+    );
+    assert!(matches!(resumed.read().await, Content::Notify(notify) if notify.server_seq == 1));
+    let mut replacement = fixture.connect().await;
+    assert_eq!(replacement.login(1, "1").await.error_code, 0);
+    assert_eq!(
+        fixture.sessions.deliver(&delivery).await.unwrap().admitted,
+        0
+    );
+    let current = fixture.sessions.session("1").unwrap().unwrap();
+    current.join_topic("guild:7").unwrap();
+    assert!(old.leave_topic("guild:7").is_err());
+    old.close();
+    assert_eq!(
+        fixture.sessions.deliver(&delivery).await.unwrap().admitted,
+        1
+    );
+    assert!(matches!(replacement.read().await, Content::Notify(notify) if notify.server_seq == 1));
+    current.close();
+    assert_eq!(
+        fixture.sessions.deliver(&delivery).await.unwrap().admitted,
+        0
+    );
+    fixture.finish().await;
+}
+
+#[tokio::test]
+#[ignore = "需要真实 NATS；通过 just nats-test 显式运行"]
+async fn nats_independent_gateways_route_all_players_topics_and_forward_to_their_own_queues() {
+    let config = tok_events::nats::Config {
+        url: std::env::var("TOK_TEST_NATS_URL").unwrap_or_else(|_| "nats://127.0.0.1:4222".into()),
+        namespace: format!("gateways-{}", uuid::Uuid::new_v4()),
+        ..Default::default()
+    };
+    let a_bus = tok_events::nats::Bus::connect(config.clone())
+        .await
+        .unwrap();
+    let b_bus = tok_events::nats::Bus::connect(config.clone())
+        .await
+        .unwrap();
+    let publisher = tok_events::nats::Bus::connect(config).await.unwrap();
+    let mut a =
+        Fixture::with_backend_and_events(crate::config(), |memory| memory, Some(&a_bus)).await;
+    let mut b =
+        Fixture::with_backend_and_events(crate::config(), |memory| memory, Some(&b_bus)).await;
+    let mut one = a.connect().await;
+    let mut two = b.connect().await;
+    assert_eq!(one.login(1, "1").await.error_code, 0);
+    assert_eq!(two.login(1, "2").await.error_code, 0);
+    a.sessions
+        .session("1")
+        .unwrap()
+        .unwrap()
+        .join_topic("guild:7")
+        .unwrap();
+    let all = event_message(
+        tok_gateway::player::events::Target::All,
+        TestKind::Broadcast,
+        b"all",
+    );
+    publisher.publish(&publication(all)).await.unwrap();
+    assert!(
+        matches!(one.read().await,Content::Notify(notify) if notify.body==b"all" && notify.server_seq==1)
+    );
+    assert!(
+        matches!(two.read().await,Content::Notify(notify) if notify.body==b"all" && notify.server_seq==1)
+    );
+    let topic = event_message(
+        tok_gateway::player::events::Target::Topic("guild:7".into()),
+        TestKind::Broadcast,
+        b"topic",
+    );
+    publisher.publish(&publication(topic)).await.unwrap();
+    assert!(
+        matches!(one.read().await,Content::Notify(notify) if notify.body==b"topic" && notify.server_seq==2)
+    );
+    let forward = event_message(
+        tok_gateway::player::events::Target::Players(vec!["1".into(), "2".into()]),
+        TestKind::Forward,
+        b"forward",
+    );
+    publisher.publish(&publication(forward)).await.unwrap();
+    a.started.recv().await.unwrap();
+    b.started.recv().await.unwrap();
+    one.request(2, 1, b"after").await;
+    two.request(2, 1, b"after").await;
+    assert!(
+        matches!(one.read().await,Content::Response(response) if response.request_id==2 && response.server_seq==3)
+    );
+    assert!(
+        matches!(two.read().await,Content::Response(response) if response.request_id==2 && response.server_seq==2)
+    );
+    assert_eq!(*a.tracker.events.lock().unwrap(), vec![1]);
+    assert_eq!(*b.tracker.events.lock().unwrap(), vec![1]);
+    a.finish().await;
+    b.finish().await;
+    publisher.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn built_in_event_handlers_and_custom_components_compose_independently() {
+    use tok_events::{Handler, Outcome, Subscriber};
+    use tok_gateway::player::events::{Target, forward, notify};
+    let fixture = Fixture::new(config()).await;
+    let mut client = fixture.connect().await;
+    assert_eq!(client.login(1, "1").await.error_code, 0);
+    let message = Arc::new(publication(event_message(
+        Target::All,
+        TestKind::Forward,
+        b"value",
+    )));
+    let forwarding =
+        Arc::new(forward::<GameEvent, _>(fixture.sessions.clone(), |_| Ok(Target::All)).unwrap());
+    let notifying = Arc::new(
+        notify::<GameEvent, _>(fixture.sessions.clone(), 12, |event| {
+            Ok((Target::All, event.body))
+        })
+        .unwrap(),
+    );
+    let components = [
+        Subscriber::new(
+            Arc::clone(&forwarding) as Arc<dyn Handler>,
+            Some("game.forward"),
+        )
+        .unwrap(),
+        Subscriber::new(Arc::clone(&notifying) as Arc<dyn Handler>, None).unwrap(),
+    ];
+    assert_eq!(components[0].group(), Some("game.forward"));
+    assert_eq!(components[1].group(), None);
+    assert_eq!(
+        forwarding.handle(Arc::clone(&message)).await.unwrap(),
+        Outcome::Handled
+    );
+    // 请求作为 FIFO 屏障，确保之前入队的事件已经执行；事件本身不生成客户端回应。
+    client.request(2, 1, b"barrier").await;
+    assert!(matches!(client.read().await, Content::Response(response) if response.request_id == 2));
+    assert_eq!(*fixture.tracker.events.lock().unwrap(), vec![1]);
+    let calls = fixture.tracker.calls.load(Ordering::SeqCst);
+    assert_eq!(
+        notifying.handle(Arc::clone(&message)).await.unwrap(),
+        Outcome::Handled
+    );
+    assert!(
+        matches!(client.read().await, Content::Notify(notice) if notice.message_id == 12 && notice.body == b"value")
+    );
+    assert_eq!(fixture.tracker.calls.load(Ordering::SeqCst), calls);
+    // 同一事件还可交给完全自定义的处理者，不需要进入转发或通知分支。
+    let count = Arc::new(AtomicUsize::new(0));
+    let captured = Arc::clone(&count);
+    let mut custom = tok_events::Registry::new(1).unwrap();
+    custom
+        .register::<GameEvent, _, _>(move |_, _| {
+            captured.fetch_add(1, Ordering::SeqCst);
+            async { Ok(Outcome::Handled) }
+        })
+        .unwrap();
+    assert_eq!(custom.handle(message).await.unwrap(), Outcome::Handled);
+    let custom = Subscriber::new(Arc::new(custom), Some("game.custom")).unwrap();
+    assert_eq!(custom.group(), Some("game.custom"));
+    assert_eq!(count.load(Ordering::SeqCst), 1);
+    assert_eq!(fixture.tracker.calls.load(Ordering::SeqCst), calls);
     fixture.finish().await;
 }

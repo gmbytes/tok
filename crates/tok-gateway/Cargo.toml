@@ -16,6 +16,7 @@ tokio-util.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+tracing-opentelemetry.workspace = true
 metrics.workspace = true
 uuid.workspace = true
 base64.workspace = true

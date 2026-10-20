@@ -100,7 +100,7 @@ trace_sample_ratio = 0.1
 ```
 
 指标不使用 player_id、bid 或 request_id 作为标签。token 和协议正文默认不记录。
-内部 RPC 已通过 metadata 传播 W3C TraceContext；NATS 传播随事件组件实现接入。
+内部 RPC 已通过 metadata 传播 W3C TraceContext；Core NATS 已通过标准 headers 传播，转发进入 session 后继续关联至内部事件 RPC。
 
 ## 内部 RPC 与共享端点
 
@@ -172,7 +172,11 @@ endpoint = "internal-rpc"
 工厂初始化不能等待尚未启动的其他服务；依赖调用应在必要服务就绪后发起。
 
 调用方通过 [`runtime::Application::service_directory`] 或 [`runtime::ServiceContext::directory`]
-查询服务，再用 [`infra::routing::route`] 按 bid 选点，使用 [`rpc::RpcClients`] 调用。
+查询服务，再用 [`infra::routing::route`] 按 bid 选点。
+[`rpc::RpcClients`] 只管理共享连接、缓存撤销和默认期限，不包含 Player 或 Business 方法。
+[`rpc::player::Client`] 提供 call / handle_event，[`rpc::business::Client`] 提供普通业务 call；
+构造时分别传入同一个 `Arc<RpcClients>`，协议适配器共享连接但保持各自的调用约束。
+自定义 protobuf 客户端可以使用 RpcClients::channel 取得 Channel，结合 timeout 设置自己的调用预算和协议适配。
 Channel 缓存有界，节点和地址相同的服务复用连接；节点变更时调用 `invalidate` 撤销该节点缓存。
 请求携带 [`core::CallContext`]，player 调用还需匹配的 [`core::SessionIdentity`]。
 上下文校验检查目标和字段一致性，不能代替内部调用身份认证或全局 session 所有权校验。
@@ -379,7 +383,7 @@ Redis 发现只解决服务定位。玩家状态仍在进程内存，session 所
 
 请求与回应的配对仍通过 HandlerRegistry 显式注册；客户端调用辅助函数从请求、回应类型读取 ID。
 名称关联只在构建期生成静态映射，运行时通过数字分发，不按字符串猜测类型或回应。
-数值一经使用保持稳定，不因重排枚举或 Rust 模块而改变；删除消息时将其编号与枚举名称标记为 `reserved`，不能复用。
+协议正式发布后，数值保持稳定，不因重排枚举或 Rust 模块而改变；删除已发布消息时将其编号与枚举名称标记为 `reserved`，不能复用。发布前可直接调整结构与编号。
 这套生成约定属于示例游戏，框架信封和 HandlerRegistry 仍使用 `u32`，不依赖游戏枚举或命名约定。
 
 运行 `just client-smoke` 会启动示例，完成真实 TCP 登录、状态读取、写入、再次读取及 player 调用 guild，然后退出并清理监听。
@@ -443,7 +447,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 游戏通过 [`gateway::player::Authenticator`] 返回规范化的可信玩家 ID，同一玩家的凭据别名必须归一到相同 ID。
 `gateway::Gateway::player` 注入认证器、[`core::coordination::OwnershipStore`] 和
 [`gateway::player::Executor`]；[`gateway::player::RpcExecutor`] 可组合
-[`infra::routing::RendezvousRouter`] 与 [`rpc::RpcClients`] 调用 player 服务。
+[`infra::routing::RendezvousRouter`] 与 [`rpc::player::Client`] 调用 player 服务，后者复用共享 RpcClients。
 网关工厂先绑定 TCP 监听，再把监听及服务退出 token 交给 `serve` 的受监督任务。
 客户端正文不提供 session 身份；示例 player 从可信的调用上下文读取玩家 ID。
 
@@ -707,7 +711,7 @@ timer 失败或超时只记录本次失败，不重试；周期的后续触发�
 
 [`events::Event`] 由游戏声明稳定的 `NAME`，使用 1 到 128 字节的 ASCII 字母、数字、点、短横线或下划线，点分段不能为空。
 不要用 Rust 类型名作为跨节点事件标识；事件定义与客户端消息 ID 分开。
-`DELIVERY` 默认 [`events::DeliveryPolicy::Immediate`]，`LOAD_OFFLINE` 默认 false；这些选项只供后续跨节点适配使用。
+`DELIVERY` 默认 [`events::DeliveryPolicy::Immediate`]；Core NATS 只接受即时投递，本地分发不使用该选项。离线加载是后续会话适配能力，不是通用事件字段。
 
 [`events::local::Dispatcher`] 为一种事件保存有界数量的同步订阅者。
 组装时按顺序注册，通过显式借用当前业务状态进行分发；不进入 session 队列，不产生后台任务，也不内部获取锁或所有权。
@@ -746,12 +750,131 @@ assert_eq!(value, 3);
 业务通过保存的生产时刻跳过过时与重复触发，先检查产出溢出再写状态；这是示例业务保护，并非分发器提供幂等或事务。
 订阅者错误沿原 RPC 调用返回，不为本地事件单独生成客户端 Response，也不生成或缓存 event_id。
 
-[`events::Envelope`] 另行定义跨节点事件的数据契约：稳定 [`events::EventId`]、[`events::EventTarget`]、强类型载荷及 [`events::TraceContext`]。
-新事件用 `EventId::generate()` 生成 UUID v4；从已有记录恢复用 `EventId::new(...)`，同一次事件重复发布必须保留原 ID。
-ID 限制为 1 到 128 个可打印 ASCII 非空白字节；频道不能为空且最多 256 字节，指定玩家列表限 1 到 1024 项。
-游戏 ID 类型仍由游戏选择，身份格式与载荷编码限制留给后续适配；修改 Envelope 的公开字段后须重新 validate。
-追踪头只是每字段最多 512 字节的 ASCII 数据载体，不解析完整 W3C 格式、不自动读取 span，后续传输适配负责注入提取。
-Envelope 当前没有发布和消费接口；Core NATS、JetStream、频道订阅、离线加载、转发入队、广播下行及跨节点去重尚未实现。
+[`events::Envelope`] 保存稳定 [`events::EventId`]、强类型正文及 [`events::TraceContext`]，不携带玩家目标或客户端消息 ID。
+业务侧使用强类型 `Envelope<E>`，运行时使用正文已编码的 `Message`，网络协议使用 `tok_proto::internal::v1::EventEnvelope`；追踪信息通过 NATS headers 传输。
+新事件用 `EventId::generate()` 生成 UUID v4；同一次事件重复发布保持原 ID，框架不自动去重。
+ID 限制为 1 到 128 个可打印 ASCII 非空白字节，追踪头每字段最多 512 字节。
+标准 OpenTelemetry 传播器负责注入提取，未指定追踪头时 Message 构造默认采集当前 span。
+
+## Core NATS 即时事件
+
+任何服务都可以使用 [`events::nats::Bus::publish_event`] 发布，用 [`events::Registry`] 订阅自己关心的类型。
+目标由业务正文表达，订阅者自行解释；总线不要求 player、session 或 RPC。
+每个 Registry 对一种类型注册一个异步处理函数，未注册类型忽略；多个服务可以分别订阅同一种事件。
+处理函数可捕获状态与发布连接，也可以实现 [`events::Handler`] 自定义分发。
+
+```rust,no_run
+use std::sync::Arc;
+use tok::events::{self, Envelope, Event, EventId};
+use tokio_util::sync::CancellationToken;
+
+#[derive(Clone, PartialEq, prost::Message)]
+struct GuildChanged { #[prost(uint64, tag = "1")] guild_id: u64 }
+impl Event for GuildChanged { const NAME: &'static str = "game.guild.changed.v1"; }
+
+# async fn example(stop: CancellationToken) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+let bus = events::nats::Bus::connect(events::nats::Config::default()).await?;
+let mut handlers = events::Registry::new(16)?;
+handlers.register::<GuildChanged, _, _>(|message, event| async move {
+    // 这里可以更新公会状态、处理邮件或编排其他服务器操作。
+    println!("{}: {}", message.event_id, event.guild_id);
+    Ok(events::Outcome::Handled)
+})?;
+let subscription = bus.subscribe(tok::events::Subscriber::new(Arc::new(handlers), None)?).await?;
+bus.publish_event(Envelope::new(EventId::generate(), GuildChanged { guild_id: 7 })?).await?;
+// 将此 future 交给服务运行时监督；生产代码不能遗留脱管任务。
+subscription.run(stop).await?;
+# Ok(())
+# }
+```
+
+订阅的 subject 为 `tok.events.<namespace>.<event_type>`，从 Handler::event_types 声明的类型集合构造，不订阅无关事件。
+`Subscriber::new(handler, None)` 组装独立接收的组件；`Some("mail.reward")` 让同名 group 内的实例分担同类事件。
+不同 group 分别得到一份；group 属于订阅配置，不属于 Event，不从服务名推导，也不提供 bid 归属路由、持久化或去重。
+按 bid 持有状态的服务仍需自行路由到对应实例。group 属于每个订阅组件的组装选择，网关不固定消费策略。仅查询本地会话的组件在多网关部署中需要各节点独立接收；若采用同组消费，组件必须保证事件能够路由到目标会话所在节点。
+
+克隆 Bus 共享连接、发布容量与订阅预算；同一连接可建立多个逻辑订阅。每个订阅串行等待 handler，不新增并发工作池。
+仅保证同类型订阅内的接收顺序；跨类型、跨发布者及 group 不提供全局执行顺序。session FIFO 按实际准入顺序串行，不承担跨订阅排序。
+handler 有有限等待期限，退出或超时会取消在途 future，已产生的副作用不回滚、不重试。
+取消、退出或丢弃一个订阅只退订自身，不关闭共享连接；Bus::close 由连接持有者显式调用。
+断线、发布入队失败或取消会保守停用连接；SDK 报告慢消费者时停止本连接上的所有消费任务并上报，发布仍可使用。需要消费故障隔离时使用独立 Bus。
+
+回调收到原始 `Arc<Message>` 及已解码 E。转发直接共享原始 Message，不重新编码，也不重新采集追踪头。
+`Outcome` 区分 Ignored、Handled、Rejected、Partial，表示当前 handler 阶段的处理结果；日志/指标另列错误与超时。
+网关可把 deliver 的 Report 转为 Outcome，Handled 只表示完成本地准入，不表示后续 player 执行完成。
+内部 Executor::execute_event 只返回可选 TimerUpdate，类型上不包含客户端回应；业务执行结果由会话处理，不返回 NATS 发布者。
+
+发布成功仅表示客户端已接受发布操作，不保证 broker 接收或订阅者执行完成，断线仍可能丢失事件。无订阅者、队列满、离线及冻结窗口可能丢失事件，不自动重试或去重。
+Core NATS 拒绝 Persistent，不静默降级；JetStream、离线加载和去重辅助仍待实现。
+仅订阅初始化通过同连接临时 inbox 自回环确认订阅命令已被 broker 处理，需要相应发布与订阅权限；只确认当前连接，不保证其他节点已就绪。发布不创建探测订阅、不等待回环。async-nats 0.50 的 flush 只确认本地写出，不承担订阅就绪确认。
+通用 protobuf 事件协议使用初始版本 1；尚未发布，不保留开发中间字段编号或维护其兼容。
+
+### 游戏自定义网关处理
+
+[`events::Subscriber`] 将 Handler 与可选 group 组合为独立订阅组件；同一网关可安装多个组件，各自选择类型、消费组和处理行为。
+[`gateway::player::events::forward`] 提供基本的玩家转发处理者，游戏负责从强类型正文选择 Target，原始事件进入 session FIFO。
+[`gateway::player::events::notify`] 提供广播通知处理者，游戏负责选择 Target 和通知正文，并指定客户端消息 ID。
+这两个内置处理者返回 Registry，可交给 Subscriber 组装；自定义 Registry 或 Handler 使用同一抽象，没有固定的组件种类枚举。
+示例将玩家转发与通知分别组装为两个组件；None 只是该示例本地筛选方式的选择，不是网关限制。
+
+事件订阅由游戏服务工厂组装。取得 Gateway::context()，显式预留后台任务容量，再把 subscription.run(stop) 交给该运行时监督。
+Ingress 不依赖 NATS，也不限制只能安装一个事件消费任务；可在 `serve` 前确认订阅并提交任务。发布/订阅连接的关闭由持有者负责。
+用 ingress.sessions() 捕获会话目录并注册游戏处理者；普通服务则把同一个消费 future 纳入自己的 ServiceTask。
+处理函数可执行自定义网关操作，也可创建 [`gateway::player::events::Delivery`] 交给 SessionManager::deliver：
+
+- `Action::Notify { message_id, body }`：显式转换为客户端协议通知，不执行 player；成功准入后沿 server_seq 进入补发缓存。
+- `Action::Forward(payload)`：服务器事件排入 session 原有 FIFO，与请求和 timer 串行；不产生客户端 Response。
+
+此处 topic 是游戏内用于筛选会话的订阅主题，例如 `guild:7`；NATS subject 按事件类型路由到订阅组件，两者不要求一一对应。内部 `channel::Channel` 则管理会话通信与连接，三者职责独立。
+
+`Target` 支持 Players、Topic、All，仅筛选本地在线且未冻结、未恢复的会话，未知或离线玩家不拉起。
+这些目标和动作是网关本地 API，不是通用事件传输字段。通知正文可以和事件正文完全不同。
+`deliver(...).await` 返回 admitted / skipped / rejected，本地准入不等于玩家执行完成。
+主题使用本地反向索引，只遍历其成员；Players 按 ID 查找，All 遍历本地会话。每处理 64 个目标让出调度，不在跨 await 时持有目录、索引或会话锁。
+通知正文在在线及成员检查通过后才复制。skipped 只计入已选目标中不满足准入条件的会话，不把非主题成员计入。
+索引保存弱引用及完整会话身份，加入/退出与会话状态在同一锁下更新；关闭或析构清理，恢复保留，交接重建，旧代次清理不影响新代次。
+取消分发 future 不回滚已准入目标；让出调度期间发生退出、关闭或冻结，后续目标会重新检查。
+
+需要会话内定制处理时，注入自己的 [`gateway::player::Executor`]，实现 execute_event 并委托其他来源给 RpcExecutor。
+事件仍先进入会话 FIFO，续租并检查所有权后执行；默认 RPC 适配调用 PlayerRpc.HandleEvent，返回独立 EventResponse（序号、错误、timer 更新），类型上没有客户端 payload。
+[`rpc::HandlerRegistry::register_event`] 与普通请求、timer 表隔离；自定义 CallHandler 可实现 event，TowerHandler 只适配原 Call 输入。
+GatewayIngress、Handler、SessionManager 服务器 API、Executor 分别覆盖接入、网关事件编排、会话筛选和串行执行扩展。
+游戏附加内存状态不会自动迁移，若需跨网关恢复，应另外设计快照与恢复规则。
+
+事件完全由服务器驱动。客户端 Frame 没有事件入口；将事件编码塞进业务 Request 也不会进入事件表，伪造上行 Notify 被拒绝。
+客户端请求不能选择内部事件名称、广播动作、目标或 timer 来源。游戏可以让明确注册且完成业务校验的请求主动发布事件。
+内部 gRPC 和 NATS 的可信性依赖部署及认证，不能仅靠字段校验阻止持有内部凭据的调用者。
+
+可信服务器通过 SessionHandle::join_topic / leave_topic 管理成员，默认每会话 64 个，最多 1024 个，主题名最多 256 字节。
+同网关恢复保留，新登录重建，交接随版本 1 快照迁移；冻结期间拒绝修改，旧句柄不能影响新会话。
+没有客户端主题管理协议。客户端 Frame 仍为版本 3。
+
+示例显式配置连接，不改变 ServiceConfig：
+
+```toml
+[events]
+url = "nats://127.0.0.1:4222"
+namespace = "dev"
+operation_timeout_ms = 2000
+max_message_bytes = 1048576
+subscription_capacity = 64
+client_capacity = 128
+max_subscriptions = 32
+max_buffer_bytes = 134217728
+handler_timeout_ms = 5000
+```
+
+`max_message_bytes` 包含事件正文与追踪头，总上限 1 MiB。每个活动的类型订阅按 `subscription_capacity × max_message_bytes` 预留缓冲预算，
+总额不得超过 max_buffer_bytes；同名类型的多个 group 分别占用。数量或预算不足在初始化时拒绝，退订/丢弃后释放。
+这是对配置范围内排队正文的保守预留，不是进程堆内存硬限额，不包含 SDK 元数据、在途解码和无效超大输入。
+max_subscriptions 限制总类型订阅数；client_capacity 控制命令缓冲与并发发布，handler_timeout_ms 约束当前 handler。
+连接/发布的 operation_timeout_ms 与 handler 等待期限分别管理。
+配置校验不连接 NATS，URL 凭据不进入 Debug 或框架错误。坏包拒绝并记录，队列容量不足快速拒绝，不积压重试。
+W3C traceparent / tracestate 使用标准 NATS headers；发布、网关接收、session 排队和内部 RPC 保持关联，指标不使用玩家 ID 标签。
+
+`just nats-test` 使用 TOK_TEST_NATS_URL（默认本机 4222）验证真实 NATS、独立网关、坏包、断线、过载、无回环发布和订阅就绪确认。
+`just nats-smoke` 使用 events.toml 真实登录客户端，发布 AddValue 后由游戏网关订阅者转发给 player；发布 ValueChanged 后由订阅者转换为 ValueNotice。
+示例通知 ID 在 proto 枚举中定义，内部 AddValue 没有客户端消息 ID；普通配置不启用 NATS，不依赖消息服务器。
 
 ## 统一 Gateway 与接入组件
 
@@ -811,11 +934,11 @@ Scene 目前仅预留模块，不套用 Player 的串行与所有权语义。
 | [`infra`] | 服务目录、路由及协调后端 |
 | [`rpc`] | 内部 RPC 与 Tower 组装 |
 | [`gateway`] | 统一 Gateway 运行框架与 Player、Scene 接入组件 |
-| [`events`] | 强类型事件契约与同步本地分发；跨节点传输待实现 |
+| [`events`] | 同步本地事件、Core NATS 即时投递及网关广播/转发 |
 | [`observability`] | 日志、指标与追踪 |
 
 目前示例监听共享内部 gRPC 和客户端 TCP 端点，已接通注入认证、有界串行 session、状态读写及服务组合。
-Redis 开发发现、session 所有权、timer 调度、下行序号、ACK 缓存与同网关恢复已接通；跨网关交接和 NATS 尚未接通。
+Redis 开发发现、session 所有权、timer、ACK 缓存、同网关恢复、可选跨网关交接和 Core NATS 已接通；JetStream、离线加载及生产安全仍待实现。
 配置端点地址本身不启动监听，内部端点需显式注册 RpcEndpoint，TCP 由网关工厂绑定。
 Kubernetes 配置可校验，运行该发现后端仍会明确报错。
 游戏业务协议和 handler 由游戏定义，框架组件不反向依赖具体游戏。

@@ -7,6 +7,17 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+async-nats.workspace = true
+futures-util.workspace = true
+prost.workspace = true
+tok-proto.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+serde.workspace = true
+opentelemetry.workspace = true
+tracing.workspace = true
+tracing-opentelemetry.workspace = true
+metrics.workspace = true
 thiserror.workspace = true
 uuid.workspace = true
 

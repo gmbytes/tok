@@ -26,3 +26,8 @@ fix(player): 修复定时器重复触发问题
 docs: 更新框架设计约定
 build: 添加 just 开发命令入口
 ```
+
+## 文件换行
+
+- 整个工程的文本文件统一使用 LF（`\n`），禁止 CRLF 和单独 CR。
+- 编辑、新建及生成工程文本文件时都必须遵守；Git 和编辑器规则分别见 `.gitattributes`、`.editorconfig`，Rust 格式化由 `rustfmt.toml` 固定为 LF。

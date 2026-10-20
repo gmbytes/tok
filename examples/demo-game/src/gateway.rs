@@ -28,6 +28,7 @@ impl player::Authenticator for DemoAuthenticator {
 
 /// 初始化 TCP 监听并组装统一 Gateway 与 player::Ingress。
 pub struct PlayerIngressFactory {
+    events: Option<tok::events::nats::Config>,
     config: player::Config,
     ownership: Arc<dyn OwnershipStore>,
     tokens: Option<Arc<dyn tok::core::credentials::ResumeTokenCodec>>,
@@ -37,11 +38,17 @@ impl PlayerIngressFactory {
     /// 配置经验证的开发网关，注入内存或共享 Redis 所有权。
     pub fn new(config: player::Config, ownership: Arc<dyn OwnershipStore>) -> Self {
         Self {
+            events: None,
             config,
             ownership,
             tokens: None,
             gateway_rpc: None,
         }
+    }
+    /// 显式开启 Core NATS；启动时确认订阅，消费任务由 Gateway 监督。
+    pub fn with_events(mut self, events: tok::events::nats::Config) -> Self {
+        self.events = Some(events);
+        self
     }
     /// 注入本地恢复凭证组件。
     pub fn with_resume_token_codec(
@@ -63,6 +70,7 @@ impl ServiceFactory for PlayerIngressFactory {
         let ownership = Arc::clone(&self.ownership);
         let tokens = self.tokens.clone();
         let gateway_rpc = self.gateway_rpc.clone();
+        let events = self.events.clone();
         Box::pin(async move {
             if context.service.protocol != "tcp" {
                 return Err(std::io::Error::other("示例玩家网关要求 tcp 端点").into());
@@ -75,9 +83,12 @@ impl ServiceFactory for PlayerIngressFactory {
             let executor = Arc::new(player::RpcExecutor::new(
                 "player",
                 Arc::new(RendezvousRouter::new(Arc::clone(&context.directory))),
-                clients,
+                tok::rpc::player::Client::new(clients),
             )?);
-            let limits = config.runtime_limits();
+            let mut limits = config.runtime_limits();
+            if events.is_some() {
+                limits.max_tasks += 2;
+            }
             let gateway = Gateway::new(limits, |gateway_context| {
                 let ingress = player::Ingress::new(
                     gateway_context,
@@ -99,8 +110,38 @@ impl ServiceFactory for PlayerIngressFactory {
                     None => Ok(ingress),
                 }
             })?;
+            let bus = if let Some(events) = events {
+                let bus = tok::events::nats::Bus::connect(events).await?;
+                let sessions = gateway.ingress().sessions();
+                // 这两个内置处理者只查本地会话，因此示例为各节点独立订阅。
+                // 自定义组件可以选择 group，并自行完成目标路由或其他业务处理。
+                let components = [
+                    crate::events::player_forwarder(sessions.clone(), None)?,
+                    crate::events::value_notifier(sessions, None)?,
+                ];
+                let mut subscriptions = Vec::new();
+                for component in components {
+                    subscriptions.push(bus.subscribe(component).await?);
+                }
+                for subscription in subscriptions {
+                    let runtime = gateway.context();
+                    let stop = runtime.cancellation();
+                    runtime
+                        .launch(Box::pin(async move {
+                            subscription.run(stop).await.map_err(std::io::Error::other)
+                        }))
+                        .await?;
+                }
+                Some(bus)
+            } else {
+                None
+            };
             Ok(Box::pin(async move {
-                gateway.serve(listener, context.shutdown).await?;
+                let result = gateway.serve(listener, context.shutdown).await;
+                if let Some(bus) = bus {
+                    bus.close().await?;
+                }
+                result?;
                 Ok(())
             }) as ServiceTask)
         })

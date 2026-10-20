@@ -1,21 +1,27 @@
 //! 内部 RPC：共享端点、连接复用、强类型分发及调用上下文。
 //!
 //! [`RpcEndpoint`] 显式绑定业务服务名和 protobuf 服务，监听由应用生命周期管理。
-//! [`RpcClients`] 复用有界 Channel 缓存，每次调用有超时且不添加重试层。
+//! [`RpcClients`] 管理共享 Channel 缓存和传输配置；具体协议由
+//! [`player::Client`]、[`business::Client`] 等适配器调用，有超时且不添加重试。
 //! [`HandlerRegistry`] 将游戏 protobuf 消息注册为强类型业务处理函数。
 
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
 
+pub mod business;
+mod call;
 mod client;
 mod endpoint;
 mod handler;
 pub mod lock;
+pub mod player;
 mod propagation;
 pub mod timer;
 
 pub use client::RpcClients;
 pub use endpoint::{RpcEndpoint, RpcReadiness, RpcServerTask};
-pub use handler::{CallHandler, CallTask, HandlerRegistry, HandlerReply, RpcService, TowerHandler};
+pub use handler::{
+    CallHandler, CallTask, EventTask, HandlerRegistry, HandlerReply, RpcService, TowerHandler,
+};
 
 pub use tok_proto as protocol;
 /// gRPC 客户端、服务端和状态类型；详细 API 见 tonic 上游文档。

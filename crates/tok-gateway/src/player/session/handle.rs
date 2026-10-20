@@ -69,6 +69,60 @@ impl BoundSession {
 }
 
 impl SessionHandle {
+    /// 加入可信服务器指定的事件主题；同一 session 恢复和交接保留，数量有界。
+    pub fn join_topic(&self, topic: &str) -> Result<()> {
+        if self.0.cancel.is_cancelled() {
+            return Err(ErrorCode::SessionClosed.into());
+        }
+        self.0.channel.change_topic(topic, true)
+    }
+    /// 退出事件主题；不存在时成功，冻结或已关闭的会话拒绝修改。
+    pub fn leave_topic(&self, topic: &str) -> Result<()> {
+        if self.0.cancel.is_cancelled() {
+            return Err(ErrorCode::SessionClosed.into());
+        }
+        self.0.channel.change_topic(topic, false)
+    }
+    /// 将内部事件排入原 session 队列；只接收在线、非恢复和非冻结会话，不产生客户端回应。
+    pub fn post_event(&self, event: Arc<tok_events::Message>) -> Result<()> {
+        self.enqueue_event(event, None)
+    }
+    pub(super) fn enqueue_event(
+        &self,
+        event: Arc<tok_events::Message>,
+        topic: Option<&str>,
+    ) -> Result<()> {
+        event
+            .validate(self.0.channel.max_event_bytes())
+            .map_err(|_| ErrorCode::InvalidRequest)?;
+        if self.0.cancel.is_cancelled() {
+            return Err(ErrorCode::SessionClosed.into());
+        }
+        self.0.channel.admit_event(topic, || {
+            self.0
+                .job_sender
+                .try_send(Job::Event(super::worker::EventJob {
+                    event,
+                    parent: tracing::Span::current(),
+                }))
+                .map_err(|error| match error {
+                    mpsc::error::TrySendError::Full(_) => ErrorCode::QueueFull.into(),
+                    mpsc::error::TrySendError::Closed(_) => ErrorCode::SessionClosed.into(),
+                })
+        })
+    }
+    pub(super) fn notify_event(
+        &self,
+        message_id: u32,
+        body: &[u8],
+        topic: Option<&str>,
+    ) -> Result<()> {
+        if self.0.cancel.is_cancelled() {
+            return Err(ErrorCode::SessionClosed.into());
+        }
+        self.0.channel.notify_event(message_id, body, topic)
+    }
+
     /// 读取当前可信身份，不能据此绕过所有权与队列直接调用 player。
     pub fn identity(&self) -> &SessionIdentity {
         &self.0.ownership.identity

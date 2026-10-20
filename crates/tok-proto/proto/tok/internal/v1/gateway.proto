@@ -12,6 +12,7 @@ message ChannelSnapshot {
   uint64 last_request_id = 4;
   uint64 grace_remaining_ms = 5;
   repeated ReplayEntry entries = 6;
+  repeated string topics = 7;
 }
 message ScheduledTimer { TimerSpec spec = 1; uint64 version = 2; int64 scheduled_at_ms = 3; }
 message ExecutionSnapshot {
@@ -19,6 +20,7 @@ message ExecutionSnapshot {
   uint64 timer_request_id = 2;
   uint64 timer_version = 3;
   repeated ScheduledTimer timers = 4;
+  uint64 event_request_id = 5;
 }
 message HandoffSnapshot {
   uint32 version = 1;

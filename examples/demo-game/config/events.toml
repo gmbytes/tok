@@ -1,0 +1,63 @@
+node_id = "local"
+discovery = "memory"
+
+[observability]
+log_filter = "info"
+log_format = "text"
+# 按需启用；省略时不监听指标端口、不导出追踪。
+# metrics_address = "127.0.0.1:9090"
+# otlp_endpoint = "http://127.0.0.1:4317"
+# trace_filter = "info"
+# trace_sample_ratio = 1.0
+# [[observability.trace_force_rules]]
+# span = "client_request"
+# fields = { player_id = "42" }
+
+[player_gateway]
+max_connections = 128
+max_sessions = 1024
+queue_capacity = 64
+outbound_capacity = 64
+max_frame_size = 1048576
+io_timeout_ms = 15000
+auth_timeout_ms = 5000
+rpc_timeout_ms = 5000
+ownership_ttl_ms = 30000
+renew_interval_ms = 10000
+max_timers = 128
+max_timer_bytes = 1048576
+
+[[endpoints]]
+name = "client"
+protocol = "tcp"
+address = "127.0.0.1:7000"
+
+[[endpoints]]
+name = "internal-rpc"
+protocol = "grpc"
+address = "127.0.0.1:7001"
+
+[[services]]
+service_name = "player-gateway"
+factory = "player-ingress"
+endpoint = "client"
+
+[[services]]
+service_name = "player"
+endpoint = "internal-rpc"
+
+[[services]]
+service_name = "guild"
+endpoint = "internal-rpc"
+
+# 即时事件独立配置，所有参与节点须使用同一环境名。
+[events]
+url = "nats://127.0.0.1:4222"
+namespace = "tok-demo"
+operation_timeout_ms = 2000
+max_message_bytes = 1048576
+subscription_capacity = 64
+client_capacity = 128
+max_subscriptions = 32
+max_buffer_bytes = 134217728
+handler_timeout_ms = 5000

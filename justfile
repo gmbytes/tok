@@ -21,6 +21,10 @@ fmt:
 fmt-check:
     cargo fmt --all -- --check
 
+# 检查工程文本文件的 LF 换行约束
+line-endings-check:
+    cargo test -p tok --test line_endings --locked
+
 # 检查全部 crate 的 lint
 clippy:
     cargo clippy --workspace --all-targets --locked -- -D warnings
@@ -87,3 +91,12 @@ docs:
 
 # 完成常规开发检查
 verify: fmt-check clippy test
+
+# 需要真实 NATS；TOK_TEST_NATS_URL 默认本机 4222
+nats-test:
+    cargo test -p tok-events --test nats --locked -- --ignored
+    cargo test -p tok-gateway --test player_tcp --locked -- --ignored nats_independent_gateways
+
+# 使用真实 NATS、TCP 与内部 RPC 验证转发与广播
+nats-smoke:
+    cargo run -p demo-game --locked -- --config examples/demo-game/config/events.toml --event-smoke

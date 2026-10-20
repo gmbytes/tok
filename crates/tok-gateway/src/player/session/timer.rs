@@ -97,6 +97,7 @@ impl Scheduler {
         Ok(tok_rpc::protocol::internal::v1::ExecutionSnapshot {
             last_request_id,
             timer_request_id,
+            event_request_id: 0,
             timer_version: state.version,
             timers: state
                 .entries

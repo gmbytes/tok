@@ -79,6 +79,9 @@ pub struct EndpointConfig {
     reason = "同一模块公开应用、端点和服务等配置类型，保留角色名称区分配置用途。"
 )]
 pub struct AppConfig {
+    /// 可选 Core NATS 即时事件连接，独立于发现和 session 所有权。
+    #[serde(default)]
+    pub events: Option<tok_events::nats::Config>,
     /// 可选的本地固定共享密钥；省略时使用单进程临时密钥。
     #[serde(default)]
     pub resume_token: Option<tok_gateway::player::resume_token::Config>,
@@ -118,6 +121,11 @@ impl AppConfig {
 
     /// 验证身份、端点和服务绑定，不连接外部依赖。
     pub fn validate(&self) -> Result<()> {
+        if let Some(events) = &self.events {
+            events
+                .validate()
+                .map_err(|error| Error::InvalidConfig(error.to_string()))?;
+        }
         if let Some(keys) = &self.resume_token {
             keys.validate()?;
         }

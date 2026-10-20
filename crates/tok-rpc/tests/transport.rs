@@ -85,12 +85,14 @@ async fn shared_endpoint_dispatches_and_rejects_unready_malformed_and_wrong_targ
     let ready = endpoint.readiness();
     let shutdown = CancellationToken::new();
     let server = tokio::spawn(endpoint.serve(listener, shutdown.clone()).unwrap());
-    let clients = RpcClients::new(Duration::from_secs(2), 1).unwrap();
+    let clients = Arc::new(RpcClients::new(Duration::from_secs(2), 1).unwrap());
+    let player_client = tok_rpc::player::Client::new(Arc::clone(&clients));
+    let business_client = tok_rpc::business::Client::new(Arc::clone(&clients));
     let player = target(address, "player");
     let guild = target(address, "guild");
     assert_eq!(
-        clients
-            .player_call(&player, context(&player), payload(1))
+        player_client
+            .call(&player, context(&player), payload(1))
             .await
             .unwrap_err()
             .code(),
@@ -100,12 +102,10 @@ async fn shared_endpoint_dispatches_and_rejects_unready_malformed_and_wrong_targ
     ready.set("guild", true);
     for (entry, is_player) in [(&player, true), (&guild, false)] {
         let response = if is_player {
-            clients
-                .player_call(entry, context(entry), payload(41))
-                .await
+            player_client.call(entry, context(entry), payload(41)).await
         } else {
-            clients
-                .business_call(entry, context(entry), payload(41))
+            business_client
+                .call(entry, context(entry), payload(41))
                 .await
         }
         .unwrap();
@@ -117,8 +117,8 @@ async fn shared_endpoint_dispatches_and_rejects_unready_malformed_and_wrong_targ
     let mut missing_identity = context(&player);
     missing_identity.session = None;
     assert_eq!(
-        clients
-            .player_call(&player, missing_identity, payload(1))
+        player_client
+            .call(&player, missing_identity, payload(1))
             .await
             .unwrap_err()
             .code(),
@@ -127,8 +127,8 @@ async fn shared_endpoint_dispatches_and_rejects_unready_malformed_and_wrong_targ
     let mut unknown = payload(1);
     unknown.message_id = 123;
     assert_eq!(
-        clients
-            .business_call(&guild, context(&guild), unknown)
+        business_client
+            .call(&guild, context(&guild), unknown)
             .await
             .unwrap_err()
             .code(),
@@ -139,8 +139,8 @@ async fn shared_endpoint_dispatches_and_rejects_unready_malformed_and_wrong_targ
         body: vec![0xff],
     };
     assert_eq!(
-        clients
-            .business_call(&guild, context(&guild), bad_payload)
+        business_client
+            .call(&guild, context(&guild), bad_payload)
             .await
             .unwrap_err()
             .code(),
@@ -164,8 +164,8 @@ async fn shared_endpoint_dispatches_and_rejects_unready_malformed_and_wrong_targ
     );
     ready.clear();
     assert_eq!(
-        clients
-            .business_call(&guild, context(&guild), payload(1))
+        business_client
+            .call(&guild, context(&guild), payload(1))
             .await
             .unwrap_err()
             .code(),
@@ -222,9 +222,10 @@ async fn timeout_does_not_retry_business_execution() {
     let shutdown = CancellationToken::new();
     let server = tokio::spawn(endpoint.serve(listener, shutdown.clone()).unwrap());
     let target = target(address, "guild");
-    let clients = RpcClients::new(Duration::from_millis(150), 1).unwrap();
-    let error = clients
-        .business_call(&target, context(&target), payload(1))
+    let clients = Arc::new(RpcClients::new(Duration::from_millis(150), 1).unwrap());
+    let business_client = tok_rpc::business::Client::new(Arc::clone(&clients));
+    let error = business_client
+        .call(&target, context(&target), payload(1))
         .await
         .unwrap_err();
     assert!(matches!(
@@ -302,11 +303,12 @@ async fn user_tower_concurrency_limit_is_preserved_across_handler_clones() {
     endpoint.readiness().set("guild", true);
     let shutdown = CancellationToken::new();
     let server = tokio::spawn(endpoint.serve(listener, shutdown.clone()).unwrap());
-    let clients = RpcClients::new(Duration::from_secs(2), 1).unwrap();
+    let clients = Arc::new(RpcClients::new(Duration::from_secs(2), 1).unwrap());
+    let business_client = tok_rpc::business::Client::new(Arc::clone(&clients));
     let target = target(address, "guild");
     let (first, second) = tokio::join!(
-        clients.business_call(&target, context(&target), payload(1)),
-        clients.business_call(&target, context(&target), payload(2))
+        business_client.call(&target, context(&target), payload(1)),
+        business_client.call(&target, context(&target), payload(2))
     );
     assert_eq!(first.unwrap().payload.unwrap().body, payload(1).body);
     assert_eq!(second.unwrap().payload.unwrap().body, payload(2).body);

@@ -266,7 +266,7 @@ impl SessionManager {
             let (sender, receiver) = oneshot::channel();
             session
                 .job_sender
-                .send(Job::Freeze(sender))
+                .send(Job::Snapshot(sender))
                 .await
                 .map_err(|_| ErrorCode::SessionClosed)?;
             let execution = receiver.await.map_err(|_| ErrorCode::SessionClosed)??;
@@ -560,6 +560,9 @@ pub(super) async fn receive(
             channel,
             resume_token: token.to_owned(),
         });
+        state
+            .channel
+            .bind_topic_membership(Arc::clone(&manager.subscriptions), &state)?;
         let opening = state.cancel.clone().drop_guard();
         *slot
             .current_session

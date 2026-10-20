@@ -31,6 +31,13 @@ impl Probe {
 }
 #[tonic::async_trait]
 impl PlayerRpc for Probe {
+    async fn handle_event(
+        &self,
+        _: Request<tok_rpc::protocol::internal::v1::EventRequest>,
+    ) -> Result<Response<tok_rpc::protocol::internal::v1::EventResponse>, Status> {
+        Err(Status::unimplemented("此连接探针不处理事件"))
+    }
+
     async fn call(&self, request: Request<CallRequest>) -> Result<Response<CallResponse>, Status> {
         self.reply(request)
     }
@@ -56,7 +63,9 @@ async fn two_services_on_one_endpoint_share_a_tcp_connection() {
     endpoint.readiness().set("guild", true);
     let shutdown = CancellationToken::new();
     let server = tokio::spawn(endpoint.serve(listener, shutdown.clone()).unwrap());
-    let clients = RpcClients::new(Duration::from_secs(2), 1).unwrap();
+    let clients = Arc::new(RpcClients::new(Duration::from_secs(2), 1).unwrap());
+    let player_client = tok_rpc::player::Client::new(Arc::clone(&clients));
+    let business_client = tok_rpc::business::Client::new(Arc::clone(&clients));
     for (name, player) in [("player", true), ("guild", false)] {
         let target = ServiceDescriptor {
             node_id: "local".into(),
@@ -77,13 +86,10 @@ async fn two_services_on_one_endpoint_share_a_tcp_connection() {
             body: vec![],
         };
         if player {
-            clients
-                .player_call(&target, context, payload)
-                .await
-                .unwrap();
+            player_client.call(&target, context, payload).await.unwrap();
         } else {
-            clients
-                .business_call(&target, context, payload)
+            business_client
+                .call(&target, context, payload)
                 .await
                 .unwrap();
         }

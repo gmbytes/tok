@@ -18,4 +18,5 @@ enum MessageId {
   MESSAGE_ID_START_PRODUCTION_RESPONSE = 10;
   // 内部计时消息；枚举值本身不授予游戏客户端调用权限。
   MESSAGE_ID_PRODUCTION_FINISHED = 11;
+  MESSAGE_ID_VALUE_NOTICE = 12;
 }

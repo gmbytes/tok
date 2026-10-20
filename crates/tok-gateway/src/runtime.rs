@@ -138,6 +138,11 @@ impl<I: GatewayIngress> Gateway<I> {
         &self.ingress
     }
 
+    /// 获取通用任务监督入口；游戏组装层可预留容量并安装事件等后台任务。
+    pub fn context(&self) -> GatewayContext {
+        self.context.clone()
+    }
+
     /// 接管监听并监督连接与后台任务；退出时停止入口、收束任务并清理组件。
     pub async fn serve<T>(
         mut self,

@@ -19,6 +19,22 @@ use tracing_subscriber::layer::SubscriberExt;
 
 struct Capture(Arc<Mutex<Option<opentelemetry::trace::TraceId>>>);
 impl CallHandler for Capture {
+    fn event(&self, context: CallContext, _: Arc<tok_events::Message>) -> tok_rpc::EventTask<'_> {
+        Box::pin(async move {
+            *self.0.lock().unwrap() = Some(
+                tracing::Span::current()
+                    .context()
+                    .span()
+                    .span_context()
+                    .trace_id(),
+            );
+            Ok(tok_proto::internal::v1::EventResponse {
+                request_id: context.request_id,
+                ..Default::default()
+            })
+        })
+    }
+
     fn call(&self, context: CallContext, payload: Payload) -> CallTask<'_> {
         Box::pin(async move {
             *self.0.lock().unwrap() = Some(
@@ -60,14 +76,23 @@ async fn trace_context_is_propagated_across_the_network_call() {
                 .unwrap()
                 .into_business(),
         )
+        .unwrap()
+        .add_service(
+            "player",
+            RpcService::new("local", "player", Arc::new(Capture(Arc::clone(&observed))))
+                .unwrap()
+                .into_player(),
+        )
         .unwrap();
+    endpoint.readiness().set("player", true);
     endpoint.readiness().set("guild", true);
     let shutdown = CancellationToken::new();
     let server = tokio::spawn(endpoint.serve(listener, shutdown.clone()).unwrap());
     async {
         let root = tracing::info_span!("client_root");
-        root.set_parent(context).unwrap();
-        let clients = RpcClients::new(Duration::from_secs(2), 1).unwrap();
+        root.set_parent(context.clone()).unwrap();
+        let clients = Arc::new(RpcClients::new(Duration::from_secs(2), 1).unwrap());
+        let business_client = tok_rpc::business::Client::new(Arc::clone(&clients));
         let target = ServiceDescriptor {
             node_id: "local".into(),
             service_name: "guild".into(),
@@ -83,8 +108,8 @@ async fn trace_context_is_propagated_across_the_network_call() {
             session: None,
         };
         use tracing::Instrument;
-        clients
-            .business_call(
+        business_client
+            .call(
                 &target,
                 call,
                 Payload {
@@ -98,6 +123,46 @@ async fn trace_context_is_propagated_across_the_network_call() {
     }
     .await;
     assert_eq!(*observed.lock().unwrap(), Some(trace_id));
+    *observed.lock().unwrap() = None;
+    let root = tracing::info_span!("event_root");
+    root.set_parent(context).unwrap();
+    let target = ServiceDescriptor {
+        node_id: "local".into(),
+        service_name: "player".into(),
+        protocol: "grpc".into(),
+        address,
+    };
+    let call = CallContext {
+        node_id: "local".into(),
+        service_name: "player".into(),
+        bid: Some("42".into()),
+        request_id: 1,
+        session: Some(tok_core::SessionIdentity {
+            player_id: "42".into(),
+            session_id: "s".into(),
+            epoch: 1,
+        }),
+        timer: None,
+    };
+    use tracing::Instrument;
+    let clients = Arc::new(RpcClients::new(Duration::from_secs(2), 1).unwrap());
+    let player_client = tok_rpc::player::Client::new(Arc::clone(&clients));
+    player_client
+        .handle_event(
+            &target,
+            call,
+            &tok_events::Message {
+                event_id: tok_events::EventId::generate(),
+                event_type: "test.trace".into(),
+                body: vec![],
+                trace_context: Default::default(),
+            },
+        )
+        .instrument(root)
+        .await
+        .unwrap();
+    assert_eq!(*observed.lock().unwrap(), Some(trace_id));
+
     shutdown.cancel();
     tokio::time::timeout(Duration::from_secs(2), server)
         .await

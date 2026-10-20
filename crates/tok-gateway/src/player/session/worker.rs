@@ -17,9 +17,15 @@ use tracing::Instrument;
 pub(super) type SessionTask = Pin<Box<dyn Future<Output = ()> + Send>>;
 
 pub(super) enum Job {
-    Freeze(oneshot::Sender<Result<tok_rpc::protocol::internal::v1::ExecutionSnapshot>>),
+    // 按 FIFO 等待前序任务完成后采集执行快照；停止新业务与暂停 timer 由交接流程提前完成。
+    Snapshot(oneshot::Sender<Result<tok_rpc::protocol::internal::v1::ExecutionSnapshot>>),
     Request(RequestJob),
     Timer(timer::Ticket),
+    Event(EventJob),
+}
+pub(super) struct EventJob {
+    pub(super) event: Arc<tok_events::Message>,
+    pub(super) parent: tracing::Span,
 }
 pub(super) struct RequestJob {
     pub(super) request: LogicalMessage,
@@ -63,6 +69,11 @@ pub(super) fn task(
                 .as_ref()
                 .map(|snapshot| snapshot.timer_request_id)
                 .unwrap_or(0);
+            let mut event_request = session_state
+                .initial_execution
+                .as_ref()
+                .map(|snapshot| snapshot.event_request_id)
+                .unwrap_or(0);
             loop {
                 tokio::select! {
                     biased;
@@ -73,9 +84,30 @@ pub(super) fn task(
                     job = job_receiver.recv() => {
                         let Some(job) = job else { break; };
                         let job = match job {
-                            Job::Freeze(reply) => {
+                            Job::Snapshot(reply) => {
                                 #[expect(clippy::let_underscore_must_use, reason="交接等待方可能已经取消，快照结果不重试，监督期限负责收束。")]
-                                let _ = reply.send(timers.snapshot(last_request, timer_request));
+                                let _ = reply.send(timers.snapshot(last_request, timer_request).map(|mut snapshot| { snapshot.event_request_id = event_request; snapshot }));
+                                continue;
+                            }
+                            Job::Event(job) => {
+                                if !renew_ownership(&session_state, ownership_store.as_ref(), timeout, ttl).await { break; }
+                                let Some(next) = event_request.checked_add(1) else { session_state.cancel.cancel(); break; };
+                                event_request = next;
+                                let span = tracing::info_span!(parent: &job.parent, "player_event", player_id = %session_state.ownership.identity.player_id, event_id = %job.event.event_id, event_type = %job.event.event_type);
+                                let result = tokio::time::timeout(timeout, executor.execute_event(session_state.ownership.identity.clone(), event_request, job.event).instrument(span)).await;
+                                let success = match result {
+                                    Ok(Ok(timers_update)) => {
+                                        let mut success = true;
+                                        if let Some(update) = timers_update && let Err(error) = timers.apply(update) {
+                                            tracing::error!(code = ?error.code, "事件计时更新无效，关闭会话");
+                                            session_state.cancel.cancel(); success = false;
+                                        }
+                                        success
+                                    },
+                                    Ok(Err(error)) => { tracing::error!(code = ?error.code, "内部事件执行失败，不重试"); false },
+                                    Err(_) => { tracing::error!("内部事件执行超时，不重试"); false },
+                                };
+                                metrics::counter!("tok_session_events_total", "result" => if success { "ok" } else { "error" }).increment(1);
                                 continue;
                             }
                             Job::Request(job) => job,

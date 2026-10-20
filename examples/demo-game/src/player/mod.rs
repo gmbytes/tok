@@ -170,6 +170,7 @@ pub fn handlers(
         production::dispatcher()
             .map_err(|error| tok::rpc::Error::Configuration(error.to_string()))?,
     );
+    let events_state = Arc::clone(&state);
     registry.register_timer(
         ProductionFinished::MESSAGE_ID,
         move |context, _event: ProductionFinished| {
@@ -200,13 +201,35 @@ pub fn handlers(
             }
         },
     )?;
-    let clients = Arc::new(RpcClients::new(Duration::from_secs(2), 16)?);
+    registry.register_event::<crate::events::AddValue, _, _>(
+        move |context, _event_id, event| {
+            let state = Arc::clone(&events_state);
+            async move {
+                let id = player_id(&context)?;
+                let mut values = state
+                    .values
+                    .lock()
+                    .map_err(|_| Status::internal("示例存储锁不可用"))?;
+                if !values.contains_key(&id) && values.len() >= state.capacity {
+                    return Err(Status::resource_exhausted("示例存储容量已满"));
+                }
+                let stored = values.entry(id).or_default();
+                stored.value = stored
+                    .value
+                    .checked_add(event.delta)
+                    .ok_or_else(|| Status::out_of_range("事件产出溢出"))?;
+                Ok(None)
+            }
+        },
+    )?;
+    let client =
+        tok::rpc::business::Client::new(Arc::new(RpcClients::new(Duration::from_secs(2), 16)?));
     registry.register(
         QueryGuildRequest::MESSAGE_ID,
         QueryGuildResponse::MESSAGE_ID,
         move |context, request: QueryGuildRequest| {
             let directory = Arc::clone(&directory);
-            let clients = Arc::clone(&clients);
+            let client = client.clone();
             async move {
                 let target = tok::infra::routing::route(
                     directory.as_ref(),
@@ -214,8 +237,8 @@ pub fn handlers(
                     &request.guild_id.to_string(),
                 )
                 .map_err(|_| Status::unavailable("公会服务不可用"))?;
-                let response = clients
-                    .business_call(
+                let response = client
+                    .call(
                         &target,
                         CallContext {
                             timer: None,

@@ -7,13 +7,16 @@ use tok_core::{
     TimerTrigger, TimerUpdate,
 };
 use tok_rpc::{
-    RpcClients,
+    player::Client,
     protocol::internal::v1::Payload,
     tonic::{Code, Status},
 };
 
 /// 单次玩家调用的结果，受 session 的调用期限控制。
 pub type Task<'a> = Pin<Box<dyn Future<Output = Result<Reply>> + Send + 'a>>;
+
+/// 内部事件的执行效果，只允许更新计时，不包含客户端回应。
+pub type EventTask<'a> = Pin<Box<dyn Future<Output = Result<Option<TimerUpdate>>> + Send + 'a>>;
 
 /// 玩家执行结果，计时更新留在 session 内部，不进入客户端协议正文。
 pub struct Reply {
@@ -33,6 +36,16 @@ impl From<LogicalMessage> for Reply {
 
 /// 所有玩家执行来源应进入 session 队列后使用的执行扩展点。
 pub trait Executor: Send + Sync {
+    /// 执行内部转发事件，序号独立于请求与 timer；默认拒绝，不自动回应客户端。
+    fn execute_event(
+        &self,
+        _identity: SessionIdentity,
+        _request_id: u64,
+        _event: Arc<tok_events::Message>,
+    ) -> EventTask<'_> {
+        Box::pin(async { Err(ErrorCode::UnknownMessage.into()) })
+    }
+
     /// 使用 session 身份执行请求，不能从消息正文选择其他玩家。
     fn execute_request(&self, identity: SessionIdentity, request: LogicalMessage) -> Task<'_>;
     /// 执行内部 timer；序号由 session 独立分配，不占用客户端请求序列。默认拒绝未支持的计时调用。
@@ -74,16 +87,16 @@ impl RpcErrorMapper for DefaultRpcErrorMapper {
 pub struct RpcExecutor {
     service_name: String,
     router: Arc<dyn ServiceRouter>,
-    clients: Arc<RpcClients>,
+    client: Client,
     mapper: Arc<dyn RpcErrorMapper>,
 }
 
 impl RpcExecutor {
-    /// 创建 player RPC 适配，router 与连接缓存由组装层注入。
+    /// 创建 player RPC 执行器，路由器与玩家协议客户端由组装层注入。
     pub fn new(
         service_name: impl Into<String>,
         router: Arc<dyn ServiceRouter>,
-        clients: Arc<RpcClients>,
+        client: Client,
     ) -> Result<Self> {
         let service_name = service_name.into();
         if service_name.trim().is_empty() {
@@ -92,7 +105,7 @@ impl RpcExecutor {
         Ok(Self {
             service_name,
             router,
-            clients,
+            client,
             mapper: Arc::new(DefaultRpcErrorMapper),
         })
     }
@@ -104,6 +117,46 @@ impl RpcExecutor {
 }
 
 impl Executor for RpcExecutor {
+    fn execute_event(
+        &self,
+        identity: SessionIdentity,
+        request_id: u64,
+        event: Arc<tok_events::Message>,
+    ) -> EventTask<'_> {
+        Box::pin(async move {
+            let target = self
+                .router
+                .route(&self.service_name, &identity.player_id)
+                .map_err(|_| ErrorCode::Unavailable)?;
+            let response = self
+                .client
+                .handle_event(
+                    &target,
+                    CallContext {
+                        node_id: target.node_id.clone(),
+                        service_name: target.service_name.clone(),
+                        bid: Some(identity.player_id.clone()),
+                        request_id,
+                        session: Some(identity),
+                        timer: None,
+                    },
+                    &event,
+                )
+                .await
+                .map_err(|status| self.mapper.map(&status))?;
+            let timers = response
+                .timers
+                .map(tok_rpc::timer::decode_update)
+                .transpose()
+                .map_err(|_| ErrorCode::Internal)?;
+            if let Some(error) = response.error {
+                tracing::error!(code = error.code, "内部事件返回业务错误，不重试");
+                return Err(ErrorCode::Internal.into());
+            }
+            Ok(timers)
+        })
+    }
+
     fn execute_request(&self, identity: SessionIdentity, request: LogicalMessage) -> Task<'_> {
         self.call(identity, request, None)
     }
@@ -142,8 +195,8 @@ impl RpcExecutor {
                 .route(&self.service_name, &identity.player_id)
                 .map_err(|_| ErrorCode::Unavailable)?;
             let response = self
-                .clients
-                .player_call(
+                .client
+                .call(
                     &target,
                     CallContext {
                         node_id: target.node_id.clone(),

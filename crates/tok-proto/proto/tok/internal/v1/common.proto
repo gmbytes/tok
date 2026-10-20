@@ -73,9 +73,34 @@ message CallResponse {
 // 只允许会话驱动的 player 入口。身份可信性由部署和认证组件保证。
 service PlayerRpc {
   rpc Call(CallRequest) returns (CallResponse);
+  // 仅内部转发事件；不与客户端请求或 timer 混用。
+  rpc HandleEvent(EventRequest) returns (EventResponse);
 }
 
 // 可配置的业务入口，不根据名称自动加锁或固定中间件链。
 service BusinessRpc {
   rpc Call(CallRequest) returns (CallResponse);
+}
+
+// 服务器事件的网络封装；不携带客户端消息 ID 或网关处理方式。
+message EventEnvelope {
+  uint32 version = 1;
+  string event_id = 2;
+  string event_type = 3;
+  bytes body = 4;
+  // traceparent / tracestate 由 NATS headers 传递。
+}
+
+// 会话内部事件的执行结果，不包含客户端回应。
+message EventResponse {
+  uint64 request_id = 1;
+  RpcError error = 2;
+  TimerUpdate timers = 3;
+}
+
+message EventRequest {
+  CallContext context = 1;
+  string event_id = 2;
+  string event_type = 3;
+  bytes body = 4;
 }

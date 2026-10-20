@@ -37,6 +37,8 @@ pub struct Config {
     pub ownership_ttl_ms: u64,
     /// 空闲 session 的续租间隔，单位毫秒。
     pub renew_interval_ms: u64,
+    /// 每个逻辑 session 加入的事件主题上限，最多 1024。
+    pub max_topics: usize,
     /// 每个 session 的 timer 数量上限。
     pub max_timers: usize,
     /// 每个 session 所有 timer 的 ID 与正文总字节上限。
@@ -72,6 +74,7 @@ impl Default for Config {
             ownership_ttl_ms: 30_000,
             renew_interval_ms: 10_000,
             max_timers: 128,
+            max_topics: 64,
             max_timer_bytes: 1_048_576,
             replay_ttl_ms: 30_000,
             replay_capacity: 256,
@@ -112,10 +115,12 @@ impl Config {
             self.queue_capacity,
             self.outbound_capacity,
             self.max_timers,
+            self.max_topics,
             self.replay_capacity,
         ]
         .iter()
         .any(|value| *value == 0 || *value > 65_536)
+            || self.max_topics > 1024
             || self.max_timer_bytes == 0
             || self.max_timer_bytes > 16 * 1024 * 1024
             || self.max_frame_size == 0

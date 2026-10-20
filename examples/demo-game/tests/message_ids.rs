@@ -19,9 +19,10 @@ fn generated_ids_match_the_proto_catalog_and_keep_wire_values() {
         StartProductionRequest::MESSAGE_ID,
         StartProductionResponse::MESSAGE_ID,
         ProductionFinished::MESSAGE_ID,
+        ValueNotice::MESSAGE_ID,
     ];
     // 已有协议值保持不变；声明顺序和 Rust 模块重排不能改变消息 ID。
-    assert_eq!(ids, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
+    assert_eq!(ids, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
     for id in ids {
         assert_eq!(MessageId::try_from(id as i32).unwrap() as u32, id);
     }

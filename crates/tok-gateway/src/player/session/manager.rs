@@ -4,7 +4,7 @@ use super::{
     handle::{BoundSession, SessionHandle},
     handoff,
     state::{Completion, SessionState},
-    timer,
+    subscriptions, timer,
     worker::{self, renew_ownership},
 };
 use crate::{
@@ -45,6 +45,7 @@ pub struct SessionManager {
     pub(super) handoffs: Arc<handoff::Handoffs>,
     pub(super) gateway_directory: Option<Arc<dyn tok_core::ServiceDirectory>>,
     registry: Arc<Registry>,
+    pub(super) subscriptions: Arc<subscriptions::Index>,
     pub(super) config: Arc<Config>,
     pub(super) owner: SessionOwner,
     pub(super) ownership_store: Arc<dyn OwnershipStore>,
@@ -69,6 +70,7 @@ impl SessionManager {
             resume_token_codec: Arc::new(
                 SignedResumeTokens::ephemeral().map_err(|_| ErrorCode::Internal)?,
             ),
+            subscriptions: Arc::new(subscriptions::Index::default()),
             registry: Arc::new(Registry {
                 slots: Mutex::new(BTreeMap::new()),
                 session_counter: AtomicU64::new(0),
@@ -259,12 +261,14 @@ impl SessionManager {
 
     /// 查询活动 session，仅返回尚未失效的有界提交入口。
     pub fn session(&self, player_id: &str) -> Result<Option<SessionHandle>> {
-        let slots = self
+        let slot = self
             .registry
             .slots
             .lock()
-            .map_err(|_| ErrorCode::Internal)?;
-        let Some(slot) = slots.get(player_id) else {
+            .map_err(|_| ErrorCode::Internal)?
+            .get(player_id)
+            .cloned();
+        let Some(slot) = slot else {
             return Ok(None);
         };
         let session_state = slot
@@ -278,6 +282,32 @@ impl SessionManager {
             .map(SessionHandle))
     }
 
+    /// 取得本地尚未关闭的会话快照；事件准入仍需在会话锁下重新校验在线和冻结状态。
+    pub fn sessions(&self) -> Result<Vec<SessionHandle>> {
+        // 目录锁只用于复制 slot 引用，不在持有目录锁时等待各个 slot。
+        let slots: Vec<_> = self
+            .registry
+            .slots
+            .lock()
+            .map_err(|_| ErrorCode::Internal)?
+            .values()
+            .cloned()
+            .collect();
+        let mut sessions = Vec::new();
+        for slot in slots {
+            let current = slot
+                .current_session
+                .lock()
+                .map_err(|_| ErrorCode::Internal)?;
+            if let Some(state) = current
+                .as_ref()
+                .filter(|state| !state.cancel.is_cancelled())
+            {
+                sessions.push(SessionHandle(Arc::clone(state)));
+            }
+        }
+        Ok(sessions)
+    }
     pub(super) fn slot(&self, player_id: &str) -> Result<Arc<Slot>> {
         let mut slots = self
             .registry
@@ -414,6 +444,9 @@ impl SessionManager {
             },
             job_sender,
         });
+        session_state
+            .channel
+            .bind_topic_membership(Arc::clone(&self.subscriptions), &session_state)?;
         // 登录 future 在运行时接收任务后被取消时，不能遗留无人绑定却持续续租的 session。
         let opening = session_state.cancel.clone().drop_guard();
         // 在下一次 await 前登记已确认的租约，取消登录时退出流程仍能条件释放。

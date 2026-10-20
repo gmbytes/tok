@@ -335,7 +335,8 @@ async fn business_rpc_on_two_nodes_shares_locks_after_target_validation() {
         ));
         nodes.push(target);
     }
-    let clients = RpcClients::new(Duration::from_secs(2), 4).unwrap();
+    let clients = Arc::new(RpcClients::new(Duration::from_secs(2), 4).unwrap());
+    let business_client = tok_rpc::business::Client::new(Arc::clone(&clients));
     let context_for = |node: &ServiceDescriptor, bid: &str| CallContext {
         node_id: node.node_id.clone(),
         bid: Some(bid.into()),
@@ -369,18 +370,18 @@ async fn business_rpc_on_two_nodes_shares_locks_after_target_validation() {
     let mut missing = context_for(&nodes[0], "7");
     missing.bid = None;
     assert_eq!(
-        clients
-            .business_call(&nodes[0], missing, payload())
+        business_client
+            .call(&nodes[0], missing, payload())
             .await
             .unwrap_err()
             .code(),
         Code::InvalidArgument
     );
     let (a, b, c, d) = tokio::join!(
-        clients.business_call(&nodes[0], context_for(&nodes[0], "7"), payload()),
-        clients.business_call(&nodes[1], context_for(&nodes[1], "7"), payload()),
-        clients.business_call(&nodes[0], context_for(&nodes[0], "8"), payload()),
-        clients.business_call(&nodes[1], context_for(&nodes[1], "9"), payload()),
+        business_client.call(&nodes[0], context_for(&nodes[0], "7"), payload()),
+        business_client.call(&nodes[1], context_for(&nodes[1], "7"), payload()),
+        business_client.call(&nodes[0], context_for(&nodes[0], "8"), payload()),
+        business_client.call(&nodes[1], context_for(&nodes[1], "9"), payload()),
     );
     for result in [a, b, c, d] {
         assert_eq!(result.unwrap().request_id, 1);

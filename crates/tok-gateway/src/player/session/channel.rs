@@ -1,6 +1,10 @@
 //! 会话通信通道：连接绑定、请求准入、下行发布、确认缓存及断线恢复。
 
-use super::replay::{ReplayBatch, ReplayCache};
+use super::{
+    replay::{ReplayBatch, ReplayCache},
+    state::SessionState,
+    subscriptions::{Index, TopicMembership},
+};
 use crate::player::Config;
 use crate::{
     ErrorCode, Result,
@@ -9,7 +13,8 @@ use crate::{
 };
 use prost::Message;
 use std::{
-    sync::{Arc, Mutex},
+    collections::BTreeSet,
+    sync::{Arc, Mutex, OnceLock},
     time::Duration,
 };
 use tok_core::{LogicalMessage, MessageKind};
@@ -43,6 +48,7 @@ struct AttachedConnection {
 
 // 需要在同一锁下协调的通道可变状态，不包含固定配置及自身支持并发访问的同步工具。
 struct ChannelState {
+    topics: BTreeSet<String>,
     handoff: bool,
     logged_in: bool,
     closed: bool,
@@ -56,13 +62,36 @@ struct ChannelState {
 // 管理逻辑 session 与可替换连接之间的通信状态，不执行业务或调度业务 timer。
 pub(super) struct Channel {
     max_frame_size: usize,
+    max_topics: usize,
     disconnect_grace: Duration,
     session_cancel: CancellationToken,
     binding_changed: Notify,
     state: Mutex<ChannelState>,
+    topic_membership: OnceLock<TopicMembership>,
 }
 
 impl Channel {
+    pub(super) fn bind_topic_membership(
+        &self,
+        index: Arc<Index>,
+        session: &Arc<SessionState>,
+    ) -> Result<()> {
+        let state = self.state.lock().map_err(|_| ErrorCode::Internal)?;
+        let topic_membership = TopicMembership::new(index, session);
+        self.topic_membership
+            .set(topic_membership)
+            .map_err(|_| ErrorCode::Internal)?;
+        if let Some(topic_membership) = self.topic_membership.get() {
+            for name in &state.topics {
+                topic_membership.join(name)?;
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) fn max_event_bytes(&self) -> usize {
+        self.max_frame_size.min(1_048_576)
+    }
     pub(super) fn check_resume_position(&self, ack: u64) -> Result<()> {
         let mut state = self.state.lock().map_err(|_| ErrorCode::Internal)?;
         if state.closed || state.handoff {
@@ -76,6 +105,80 @@ impl Channel {
             .replay_after(ack)
             .ok_or(ErrorCode::ResumeUnavailable)?;
         Ok(())
+    }
+    fn ensure_event_admissible(state: &ChannelState, topic: Option<&str>) -> Result<()> {
+        if state.closed {
+            return Err(ErrorCode::SessionClosed.into());
+        }
+        if !state.logged_in
+            || state.handoff
+            || state.connection.as_ref().is_none_or(|connection| {
+                connection.replaying || connection.binding.cancellation.is_cancelled()
+            })
+            || topic.is_some_and(|topic| !state.topics.contains(topic))
+        {
+            return Err(ErrorCode::InvalidState.into());
+        }
+        Ok(())
+    }
+    pub(super) fn change_topic(&self, name: &str, join: bool) -> Result<()> {
+        if name.trim().is_empty() || name.len() > 256 {
+            return Err(ErrorCode::InvalidRequest.into());
+        }
+        let mut state = self.state.lock().map_err(|_| ErrorCode::Internal)?;
+        if state.closed {
+            return Err(ErrorCode::SessionClosed.into());
+        }
+        if !state.logged_in || state.handoff {
+            return Err(ErrorCode::InvalidState.into());
+        }
+        if join {
+            if !state.topics.contains(name) && state.topics.len() >= self.max_topics {
+                return Err(ErrorCode::CapacityExceeded.into());
+            }
+            if let Some(topic_membership) = self.topic_membership.get() {
+                topic_membership.join(name)?;
+            }
+            state.topics.insert(name.into());
+        } else {
+            if let Some(topic_membership) = self.topic_membership.get() {
+                topic_membership.leave(name)?;
+            }
+            state.topics.remove(name);
+        }
+        Ok(())
+    }
+    pub(super) fn admit_event<T>(
+        &self,
+        topic: Option<&str>,
+        enqueue: impl FnOnce() -> Result<T>,
+    ) -> Result<T> {
+        let state = self.state.lock().map_err(|_| ErrorCode::Internal)?;
+        Self::ensure_event_admissible(&state, topic)?;
+        enqueue()
+    }
+    pub(super) fn notify_event(
+        &self,
+        message_id: u32,
+        body: &[u8],
+        topic: Option<&str>,
+    ) -> Result<()> {
+        let mut state = self.state.lock().map_err(|_| ErrorCode::Internal)?;
+        Self::ensure_event_admissible(&state, topic)?;
+        // 成员及在线状态已在同一锁下确认，拒绝目标不分配通知正文。
+        self.publish_locked(
+            &mut state,
+            None,
+            LogicalMessage {
+                kind: MessageKind::Notify,
+                message_id,
+                request_id: 0,
+                server_seq: None,
+                error_code: 0,
+                body: body.to_vec(),
+            },
+            0,
+        )
     }
     pub(super) fn admit_internal<T>(&self, enqueue: impl FnOnce() -> Result<T>) -> Result<T> {
         let state = self.state.lock().map_err(|_| ErrorCode::Internal)?;
@@ -129,6 +232,7 @@ impl Channel {
             return Err(ErrorCode::ResumeUnavailable.into());
         }
         let mut snapshot = state.replay_cache.snapshot();
+        snapshot.topics = state.topics.iter().cloned().collect();
         snapshot.last_request_id = state.last_request_id;
         snapshot.grace_remaining_ms = state
             .grace_deadline
@@ -151,6 +255,15 @@ impl Channel {
         sender: OutboundSender,
     ) -> Result<Self> {
         let cache = ReplayCache::restore(config, snapshot, elapsed)?;
+        if snapshot.topics.len() > config.max_topics
+            || snapshot
+                .topics
+                .iter()
+                .any(|name| name.trim().is_empty() || name.len() > 256)
+            || snapshot.topics.iter().collect::<BTreeSet<_>>().len() != snapshot.topics.len()
+        {
+            return Err(ErrorCode::ResumeUnavailable.into());
+        }
         for entry in &snapshot.entries {
             let frame =
                 Frame::decode(entry.body.as_slice()).map_err(|_| ErrorCode::ResumeUnavailable)?;
@@ -174,6 +287,7 @@ impl Channel {
             state.connection = None;
             state.last_request_id = snapshot.last_request_id;
             state.replay_cache = cache;
+            state.topics = snapshot.topics.iter().cloned().collect();
             state.grace_deadline = Some(Instant::now() + grace);
         }
         Ok(channel)
@@ -189,10 +303,13 @@ impl Channel {
         };
         Self {
             max_frame_size: config.max_frame_size,
+            max_topics: config.max_topics,
             disconnect_grace: Duration::from_millis(config.disconnect_grace_ms),
             session_cancel,
             binding_changed: Notify::new(),
+            topic_membership: OnceLock::new(),
             state: Mutex::new(ChannelState {
+                topics: BTreeSet::new(),
                 handoff: false,
                 logged_in: false,
                 closed: false,
@@ -304,15 +421,24 @@ impl Channel {
     pub(super) fn publish_from(
         &self,
         binding: Option<&Binding>,
-        mut message: LogicalMessage,
+        message: LogicalMessage,
         request_message_id: u32,
     ) -> Result<()> {
         let mut state = self.state.lock().map_err(|_| ErrorCode::Internal)?;
+        self.publish_locked(&mut state, binding, message, request_message_id)
+    }
+    fn publish_locked(
+        &self,
+        state: &mut ChannelState,
+        binding: Option<&Binding>,
+        mut message: LogicalMessage,
+        request_message_id: u32,
+    ) -> Result<()> {
         if state.handoff && message.kind == MessageKind::Notify {
             return Err(ErrorCode::InvalidState.into());
         }
         if let Some(binding) = binding {
-            Self::require_current_binding(&state, binding)?;
+            Self::require_current_binding(state, binding)?;
             state.last_request_id = state.last_request_id.max(message.request_id);
         }
         if state.closed {
@@ -344,7 +470,7 @@ impl Channel {
                 .try_send(Outbound::Encoded(body))
                 .is_err()
         {
-            self.detach_locked(&mut state);
+            self.detach_locked(state);
             if state.closed {
                 return Err(ErrorCode::SessionClosed.into());
             }
@@ -476,6 +602,10 @@ impl Channel {
 
     fn close_locked(&self, state: &mut ChannelState) {
         state.closed = true;
+        if let Some(topic_membership) = self.topic_membership.get() {
+            topic_membership.clear(&state.topics);
+        }
+        state.topics.clear();
         if let Some(connection) = state.connection.take() {
             connection.binding.cancellation.cancel();
         }
@@ -595,3 +725,16 @@ pub(crate) fn error_response(request: &LogicalMessage, code: ErrorCode) -> Logic
 
 #[cfg(test)]
 mod tests;
+
+impl Drop for Channel {
+    fn drop(&mut self) {
+        // 即使状态锁已中毒，析构仍可独占读取成员名，避免索引留下失效弱引用。
+        let state = match self.state.get_mut() {
+            Ok(state) => state,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if let Some(topic_membership) = self.topic_membership.get() {
+            topic_membership.clear(&state.topics);
+        }
+    }
+}

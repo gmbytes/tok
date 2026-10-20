@@ -10,10 +10,18 @@ use tracing_opentelemetry::OpenTelemetrySpanExt;
 /// handler 的业务结果；系统级失败使用 gRPC Status，业务错误可放 RpcError。
 pub type CallTask<'a> = Pin<Box<dyn Future<Output = Result<CallResponse, Status>> + Send + 'a>>;
 
+/// 内部事件处理结果，不含客户端业务回应。
+pub type EventTask<'a> =
+    Pin<Box<dyn Future<Output = Result<proto::EventResponse, Status>> + Send + 'a>>;
+
 /// 网关之外的组件通过此契约提供业务分发，不依赖具体游戏。
 pub trait CallHandler: Send + Sync {
     /// 根据调用上下文处理游戏消息，返回业务回应或系统级 gRPC 错误。
     fn call(&self, context: CallContext, payload: Payload) -> CallTask<'_>;
+    /// 执行独立的内部转发事件；默认拒绝，不进入客户端请求或 timer 分发表。
+    fn event(&self, _context: CallContext, _event: Arc<tok_events::Message>) -> EventTask<'_> {
+        Box::pin(async { Err(Status::unimplemented("内部事件入口尚未实现")) })
+    }
 }
 
 /// 将用户组装的 Tower Service 适配为业务 handler。
@@ -40,6 +48,9 @@ where
     }
 }
 
+type RegisteredEvent =
+    dyn Fn(CallContext, Arc<tok_events::Message>) -> EventTask<'static> + Send + Sync;
+
 type RegisteredHandler = dyn Fn(CallContext, Vec<u8>) -> CallTask<'static> + Send + Sync;
 
 /// 强类型业务回应及仅供 session 消费的可选计时更新。
@@ -55,6 +66,7 @@ pub struct HandlerReply<M> {
 pub struct HandlerRegistry {
     handlers: BTreeMap<u32, Arc<RegisteredHandler>>,
     timers: BTreeMap<u32, Arc<RegisteredHandler>>,
+    events: BTreeMap<String, Arc<RegisteredEvent>>,
 }
 
 impl HandlerRegistry {
@@ -138,6 +150,40 @@ impl HandlerRegistry {
         Ok(())
     }
 
+    /// 按稳定事件名注册内部转发 handler；返回 timer 更新，不产生客户端回应。
+    /// event_id 交给业务处理幂等，框架不自动去重；普通请求和 timer 不进入此表。
+    pub fn register_event<E, F, Fut>(&mut self, handler: F) -> Result<(), crate::Error>
+    where
+        E: tok_events::Event + Message + Default,
+        F: Fn(CallContext, tok_events::EventId, E) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<Option<TimerUpdate>, Status>> + Send + 'static,
+    {
+        tok_events::validate_name(E::NAME)
+            .map_err(|error| crate::Error::Configuration(error.to_string()))?;
+        if self.events.contains_key(E::NAME) {
+            return Err(crate::Error::Configuration("事件名称重复注册".into()));
+        }
+        let handler = Arc::new(handler);
+        self.events.insert(
+            E::NAME.into(),
+            Arc::new(move |context, event| {
+                let handler = Arc::clone(&handler);
+                Box::pin(async move {
+                    let body = E::decode(event.body.as_slice())
+                        .map_err(|_| Status::invalid_argument("事件正文解码失败"))?;
+                    let request_id = context.request_id;
+                    let timers = handler(context, event.event_id.clone(), body).await?;
+                    Ok(proto::EventResponse {
+                        request_id,
+                        error: None,
+                        timers: timers.map(crate::timer::encode_update),
+                    })
+                })
+            }),
+        );
+        Ok(())
+    }
+
     /// 注册内部 timer 处理函数；参数从 spec 正文解码，来源和预定、实际时刻来自 context.timer。
     /// 返回的更新只交给 session，不产生客户端回应；客户端业务请求不能进入此分发表。
     pub fn register_timer<Req, F, Fut>(
@@ -179,6 +225,19 @@ impl HandlerRegistry {
 }
 
 impl CallHandler for HandlerRegistry {
+    fn event(&self, context: CallContext, event: Arc<tok_events::Message>) -> EventTask<'_> {
+        Box::pin(async move {
+            event
+                .validate(1_048_576)
+                .map_err(|_| Status::invalid_argument("事件参数无效"))?;
+            let handler = self
+                .events
+                .get(&event.event_type)
+                .ok_or_else(|| Status::unimplemented("事件尚未注册"))?;
+            handler(context, event).await
+        })
+    }
+
     fn call(&self, context: CallContext, payload: Payload) -> CallTask<'_> {
         Box::pin(async move {
             let handlers = if context.timer.is_some() {
@@ -230,30 +289,23 @@ impl RpcService {
         proto::business_rpc_server::BusinessRpcServer::new(self)
     }
 
-    async fn invoke(
+    fn context(
         &self,
-        request: Request<CallRequest>,
+        context: Option<proto::CallContext>,
+        timer: Option<proto::TimerTrigger>,
         player: bool,
-    ) -> Result<Response<CallResponse>, Status> {
-        let parent = crate::propagation::extract(request.metadata());
-        let request = request.into_inner();
-        let context = request
-            .context
-            .ok_or_else(|| Status::invalid_argument("缺少调用上下文"))?;
+    ) -> Result<CallContext, Status> {
+        let context = context.ok_or_else(|| Status::invalid_argument("缺少调用上下文"))?;
         if context.node_id != self.node_id || context.service_name != self.service_name {
             return Err(Status::failed_precondition("调用目标与绑定服务不匹配"));
         }
-        let payload = request
-            .payload
-            .ok_or_else(|| Status::invalid_argument("缺少游戏消息"))?;
         if context.request_id == 0
-            || payload.message_id == 0
             || context
                 .bid
                 .as_ref()
                 .is_some_and(|bid| bid.trim().is_empty())
         {
-            return Err(Status::invalid_argument("调用序号、消息 ID 或业务 ID 无效"));
+            return Err(Status::invalid_argument("调用序号或业务 ID 无效"));
         }
         let session = context.session.map(|identity| SessionIdentity {
             player_id: identity.player_id,
@@ -270,7 +322,7 @@ impl RpcService {
         {
             return Err(Status::failed_precondition("player 调用需要匹配的会话身份"));
         }
-        let timer = request.timer.map(|timer| TimerTrigger {
+        let timer = timer.map(|timer| TimerTrigger {
             timer_id: timer.timer_id,
             scheduled_at_ms: timer.scheduled_at_ms,
             fired_at_ms: timer.fired_at_ms,
@@ -284,26 +336,59 @@ impl RpcService {
         }) {
             return Err(Status::invalid_argument("计时来源或时刻无效"));
         }
-        let context = CallContext {
+        Ok(CallContext {
             node_id: context.node_id,
             service_name: context.service_name,
             bid: context.bid,
             request_id: context.request_id,
             session,
             timer,
-        };
-        let span = tracing::info_span!("rpc_server", node_id = %self.node_id, service_name = %self.service_name, request_id = context.request_id, bid = ?context.bid);
+        })
+    }
+
+    async fn execute<T>(
+        &self,
+        parent: opentelemetry::Context,
+        request_id: u64,
+        bid: Option<String>,
+        task: impl Future<Output = Result<T, Status>>,
+    ) -> Result<T, Status> {
+        let span = tracing::info_span!("rpc_server", node_id = %self.node_id, service_name = %self.service_name, request_id, bid = ?bid);
         #[expect(
             clippy::let_underscore_must_use,
-            reason = "追踪父上下文关联失败不能中断已通过验证的业务调用。"
+            reason = "追踪关联失败不能中断有效业务调用。"
         )]
         let _ = span.set_parent(parent);
         let started = std::time::Instant::now();
-        let request_id = context.request_id;
-        let result = self.handler.call(context, payload).instrument(span).await;
+        let result = task.instrument(span).await;
         metrics::histogram!("tok_rpc_server_duration_seconds", "service_name" => self.service_name.clone()).record(started.elapsed().as_secs_f64());
         metrics::counter!("tok_rpc_server_calls_total", "service_name" => self.service_name.clone(), "result" => if result.is_ok() { "ok" } else { "error" }).increment(1);
-        let mut response = result?;
+        result
+    }
+
+    async fn invoke(
+        &self,
+        request: Request<CallRequest>,
+        player: bool,
+    ) -> Result<Response<CallResponse>, Status> {
+        let parent = crate::propagation::extract(request.metadata());
+        let request = request.into_inner();
+        let context = self.context(request.context, request.timer, player)?;
+        let payload = request
+            .payload
+            .ok_or_else(|| Status::invalid_argument("缺少游戏消息"))?;
+        if payload.message_id == 0 {
+            return Err(Status::invalid_argument("消息 ID 无效"));
+        }
+        let request_id = context.request_id;
+        let mut response = self
+            .execute(
+                parent,
+                request_id,
+                context.bid.clone(),
+                self.handler.call(context, payload),
+            )
+            .await?;
         response.request_id = request_id;
         Ok(Response::new(response))
     }
@@ -311,6 +396,36 @@ impl RpcService {
 
 #[tonic::async_trait]
 impl proto::player_rpc_server::PlayerRpc for RpcService {
+    async fn handle_event(
+        &self,
+        request: Request<proto::EventRequest>,
+    ) -> Result<Response<proto::EventResponse>, Status> {
+        let parent = crate::propagation::extract(request.metadata());
+        let request = request.into_inner();
+        let context = self.context(request.context, None, true)?;
+        let event = tok_events::Message {
+            event_id: tok_events::EventId::new(request.event_id)
+                .map_err(|_| Status::invalid_argument("事件 ID 无效"))?,
+            event_type: request.event_type,
+            body: request.body,
+            trace_context: Default::default(),
+        };
+        event
+            .validate(1_048_576)
+            .map_err(|_| Status::invalid_argument("事件参数无效"))?;
+        let request_id = context.request_id;
+        let mut response = self
+            .execute(
+                parent,
+                request_id,
+                context.bid.clone(),
+                self.handler.event(context, Arc::new(event)),
+            )
+            .await?;
+        response.request_id = request_id;
+        Ok(Response::new(response))
+    }
+
     async fn call(&self, request: Request<CallRequest>) -> Result<Response<CallResponse>, Status> {
         self.invoke(request, true).await
     }

@@ -3,6 +3,7 @@
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
 
 pub mod client;
+pub mod events;
 pub mod gateway;
 pub mod guild;
 pub mod player;
@@ -118,12 +119,13 @@ pub fn application_with_locks(
             }
         }
     }
-    app.register_factory(
-        "player-ingress",
-        gateway::PlayerIngressFactory::new(config.player_gateway.clone(), ownership)
-            .with_resume_token_codec(tokens)
-            .with_gateway_rpc(gateway_rpc.clone()),
-    )?;
+    let mut ingress = gateway::PlayerIngressFactory::new(config.player_gateway.clone(), ownership)
+        .with_resume_token_codec(tokens)
+        .with_gateway_rpc(gateway_rpc.clone());
+    if let Some(events) = config.events.clone() {
+        ingress = ingress.with_events(events);
+    }
+    app.register_factory("player-ingress", ingress)?;
     app.register_factory("player", LifecycleService)?;
     app.register_factory("guild", LifecycleService)?;
     app.register_factory("gateway-rpc", LifecycleService)?;
@@ -183,9 +185,11 @@ pub fn application_with_locks(
 pub async fn rpc_smoke(directory: &dyn ServiceDirectory) -> Result<(), Error> {
     let player = tok::infra::routing::route(directory, "player", "42")?;
     let guild = tok::infra::routing::route(directory, "guild", "7")?;
-    let clients = RpcClients::new(Duration::from_secs(2), 8)?;
-    let response = clients
-        .player_call(
+    let clients = Arc::new(RpcClients::new(Duration::from_secs(2), 8)?);
+    let player_client = tok::rpc::player::Client::new(Arc::clone(&clients));
+    let business_client = tok::rpc::business::Client::new(clients);
+    let response = player_client
+        .call(
             &player,
             CallContext {
                 timer: None,
@@ -215,8 +219,8 @@ pub async fn rpc_smoke(directory: &dyn ServiceDirectory) -> Result<(), Error> {
     {
         return Err(std::io::Error::other("player 回应与可信上下文不匹配").into());
     }
-    let response = clients
-        .business_call(
+    let response = business_client
+        .call(
             &guild,
             CallContext {
                 timer: None,

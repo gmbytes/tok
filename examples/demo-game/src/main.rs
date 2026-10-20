@@ -29,6 +29,9 @@ struct Args {
     /// 使用真实 TCP 验证客户端登录、状态读写和公会调用后退出。
     #[arg(long, conflicts_with_all = ["check_config", "run_for", "rpc_smoke"])]
     client_smoke: bool,
+    /// 使用真实 NATS、TCP 与 RPC 验证内部事件和客户端广播后退出。
+    #[arg(long, conflicts_with_all = ["check_config", "run_for", "rpc_smoke", "client_smoke"])]
+    event_smoke: bool,
 }
 
 #[tokio::main]
@@ -40,7 +43,11 @@ async fn main() -> Result<(), Error> {
         println!("配置验证通过");
         return Ok(());
     }
-    let client_service = if args.client_smoke {
+    let events_config = config.events.clone();
+    if args.event_smoke && events_config.is_none() {
+        return Err(std::io::Error::other("event-smoke 需要 [events] 配置").into());
+    }
+    let client_service = if args.client_smoke || args.event_smoke {
         Some(
             config
                 .services
@@ -65,7 +72,7 @@ async fn main() -> Result<(), Error> {
         tracing::info!("运行客户端 TCP 与内部 RPC，按 Ctrl+C 退出");
         application
             .run_until(async {
-                if args.rpc_smoke || args.client_smoke {
+                if args.rpc_smoke || args.client_smoke || args.event_smoke {
                     return tokio::time::timeout(Duration::from_secs(10), async {
                         while !directory
                             .snapshot("player")
@@ -88,10 +95,22 @@ async fn main() -> Result<(), Error> {
                                 .into_iter()
                                 .next()
                                 .ok_or_else(|| std::io::Error::other("玩家网关尚未就绪"))?;
-                            demo_game::client::smoke(gateway.address)
+                            if args.event_smoke {
+                                demo_game::events::smoke(
+                                    gateway.address,
+                                    events_config
+                                        .clone()
+                                        .ok_or_else(|| std::io::Error::other("缺少 events 配置"))?,
+                                )
                                 .await
                                 .map_err(std::io::Error::other)?;
-                            tracing::info!("TCP 登录、玩家状态与公会调用验证通过");
+                                tracing::info!("NATS 转发与广播验证通过");
+                            } else {
+                                demo_game::client::smoke(gateway.address)
+                                    .await
+                                    .map_err(std::io::Error::other)?;
+                                tracing::info!("TCP 登录、玩家状态与公会调用验证通过");
+                            }
                         } else {
                             demo_game::rpc_smoke(directory.as_ref())
                                 .await

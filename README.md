@@ -21,11 +21,11 @@ workspace 同时禁止持有同步锁或 RefCell 借用跨越 await、丢弃未�
 
 框架采用 Cargo workspace，库位于 `crates/`，具体游戏组装最终二进制。`examples/demo-game` 展示游戏协议、服务配置和内存服务目录。
 
-当前已提供配置校验、内存目录、Redis 开发发现与变更订阅、bid 路由、内存与 Redis session 所有权、protobuf 生成、服务生命周期、可观测组件及共享内部 gRPC 端点。Ingress 提供 TCP 登录、认证扩展点、有界串行 session、timer 调度、统一下行序号、累计 ACK 和有界内存缓存。客户端 Frame 已升级为版本 3，旧版须同步升级；已支持同网关 token 恢复、有序补发与快速重登，默认断线宽限期 30 秒，期间继续驱动 timer。示例支持玩家状态读写、player 调用 guild 及计时更新状态；按 Ctrl+C 优雅退出。显式配置兼容签名密钥及内部交接端点后支持跨网关接续；Kubernetes 发现和 NATS 消费按后续批次推进。
+当前已提供配置校验、内存目录、Redis 开发发现与变更订阅、bid 路由、内存与 Redis session 所有权、protobuf 生成、服务生命周期、可观测组件及共享内部 gRPC 端点。Ingress 提供 TCP 登录、认证扩展点、有界串行 session、timer 调度、统一下行序号、累计 ACK 和有界内存缓存。客户端 Frame 已升级为版本 3，旧版须同步升级；已支持同网关 token 恢复、有序补发与快速重登，默认断线宽限期 30 秒，期间继续驱动 timer。示例支持玩家状态读写、player 调用 guild 及计时更新状态；按 Ctrl+C 优雅退出。显式配置兼容签名密钥及内部交接端点后支持跨网关接续；Core NATS 即时广播和转发已接通；Kubernetes 发现、JetStream 和离线加载按后续批次推进。
 
 网关共用 `Gateway` 运行框架，接入组件负责具体业务语义。当前 `Ingress` 实现 TCP 登录和串行 session，Scene 接入尚未实现；通过 `Gateway::player` 便捷组装。`player/`、`scene/` 分别组织玩家和场景组件，`transport/`、`security/`、`codec/` 提供传输、安全与编解码适配。示例通过可选的 `factory = "player-ingress"` 选择网关工厂，服务名可自行命名。
 
-示例消息 ID 统一定义在 [message_id.proto](examples/demo-game/proto/demo/v1/message_id.proto) 的 `MessageId` 枚举中。构建脚本按消息名称生成 `GameMessage::MESSAGE_ID`，客户端和服务端共用，不再在业务模块手写数字。请求与回应仍显式配对；已有数值保持不变，零保留为未指定值，删除的编号和名称需在 proto 中 `reserved`。
+示例消息 ID 统一定义在 [message_id.proto](examples/demo-game/proto/demo/v1/message_id.proto) 的 `MessageId` 枚举中。构建脚本按消息名称生成 `GameMessage::MESSAGE_ID`，客户端和服务端共用，不再在业务模块手写数字。请求与回应仍显式配对；零保留为未指定值；正式发布后保持数值稳定，删除已发布的编号和名称时在 proto 中 `reserved`，发布前可直接调整。
 
 ## 开发命令
 
@@ -44,6 +44,8 @@ just config-check examples/demo-game/config/gateway.toml
 just config-check examples/demo-game/config/game.toml
 just build
 ```
+
+工程文本文件统一使用 LF，Git、编辑器和 rustfmt 均已配置。`just line-endings-check` 检查已跟踪文件及未忽略的新文件，常规测试与 CI 同样执行此检查。
 
 `just fmt` 格式化代码，`just verify` 检查格式、clippy 和测试。`just proto` 在协议输入变更时触发构建期生成，生成代码位于 Cargo 的 OUT_DIR，不提交生成的 Rust 文件。
 
@@ -74,7 +76,7 @@ service_name = "guild"
 endpoint = "internal-rpc"
 ```
 
-RPC 使用 `CallContext`、`HandlerRegistry` 和 `RpcService` 分离业务上下文、强类型分发与 gRPC 接入。`RpcClients` 有界复用 Channel，设置调用超时且不重试；通过 metadata 传播 W3C TraceContext。用户可用 `TowerHandler` 接入代码组装的中间件链，决定选择、顺序和作用范围。请求级锁提供独立的 Memory / Redis 后端与 `rpc::lock::Layer`，按逻辑服务名和 bid 互斥；由 Rust 代码显式安装，普通业务入口不自动加锁。示例 guild 默认安装 Memory 锁，多进程通过 `application_with_locks` 注入共享后端。配置式中间件链仍待后续实现。
+RPC 使用 `CallContext`、`HandlerRegistry` 和 `RpcService` 分离业务上下文、强类型分发与 gRPC 接入。`RpcClients` 只管理有界 Channel 缓存及传输配置；`rpc::player::Client` 和 `rpc::business::Client` 分别适配协议，共享连接，设置调用超时且不重试，通过 metadata 传播 W3C TraceContext。用户可用 `TowerHandler` 接入代码组装的中间件链，决定选择、顺序和作用范围。请求级锁提供独立的 Memory / Redis 后端与 `rpc::lock::Layer`，按逻辑服务名和 bid 互斥；由 Rust 代码显式安装，普通业务入口不自动加锁。示例 guild 默认安装 Memory 锁，多进程通过 `application_with_locks` 注入共享后端。配置式中间件链仍待后续实现。
 
 `just build` 输出当前平台的 `target/release/demo-game.exe` 或 `target/release/demo-game`。同一二进制通过 `--config` 选择服务。当前 Kubernetes 配置仅支持 `--check-config` 校验，实际运行会明确报错。
 
@@ -84,7 +86,19 @@ CI 在 Windows 和 Linux 的 amd64 runner 上分别执行 just 检查、测试�
 
 `tok::events::Event` 声明稳定事件名及跨节点投递选项；`local::Dispatcher<E, C, Failure>` 为一种事件注册有界数量的同步订阅者，在当前业务调用内按顺序借用状态执行。首个错误原样返回，已完成的修改不回滚，无订阅者返回零；不另起任务、不进入 session 队列、不重试或去重。示例生产 timer 在原 player 调用中分发本地完成事件，产出规则及重复触发保护仍由业务负责。
 
-`EventId`、`EventTarget`、`Envelope` 和有界追踪头载体只定义跨节点事件的数据契约；Core NATS、JetStream、频道订阅、离线加载和网关事件分发仍待实现。使用方法见 [rustdoc 用户指南](crates/tok/docs/guide.md#同步本地事件)。
+`EventId`、`Envelope` 与 `Message` 提供通用服务器事件契约；任意服务通过 Core NATS 按类型发布和订阅，可显式配置 group 分担消费，`Registry` 注册强类型异步处理函数，回调同时保留原始共享编码。游戏注入网关处理者，按需调用主题筛选、通知下行和会话转发 API；客户端没有事件入口。JetStream、离线加载和跨节点去重仍待实现。使用方法见 [rustdoc 用户指南](crates/tok/docs/guide.md#同步本地事件)。
+
+## Core NATS 开发
+
+显式使用 [events.toml](examples/demo-game/config/events.toml) 开启 `[events]`，独立于发现与所有权配置。网关启动确认普通订阅，运行任务由 Gateway 监督；每个网关筛选自己的在线 session，不使用随机分配消费者的 queue group。
+
+```text
+just nats-test
+just nats-smoke
+just run examples/demo-game/config/events.toml
+```
+
+需要可访问的 Core NATS，默认本机 4222；专项测试可用 TOK_TEST_NATS_URL。发布成功仅表示客户端接受操作，不等待 broker 或业务确认；仅订阅初始化等待有界回环就绪确认。不自动重试或去重。离线、满队列和交接窗口允许即时消息丢失；取消订阅不关闭共享连接；慢消费者上报消费任务，断线、发布入队失败或取消会保守停用连接并交给监督者处理。JetStream 和离线加载尚未实现。主题成员由可信服务器的 SessionHandle 管理，随正常交接转移；交接快照保持初始版本 1，客户端 Frame 仍为版本 3。使用和错误边界见 [用户指南](crates/tok/docs/guide.md#core-nats-即时事件)。
 
 ## Redis 多进程开发
 
@@ -141,7 +155,7 @@ trace_sample_ratio = 0.1
 
 指标端口提供 `/metrics`，支持计数、Gauge 和耗时 Histogram；现有埋点包括服务启动次数、启动耗时、运行服务数及运行失败次数。默认延迟桶从 1 毫秒到 30 秒。player_id、bid、request_id 等不作为指标标签。
 
-追踪通过 OTLP gRPC 导出到 Collector，使用 W3C TraceContext 传播器和父级采样决策，采样率作用于新建根 trace。JSON 日志包含 service/node_id，进入有效追踪 span 时同时包含 trace_id/span_id。已接入服务初始化和 RPC 调用 span，RPC metadata 传播上下文；NATS headers 传播随事件组件实现。token 和协议正文默认不记录。
+追踪通过 OTLP gRPC 导出到 Collector，使用 W3C TraceContext 传播器和父级采样决策，采样率作用于新建根 trace。JSON 日志包含 service/node_id，进入有效追踪 span 时同时包含 trace_id/span_id。已接入服务初始化和 RPC 调用 span，RPC metadata 传播上下文；Core NATS headers 和转发事件 RPC 也已接入传播。token 和协议正文默认不记录。
 
 强追踪规则命中时直接采样，优先于父级决定、普通追踪过滤和 ratio。支持 span 名称、target 和字段的精确匹配；一条规则的全部条件必须满足，多条规则任意命中即可。字段值支持字符串、数字和布尔值。下面的规则强制采集 player_id 为 123 的 client_request：
 

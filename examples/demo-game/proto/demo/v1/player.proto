@@ -33,3 +33,6 @@ message GetGuildRequest {
 message GetGuildResponse {
   uint64 guild_id = 1;
 }
+
+// Core NATS 广播示例，仅作为客户端 Notify。
+message ValueNotice { int64 value = 1; }

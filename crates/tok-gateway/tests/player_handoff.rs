@@ -94,6 +94,7 @@ impl Authenticator for Auth {
     }
 }
 struct Execution {
+    events: std::sync::Mutex<Vec<u64>>,
     calls: AtomicUsize,
     ticks: AtomicUsize,
     started: Notify,
@@ -102,6 +103,7 @@ struct Execution {
 impl Default for Execution {
     fn default() -> Self {
         Self {
+            events: std::sync::Mutex::new(Vec::new()),
             calls: AtomicUsize::new(0),
             ticks: AtomicUsize::new(0),
             started: Notify::new(),
@@ -110,6 +112,18 @@ impl Default for Execution {
     }
 }
 impl Executor for Execution {
+    fn execute_event(
+        &self,
+        _: SessionIdentity,
+        request_id: u64,
+        _: Arc<tok_events::Message>,
+    ) -> tok_gateway::player::EventTask<'_> {
+        Box::pin(async move {
+            self.events.lock().unwrap().push(request_id);
+            Ok(None)
+        })
+    }
+
     fn execute_request(&self, _: SessionIdentity, request: LogicalMessage) -> Task<'_> {
         Box::pin(async move {
             self.calls.fetch_add(1, Ordering::SeqCst);
@@ -385,6 +399,26 @@ async fn handoff_replays_original_response_preserves_identity_and_runs_timer_onc
     )
     .await;
     let (mut stream, login) = login(&a).await;
+    let source = a.sessions.session("42").unwrap().unwrap();
+    source.join_topic("guild:7").unwrap();
+    let event = tok_gateway::player::events::Delivery {
+        target: tok_gateway::player::events::Target::Topic("guild:7".into()),
+        action: tok_gateway::player::events::Action::Forward(Arc::new(tok_events::Message {
+            event_id: tok_events::EventId::generate(),
+            event_type: "test.handoff".into(),
+            body: vec![],
+            trace_context: Default::default(),
+        })),
+    };
+    assert_eq!(a.sessions.deliver(&event).await.unwrap().admitted, 1);
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while execution.events.lock().unwrap().len() != 1 {
+            tokio::task::yield_now().await
+        }
+    })
+    .await
+    .unwrap();
+
     request(&mut stream, 2, 2, b"state").await;
     let Content::Response(original) = read(&mut stream).await else {
         panic!()
@@ -404,6 +438,17 @@ async fn handoff_replays_original_response_preserves_identity_and_runs_timer_onc
     };
     assert_eq!(replayed, original);
     assert!(matches!(read(&mut stream).await, Content::Recovered(_)));
+    assert!(source.join_topic("stale").is_err());
+    assert_eq!(b.sessions.deliver(&event).await.unwrap().admitted, 1);
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while execution.events.lock().unwrap().len() != 2 {
+            tokio::task::yield_now().await
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(*execution.events.lock().unwrap(), vec![1, 2]);
+
     assert!(
         old.try_request(LogicalMessage {
             kind: MessageKind::Request,
@@ -524,6 +569,9 @@ async fn cancelled_snapshot_cannot_commit_and_old_session_can_resume() {
     )
     .await;
     let (stream, login) = login(&a).await;
+    let source = a.sessions.session("42").unwrap().unwrap();
+    source.join_topic("retained").unwrap();
+
     let mut client = rpc(&a).await;
     let mut request = prepare_request(&login, &uuid::Uuid::new_v4().to_string());
     let snapshot = client
@@ -541,6 +589,25 @@ async fn cancelled_snapshot_cannot_commit_and_old_session_can_resume() {
         .snapshot
         .unwrap();
     assert_eq!(snapshot, duplicate);
+    assert_eq!(snapshot.version, 1);
+    assert_eq!(snapshot.channel.as_ref().unwrap().topics, vec!["retained"]);
+    assert_eq!(
+        source.join_topic("during-freeze").unwrap_err().code,
+        tok_gateway::ErrorCode::InvalidState
+    );
+    assert_eq!(
+        source
+            .post_event(Arc::new(tok_events::Message {
+                event_id: tok_events::EventId::generate(),
+                event_type: "test.freeze".into(),
+                body: vec![],
+                trace_context: Default::default()
+            }))
+            .unwrap_err()
+            .code,
+        tok_gateway::ErrorCode::InvalidState
+    );
+
     let old = a.sessions.session("42").unwrap().unwrap();
     assert_eq!(
         old.notify(LogicalMessage {
@@ -567,6 +634,9 @@ async fn cancelled_snapshot_cannot_commit_and_old_session_can_resume() {
         ownership.lookup("42").await.unwrap().unwrap().owner.node_id,
         "a"
     );
+
+    source.leave_topic("retained").unwrap();
+    source.join_topic("after-cancel").unwrap();
     drop(stream);
     drop(restored);
     a.stop().await;

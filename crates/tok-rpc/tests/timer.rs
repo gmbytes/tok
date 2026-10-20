@@ -111,7 +111,9 @@ async fn internal_trigger_is_propagated_and_cannot_be_selected_by_client_message
     };
     let cancel = CancellationToken::new();
     let server = tokio::spawn(endpoint.serve(listener, cancel.clone()).unwrap());
-    let clients = RpcClients::new(Duration::from_secs(2), 2).unwrap();
+    let clients = Arc::new(RpcClients::new(Duration::from_secs(2), 2).unwrap());
+    let player_client = tok_rpc::player::Client::new(Arc::clone(&clients));
+    let business_client = tok_rpc::business::Client::new(Arc::clone(&clients));
     let mut context = CallContext {
         node_id: "node".into(),
         service_name: "player".into(),
@@ -124,8 +126,8 @@ async fn internal_trigger_is_propagated_and_cannot_be_selected_by_client_message
         }),
         timer: None,
     };
-    let reply = clients
-        .player_call(
+    let reply = player_client
+        .call(
             &target,
             context.clone(),
             Payload {
@@ -150,8 +152,8 @@ async fn internal_trigger_is_propagated_and_cannot_be_selected_by_client_message
         body: Data { value: 7 }.encode_to_vec(),
     };
     assert_eq!(
-        clients
-            .player_call(&target, context.clone(), body.clone())
+        player_client
+            .call(&target, context.clone(), body.clone())
             .await
             .unwrap_err()
             .code(),
@@ -163,8 +165,8 @@ async fn internal_trigger_is_propagated_and_cannot_be_selected_by_client_message
         scheduled_at_ms: 1000,
         fired_at_ms: 1500,
     });
-    let reply = clients
-        .player_call(&target, context.clone(), body.clone())
+    let reply = player_client
+        .call(&target, context.clone(), body.clone())
         .await
         .unwrap();
     assert!(reply.payload.is_none());
@@ -177,8 +179,8 @@ async fn internal_trigger_is_propagated_and_cannot_be_selected_by_client_message
     );
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     assert_eq!(
-        clients
-            .business_call(&target, context.clone(), body.clone())
+        business_client
+            .call(&target, context.clone(), body.clone())
             .await
             .unwrap_err()
             .code(),
@@ -186,8 +188,8 @@ async fn internal_trigger_is_propagated_and_cannot_be_selected_by_client_message
     );
     context.timer.as_mut().unwrap().fired_at_ms = 500;
     assert_eq!(
-        clients
-            .player_call(&target, context, body)
+        player_client
+            .call(&target, context, body)
             .await
             .unwrap_err()
             .code(),
