@@ -36,7 +36,7 @@
 | 协议与 RPC | [tok-rpc](../crates/tok-rpc/src/lib.rs) 提供 PlayerRpc、BusinessRpc、强类型分发、连接复用、超时、追踪传播、TowerHandler 和可选请求锁 Layer | 配置式中间件及生产调用身份认证 |
 | 网关 | [Gateway](../crates/tok-gateway/src/runtime.rs) 统一接收、容量及监督；[Ingress](../crates/tok-gateway/src/player/ingress.rs) 提供 TCP 认证、串行 session、所有权续租、timer、下行缓存及同网关恢复 | 生产安全及 scene 接入 |
 | 路由与 Redis | bid rendezvous 路由、Memory / Redis 所有权及请求锁、条件释放及本地时间预算检查已实现 | Cluster 拓扑与故障切换适配 |
-| 事件 | [tok-events](../crates/tok-events/src/lib.rs) 已有 DeliveryPolicy 和 EventTarget | 同步本地分发、NATS 后端、订阅、去重及交接处理 |
+| 事件 | [tok-events](../crates/tok-events/src/lib.rs) 提供强类型事件、稳定 ID、目标和追踪载体契约，以及有界同步本地分发；示例生产 timer 已接入 | NATS 后端、网关事件入口、订阅、去重及交接处理 |
 | 可观测 | 日志动态过滤、Prometheus、OTLP、强追踪规则、RPC metadata 传播及调用指标已实现 | 事件 headers 传播及 session、timer 指标 |
 | 示例与部署 | player 与 guild 共享内部 gRPC；`just client-smoke` 经真实 TCP 验证登录、状态读写和 player 调用 guild | 容器构建和可部署清单 |
 
@@ -223,7 +223,7 @@ RPC 超时后远端仍可能执行，存储层落地时统一加入写入前期�
 
 **目标：** 按既定投递语义接通服务间通知。
 
-- 同步本地分发器在当前 player 调用内执行，可提前随阶段三落地。
+- 同步本地分发器已在当前 player 调用内接通；使用有界注册、顺序执行和首错停止语义。
 - 定义稳定 event_id、事件类型、目标、DeliveryPolicy、离线加载选项及追踪上下文；明确频道加入、退出和交接规则。
 - Core NATS 提供即时投递；广播进入下行序列，转发进入 session 执行队列。离线玩家默认不拉起、不积压。
 - JetStream 按事件类型配置存储与消费确认，重复发布沿用 event_id；框架提供有界去重辅助，业务幂等承担跨进程和资产变更的重复处理责任。
@@ -231,6 +231,14 @@ RPC 超时后远端仍可能执行，存储层落地时统一加入写入前期�
 - 允许离线加载的事件也必须获取所有权并串行驱动，明确临时 session 的释放条件。
 
 **验收：** 指定玩家、频道和全体目标正确分发；广播不调用 player；转发与请求、timer 串行；验证重复、重新投递、离线跳过和临时加载。事件消费确认与客户端 ack_seq 各自独立。
+
+### 第一批：事件契约与同步本地分发（已实现）
+
+- 定义显式事件名称、按类型声明的投递策略与离线加载选项；提供可生成或恢复的稳定事件 ID、目标及追踪头载体。跨节点 Envelope 只定义数据契约，不宣称已有编码、发布或消费能力。
+- 实现强类型、有界注册的本地分发器；显式借用当前业务状态，按注册顺序同步执行，首错停止并原样返回，无订阅者成功返回零。无后台任务、内部队列、隐式锁、自动重试或去重，部分修改不自动回滚。
+- 示例在生产 timer 的原 player 调用内分发本地完成事件，将计时入口与产出业务处理分开，不改变客户端消息 ID 或 protobuf 协议。
+- 验收名称、ID、目标及追踪载体校验，注册容量、执行顺序、错误短路与部分修改、重复调用及共享分发器；示例验证正常产出、过时与重复触发、产出溢出错误及原状态保护。执行常规测试、rustdoc、lint 和示例 smoke。
+- 本批不实现 Core NATS / JetStream、网关事件入口、频道订阅、离线加载、跨节点去重或交接订阅迁移；不据此标记阶段六整体完成。
 
 ## 阶段七 Kubernetes 与生产运行
 
@@ -332,3 +340,14 @@ Clippy 补齐验收（2026-10-20 Windows）：新增规则下 workspace 全目�
 示例 guild 在 Rust 组装代码中安装锁，默认 Memory，通过 `application_with_locks` 显式注入共享后端；player 和 GatewayRpc 不安装锁。未新增 ServiceConfig 锁开关或配置式中间件链。README、设计文档与 rustdoc 用户指南已同步，指南包含可编译的组装示例。
 
 workspace 常规测试和 5 项文档测试通过；锁 Layer 最终定向验证 10 项，覆盖双节点真实 RPC、预算扣减、内部 readiness、业务错误、释放异常、超时和取消。5 项真实 Redis 测试通过，覆盖独立进程竞争、过期及旧持有者条件释放、断线释放失败、已写入但回应丢失后的未知结果与 TTL 兜底；测试仅使用独有命名空间和有限 TTL，不清空共享数据库。格式、workspace 全目标 Clippy、rustdoc、生命周期 / RPC / 客户端 smoke 及 release 构建通过。此次未重复执行已有发现、所有权及跨网关交接的真实 Redis 专项，相关组件行为未改动。Redis Cluster 客户端、NATS 和生产安全继续保留为后续工作，阶段五未整体完成。
+
+
+## 同步本地事件实施验收（2026-10-20 Windows）
+
+阶段六首个子批次已完成：`tok-events` 提供 `Event`、`EventId`、`Envelope` 和有界追踪头载体，保留游戏自定义目标 ID 类型；事件名称、投递策略与离线加载选项显式声明，跨节点数据契约不等同于已有传输实现。`local::Dispatcher` 按事件类型有界注册订阅者，显式借用当前业务状态，在原调用栈顺序执行，首个错误原样返回；没有队列、后台任务、隐式锁、自动去重或回滚。tok-events 无需依赖 tok-core 或异步运行时。
+
+示例生产 timer 在原 player 调用内分发 `production::Completed`，产出业务独立到 production 模块；通过保存的生产时刻处理过时与重复触发，先完成可失败的计算再写状态，溢出错误沿原调用返回。客户端 protobuf、消息 ID 和 timer 协议未变。README、设计和 rustdoc 用户指南已同步，包含可编译的本地分发示例。
+
+验收通过：151 项常规测试、6 项文档测试（合计 157 项），其中事件契约与本地分发新增 11 项测试，示例生产流程共 2 项。覆盖注册容量、无订阅者、顺序执行、首错短路与部分修改、重复调用、独立状态共享分发器且留在调用线程、ID 与目标及追踪载体边界，以及示例正常产出、过时/重复触发和溢出状态保护。格式、workspace 全目标 Clippy、rustdoc、生命周期 / RPC / 客户端 smoke 及 release 构建通过。本批未修改 Redis 后端行为，未重复执行依赖真实 Redis 的专项。
+
+Core NATS、JetStream、网关事件入口、频道订阅、离线加载及交接订阅迁移仍待后续子批次，阶段六未整体完成。Redis Cluster 客户端继续独立保留为阶段五剩余工作。

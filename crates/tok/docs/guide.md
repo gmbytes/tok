@@ -703,6 +703,56 @@ timer 失败或超时只记录本次失败，不重试；周期的后续触发�
 请求中没有 timer 配置或产出参数，`just client-smoke` 验证完整 TCP 与 RPC 链路。
 当前由业务响应安装 spec，未增加隐式的 player 登录调用。断线宽限期内 timer 继续运行；到期、显式关闭或租约失效时清理。快速重登通过游戏初始化请求重新安装完整集合。
 
+## 同步本地事件
+
+[`events::Event`] 由游戏声明稳定的 `NAME`，使用 1 到 128 字节的 ASCII 字母、数字、点、短横线或下划线，点分段不能为空。
+不要用 Rust 类型名作为跨节点事件标识；事件定义与客户端消息 ID 分开。
+`DELIVERY` 默认 [`events::DeliveryPolicy::Immediate`]，`LOAD_OFFLINE` 默认 false；这些选项只供后续跨节点适配使用。
+
+[`events::local::Dispatcher`] 为一种事件保存有界数量的同步订阅者。
+组装时按顺序注册，通过显式借用当前业务状态进行分发；不进入 session 队列，不产生后台任务，也不内部获取锁或所有权。
+player 应在原有 session 驱动的业务调用中使用它。不同状态可以共享同一个只读分发器，通常用 Arc 共享。
+
+```rust
+use tok::events::{Event, local::Dispatcher};
+
+struct Changed { delta: i64 }
+impl Event for Changed {
+    const NAME: &'static str = "game.value.changed.v1";
+}
+
+# fn example() -> Result<(), Box<dyn std::error::Error>> {
+let mut events = Dispatcher::<Changed, i64, std::io::Error>::new(4)?;
+events.register(|value, event| {
+    let next = value.checked_add(event.delta)
+        .ok_or_else(|| std::io::Error::other("数值溢出"))?;
+    *value = next;
+    Ok(())
+})?;
+let mut value = 0;
+let handled = events.dispatch(&mut value, &Changed { delta: 3 })?;
+assert_eq!(handled, 1);
+assert_eq!(value, 3);
+# Ok(())
+# }
+```
+
+订阅者在当前线程、当前调用栈中按注册顺序执行，首个错误原样返回并停止后续处理。
+没有订阅者时成功返回零；超过注册容量返回 [`events::Error::CapacityExceeded`]，原注册保持有效。
+分发器不重试、不去重、不回滚已经执行的修改，也不截获 panic。业务应避免循环分发，按自身规则保持状态一致。
+同步订阅者不能 await；异步 RPC、持久化等操作仍由外层业务调用编排，不通过订阅者启动脱离当前调用的任务。
+
+示例 `player::production` 将生产完成处理注册为本地订阅者，timer 入口同步分发。
+业务通过保存的生产时刻跳过过时与重复触发，先检查产出溢出再写状态；这是示例业务保护，并非分发器提供幂等或事务。
+订阅者错误沿原 RPC 调用返回，不为本地事件单独生成客户端 Response，也不生成或缓存 event_id。
+
+[`events::Envelope`] 另行定义跨节点事件的数据契约：稳定 [`events::EventId`]、[`events::EventTarget`]、强类型载荷及 [`events::TraceContext`]。
+新事件用 `EventId::generate()` 生成 UUID v4；从已有记录恢复用 `EventId::new(...)`，同一次事件重复发布必须保留原 ID。
+ID 限制为 1 到 128 个可打印 ASCII 非空白字节；频道不能为空且最多 256 字节，指定玩家列表限 1 到 1024 项。
+游戏 ID 类型仍由游戏选择，身份格式与载荷编码限制留给后续适配；修改 Envelope 的公开字段后须重新 validate。
+追踪头只是每字段最多 512 字节的 ASCII 数据载体，不解析完整 W3C 格式、不自动读取 span，后续传输适配负责注入提取。
+Envelope 当前没有发布和消费接口；Core NATS、JetStream、频道订阅、离线加载、转发入队、广播下行及跨节点去重尚未实现。
+
 ## 统一 Gateway 与接入组件
 
 [`gateway::Gateway`] 共用连接接收、容量控制、后台任务监督与退出流程。
@@ -761,7 +811,7 @@ Scene 目前仅预留模块，不套用 Player 的串行与所有权语义。
 | [`infra`] | 服务目录、路由及协调后端 |
 | [`rpc`] | 内部 RPC 与 Tower 组装 |
 | [`gateway`] | 统一 Gateway 运行框架与 Player、Scene 接入组件 |
-| [`events`] | 本地及跨节点事件 |
+| [`events`] | 强类型事件契约与同步本地分发；跨节点传输待实现 |
 | [`observability`] | 日志、指标与追踪 |
 
 目前示例监听共享内部 gRPC 和客户端 TCP 端点，已接通注入认证、有界串行 session、状态读写及服务组合。

@@ -80,6 +80,12 @@ RPC 使用 `CallContext`、`HandlerRegistry` 和 `RpcService` 分离业务上下
 
 CI 在 Windows 和 Linux 的 amd64 runner 上分别执行 just 检查、测试及 release 构建。
 
+## 同步本地事件
+
+`tok::events::Event` 声明稳定事件名及跨节点投递选项；`local::Dispatcher<E, C, Failure>` 为一种事件注册有界数量的同步订阅者，在当前业务调用内按顺序借用状态执行。首个错误原样返回，已完成的修改不回滚，无订阅者返回零；不另起任务、不进入 session 队列、不重试或去重。示例生产 timer 在原 player 调用中分发本地完成事件，产出规则及重复触发保护仍由业务负责。
+
+`EventId`、`EventTarget`、`Envelope` 和有界追踪头载体只定义跨节点事件的数据契约；Core NATS、JetStream、频道订阅、离线加载和网关事件分发仍待实现。使用方法见 [rustdoc 用户指南](crates/tok/docs/guide.md#同步本地事件)。
+
 ## Redis 多进程开发
 
 Memory 用于单进程与普通单元测试。多进程开发使用 `discovery = "redis"`，每个进程配置唯一 `node_id`，参与联调的进程使用相同 Redis URL 和 namespace。
@@ -113,7 +119,7 @@ Redis 所有权提供原子获取、epoch 更新、条件续租和释放；活�
 
 租约和 RPC 均有期限且不自动重试。发起业务前根据续租开始时刻检查剩余租期，Redis 获取与续租也拒绝明显超过租期的迟到回应。
 超时不表示远端业务停止或回滚，系统接受检查后暂停、延迟导致的竞态窗口，不默认对每次写入增加远程校验或 fencing。
-后续存储封装将按调用期限和本地已知租约期限做尽力检查；当前示例玩家状态仍在内存，timer 与请求共用串行队列，恢复及交接按后续阶段实施。
+后续存储封装将按调用期限和本地已知租约期限做尽力检查；当前示例玩家状态仍在内存，timer 与请求共用串行队列，本地事件在当前调用内执行；恢复及可选跨网关交接已接通。
 
 ## 日志、指标与追踪
 

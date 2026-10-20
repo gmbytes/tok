@@ -1,5 +1,7 @@
 //! 显式注册 player 业务消息，身份来自网关调用上下文。
 
+mod production;
+
 use crate::protocol::GameMessage;
 use crate::protocol::v1::{
     GetGuildRequest, GetGuildResponse, GetPlayerRequest, GetPlayerResponse, ProductionFinished,
@@ -20,7 +22,6 @@ use tok::{
 };
 
 const PRODUCTION_TIME_MS: i64 = 50;
-const PRODUCTION_OUTPUT: i64 = 1;
 
 /// 模拟游戏存储的有界内存状态，多个 player 请求共享，不创建常驻 player 对象。
 pub struct State {
@@ -165,10 +166,15 @@ pub fn handlers(
             }
         },
     )?;
+    let production = Arc::new(
+        production::dispatcher()
+            .map_err(|error| tok::rpc::Error::Configuration(error.to_string()))?,
+    );
     registry.register_timer(
         ProductionFinished::MESSAGE_ID,
         move |context, _event: ProductionFinished| {
             let state = Arc::clone(&state);
+            let production = Arc::clone(&production);
             async move {
                 let id = player_id(&context)?;
                 let mut values = state
@@ -184,14 +190,12 @@ pub fn handlers(
                     .ok_or_else(|| Status::invalid_argument("缺少内部计时来源"))?
                     .scheduled_at_ms;
                 let stored = values.entry(id).or_default();
-                if stored.production_due != Some(scheduled) {
-                    return Ok(None);
-                }
-                stored.value = stored
-                    .value
-                    .checked_add(PRODUCTION_OUTPUT)
-                    .ok_or_else(|| Status::out_of_range("示例计时数值溢出"))?;
-                stored.production_due = None;
+                production.dispatch(
+                    stored,
+                    &production::Completed {
+                        scheduled_at_ms: scheduled,
+                    },
+                )?;
                 Ok(None)
             }
         },

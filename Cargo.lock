@@ -1753,7 +1753,8 @@ dependencies = [
 name = "tok-events"
 version = "0.1.0"
 dependencies = [
- "tok-core",
+ "thiserror",
+ "uuid",
 ]
 
 [[package]]

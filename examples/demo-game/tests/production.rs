@@ -13,14 +13,8 @@ use tok::{
     rpc::{CallHandler, protocol::internal::v1::Payload, timer::decode_update, tonic::Code},
 };
 
-#[tokio::test]
-async fn production_rules_are_not_taken_from_client_timer_or_reward_fields() {
-    let registry = player::handlers(
-        Arc::new(player::State::new(4).unwrap()),
-        Arc::new(MemoryDirectory::default()),
-    )
-    .unwrap();
-    let context = CallContext {
+fn context() -> CallContext {
+    CallContext {
         node_id: "node".into(),
         service_name: "player".into(),
         bid: Some("42".into()),
@@ -31,7 +25,17 @@ async fn production_rules_are_not_taken_from_client_timer_or_reward_fields() {
             epoch: 1,
         }),
         timer: None,
-    };
+    }
+}
+
+#[tokio::test]
+async fn production_rules_are_not_taken_from_client_timer_or_reward_fields() {
+    let registry = player::handlers(
+        Arc::new(player::State::new(4).unwrap()),
+        Arc::new(MemoryDirectory::default()),
+    )
+    .unwrap();
+    let context = context();
     let before = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
@@ -101,6 +105,36 @@ async fn production_rules_are_not_taken_from_client_timer_or_reward_fields() {
         scheduled_at_ms: spec.due_at_ms,
         fired_at_ms: spec.due_at_ms,
     });
+    let mut stale = internal.clone();
+    let stale_timer = stale.timer.as_mut().unwrap();
+    stale_timer.scheduled_at_ms += 1;
+    stale_timer.fired_at_ms += 1;
+    registry.call(stale, finish.clone()).await.unwrap();
+    let unchanged = registry
+        .call(
+            context.clone(),
+            Payload {
+                message_id: v1::GetPlayerRequest::MESSAGE_ID,
+                body: vec![],
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        v1::GetPlayerResponse::decode(unchanged.payload.unwrap().body.as_slice())
+            .unwrap()
+            .value,
+        0
+    );
+    let TimerUpdate::ReplaceAll(pending) = decode_update(unchanged.timers.unwrap()).unwrap() else {
+        panic!("应保留未完成生产")
+    };
+    assert_eq!(pending[0].due_at_ms, spec.due_at_ms);
+    registry
+        .call(internal.clone(), finish.clone())
+        .await
+        .unwrap();
+    // 重复 timer 仍经过本地分发，但业务根据保存的生产时刻避免重复产出。
     registry.call(internal, finish).await.unwrap();
     let result = registry
         .call(
@@ -115,4 +149,76 @@ async fn production_rules_are_not_taken_from_client_timer_or_reward_fields() {
     let player = v1::GetPlayerResponse::decode(result.payload.unwrap().body.as_slice()).unwrap();
     assert_eq!(player.player_id, 42);
     assert_eq!(player.value, 1);
+}
+
+#[tokio::test]
+async fn local_production_error_reaches_the_original_call_without_partial_state_updates() {
+    let registry = player::handlers(
+        Arc::new(player::State::new(4).unwrap()),
+        Arc::new(MemoryDirectory::default()),
+    )
+    .unwrap();
+    let context = context();
+    registry
+        .call(
+            context.clone(),
+            Payload {
+                message_id: v1::SetPlayerRequest::MESSAGE_ID,
+                body: v1::SetPlayerRequest { value: i64::MAX }.encode_to_vec(),
+            },
+        )
+        .await
+        .unwrap();
+    let started = registry
+        .call(
+            context.clone(),
+            Payload {
+                message_id: v1::StartProductionRequest::MESSAGE_ID,
+                body: vec![],
+            },
+        )
+        .await
+        .unwrap();
+    let TimerUpdate::Patch { upsert, .. } = decode_update(started.timers.unwrap()).unwrap() else {
+        panic!("缺少生产 timer")
+    };
+    let due = upsert[0].due_at_ms;
+    let mut internal = context.clone();
+    internal.timer = Some(TimerTrigger {
+        timer_id: "production".into(),
+        scheduled_at_ms: due,
+        fired_at_ms: due,
+    });
+    let error = registry
+        .call(
+            internal,
+            Payload {
+                message_id: v1::ProductionFinished::MESSAGE_ID,
+                body: vec![],
+            },
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), Code::OutOfRange);
+    let result = registry
+        .call(
+            context,
+            Payload {
+                message_id: v1::GetPlayerRequest::MESSAGE_ID,
+                body: vec![],
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        v1::GetPlayerResponse::decode(result.payload.unwrap().body.as_slice())
+            .unwrap()
+            .value,
+        i64::MAX
+    );
+    let TimerUpdate::ReplaceAll(pending) = decode_update(result.timers.unwrap()).unwrap() else {
+        panic!("错误不能清除原生产状态")
+    };
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].due_at_ms, due);
 }
