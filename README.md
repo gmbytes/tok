@@ -1,184 +1,77 @@
 # tok
-实验性游戏服务器框架
 
-目标平台：Windows amd64 和 Linux amd64（x86_64）。
+实验性的 Rust 游戏服务器框架，目标平台为 Windows amd64 和 Linux amd64。
 
-设计约定与后续设计范围见 [设计文档](docs/design.md)。
+框架以“服务 + 处理链”为核心：服务由状态、入口路由和中间件/handler 组成，运行设施管理生命周期与任务。tok-gateway 是连接/session 能力的内置扩展；tok crate 提供统一导出与应用组装入口。统一执行与动态订阅仍是待实施目标，当前能力不能按目标 API 使用。
 
-现状分析、分阶段任务及验收条件见 [实施大纲](docs/implementation-plan.md)。
+## 文档入口
 
-用户指南与 API 文档走 Rust 原生 rustdoc 流程：执行 `just docs`，打开 `target/doc/tok/index.html`。指南源文件位于 [guide.md](crates/tok/docs/guide.md)，Rust 示例随常规测试验证；CI 保存生成的文档产物。
+| 要了解的内容 | 文档 |
+| --- | --- |
+| 文档分工与阅读顺序 | [文档导航](docs/README.md) |
+| 总体架构、分层与系统边界 | [总体设计](docs/design.md) |
+| 上下文、中间件、事件与动态主题契约 | [服务运行模型](docs/service-runtime.md) |
+| 当前可用能力与缺口 | [实现状态](docs/status.md) |
+| 下一步做什么、如何分批验收 | [七批实施计划](docs/implementation-plan.md) |
+| 已实现 API、组装和开发操作 | [Rust 用户指南](crates/tok/docs/guide.md) |
+| Frame v3、ACK、恢复和交接 | [客户端与会话协议](docs/client-session.md) |
 
-workspace 启用 `missing_docs = "deny"`，对外公开的模块、类型、字段、枚举变体和方法缺少文档注释时，编译与常规检查会失败。仅 protobuf 自动生成模块豁免；手写代码必须维护文档注释，rustdoc 同时检查文档链接和标记语法。
+用户/API 文档走 Rust 原生 rustdoc 流程：`just docs`，打开 `target/doc/tok/index.html`。指南示例随文档测试验证，CI 保存生成的 HTML。架构目标不作为可运行示例，历史验收另行归档。
 
-所有库、二进制及构建脚本的非测试代码启用 `clippy::unwrap_used`、`clippy::expect_used` 的 deny 检查。能传播的错误使用 `?` 或显式分支；确需保留的断言必须在局部通过 `#[expect(..., reason = "具体原因")]` 说明成立前提和失败处理，测试代码不受此限制。`unwrap_or`、`unwrap_or_else` 等不触发 panic 的默认值操作不属于该检查。
+## 当前能力
 
-workspace 同时禁止持有同步锁或 RefCell 借用跨越 await、丢弃未处理的 Future、过大 Future、`unimplemented!`、重复模块名、引用计数指针的隐式克隆、无等待的 async 函数，以及匿名忽略 must_use 返回值。对应检查为 `await_holding_lock`、`await_holding_refcell_ref`、`let_underscore_future`、`large_futures`、`unimplemented`、`module_name_repetitions`、`clone_on_ref_ptr`、`unused_async`、`let_underscore_must_use`。引用计数克隆使用 `Arc::clone` 等显式写法；取消和退出中的尽力操作按具体语句使用带原因的 `#[expect]`，手写模块不得整体关闭这些检查。公共角色名称确需保留时也逐项注明原因；tonic 生成模块仅豁免 `clone_on_ref_ptr`。
+已接通配置与服务工厂、共享 gRPC 端点、强类型 RPC、Memory/Redis 发现与所有权、请求级锁、TCP 认证与串行 session、timer、下行序号与 ACK 缓存、同网关恢复、可选跨网关交接、本地事件及 Core NATS 即时事件。示例 player 和 guild 共用内部端点，可验证客户端状态读写及服务调用。
 
-项目命令使用 [just](https://just.systems/)，在仓库根目录执行 `just` 查看可用任务。
+当前 RPC、事件和 gateway 的执行接口仍分离，TowerHandler 只覆盖 RPC call；topic 仅维护本地会话成员，不参与 NATS 路由。共同执行/生命周期设施、完整扩展上下文及聊天/区服动态订阅按七批计划推进。
 
-## 工程结构
+发布成功只表示 NATS 客户端接受操作，不等于远端业务完成；仅订阅建立确认就绪。客户端不能发布服务器事件，所有 player 执行经 session FIFO。Memory 只用于单进程，跨网关需共享所有权和明确配置的签名密钥/内部端点。生产安全、Kubernetes、Scene、JetStream、离线加载及 Redis Cluster 尚未完成。
 
-框架采用 Cargo workspace，库位于 `crates/`，具体游戏组装最终二进制。`examples/demo-game` 展示游戏协议、服务配置和内存服务目录。
+## 快速开始
 
-当前已提供配置校验、内存目录、Redis 开发发现与变更订阅、bid 路由、内存与 Redis session 所有权、protobuf 生成、服务生命周期、可观测组件及共享内部 gRPC 端点。Ingress 提供 TCP 登录、认证扩展点、有界串行 session、timer 调度、统一下行序号、累计 ACK 和有界内存缓存。客户端 Frame 已升级为版本 3，旧版须同步升级；已支持同网关 token 恢复、有序补发与快速重登，默认断线宽限期 30 秒，期间继续驱动 timer。示例支持玩家状态读写、player 调用 guild 及计时更新状态；按 Ctrl+C 优雅退出。显式配置兼容签名密钥及内部交接端点后支持跨网关接续；Core NATS 即时广播和转发已接通；Kubernetes 发现、JetStream 和离线加载按后续批次推进。
-
-网关共用 `Gateway` 运行框架，接入组件负责具体业务语义。当前 `Ingress` 实现 TCP 登录和串行 session，Scene 接入尚未实现；通过 `Gateway::player` 便捷组装。`player/`、`scene/` 分别组织玩家和场景组件，`transport/`、`security/`、`codec/` 提供传输、安全与编解码适配。示例通过可选的 `factory = "player-ingress"` 选择网关工厂，服务名可自行命名。
-
-示例消息 ID 统一定义在 [message_id.proto](examples/demo-game/proto/demo/v1/message_id.proto) 的 `MessageId` 枚举中。构建脚本按消息名称生成 `GameMessage::MESSAGE_ID`，客户端和服务端共用，不再在业务模块手写数字。请求与回应仍显式配对；零保留为未指定值；正式发布后保持数值稳定，删除已发布的编号和名称时在 proto 中 `reserved`，发布前可直接调整。
-
-## 开发命令
-
-需要安装 rustup 和 just 1.58.0。仓库固定 Rust 1.99.0；protoc 由构建依赖提供，无需额外安装。若 `RUSTUP_TOOLCHAIN` 覆盖为旧版本，启动前应清除覆盖或设为 1.99.0。
+仓库固定 Rust 1.99.0，使用 just 1.58.0；protoc 由构建依赖提供。工具链配置见 [rust-toolchain.toml](rust-toolchain.toml)。
 
 ```text
 just check
 just verify
-just proto
 just docs
 just run
+```
+
+`just run` 运行本地 TCP 与内部 RPC，Ctrl+C 协作退出。示例凭证为 `demo:<正整数玩家 ID>`，仅用于开发。默认参数、配置与认证/错误处理用法见 Rust 用户指南。
+
+```text
 just smoke
 just rpc-smoke
 just client-smoke
-just config-check examples/demo-game/config/gateway.toml
-just config-check examples/demo-game/config/game.toml
 just build
 ```
 
-工程文本文件统一使用 LF，Git、编辑器和 rustfmt 均已配置。`just line-endings-check` 检查已跟踪文件及未忽略的新文件，常规测试与 CI 同样执行此检查。
-
-`just fmt` 格式化代码，`just verify` 检查格式、clippy 和测试。`just proto` 在协议输入变更时触发构建期生成，生成代码位于 Cargo 的 OUT_DIR，不提交生成的 Rust 文件。
-
-`just run` 持续运行客户端 TCP 与内部 RPC，`just smoke` 运行一秒后通过同一退出流程结束。`just rpc-smoke` 验证内部调用；`just client-smoke` 使用真实 TCP 完成登录、状态读取、状态变更和公会查询，然后优雅退出。也可传入 `--run-for <秒数>`。Linux 额外支持 SIGTERM，适配容器停止。服务默认初始化期限为 30 秒，整体退出期限为 10 秒，游戏可通过 `Application::with_timeouts` 调整。
-
-示例凭证为 `demo:<正整数玩家 ID>`，只用于本地开发。TCP 使用 4 字节大端长度和 protobuf Frame，协议及状态机见 [客户端与 session 约定](docs/client-session.md)。身份以认证后的 session 为准，同玩家请求串行，不同玩家可以并发。队列满返回明确错误；重复登录先关闭旧入口并收束旧调用，断线后默认保留会话 30 秒，继续 timer 和续租，到期后收束释放。完整帧的读写期限也包含空闲等待，目前尚无心跳。
-
-`[player_gateway]` 配置连接、session、执行队列、下行缓冲、帧长度与期限；默认值见 local.toml。示例采用明文 TCP，默认 Memory 所有权，可显式选择共享 Redis 协调；玩家状态是有界内存数据，生产认证、安全和持久化按后续阶段实施。跨网关恢复需显式配置兼容签名密钥及内部端点。
-
-游戏通过 `ServiceFactory` 注册各类服务，通过 `Application::register_rpc_endpoint` 显式注册共享 gRPC 端点。应用先绑定监听，业务初始化完成后才加入目录并开启对应的就绪入口；未就绪调用返回 Unavailable。监听或服务启动失败、超时、崩溃或提前结束会触发全进程清理，撤销目录并通知任务退出。服务在取消后负责清理自己的资源，超出退出期限会中止任务。
-
-进程配置 `node_id` 和 `endpoints`，每个端点配置 `name`、`protocol` 和 `address`；各服务通过 `endpoint` 引用端点。多个 protobuf 服务可通过 `RpcEndpoint` 绑定到同一内部 gRPC 端点，每个端点只监听一次。同一 protobuf 服务不能在一个端点重复绑定。示例监听 internal-rpc 和 client，配置描述本身不自动创建监听，TCP 由网关工厂准备。
-
-服务通过 `(node_id, service_name)` 定位，服务名在节点内唯一，不同节点可使用相同服务名。游戏通过 `Application::register_factory("guild", factory)` 注册初始化工厂；服务默认按服务名查找，只有名称不同时才填写可选的 `factory`。同一工厂可创建多个不同身份的服务。目录通过 `snapshot("guild")` 查询名为 guild 的服务节点及端点，业务实体仍通过 bid 路由和互斥。
-
-```toml
-[[endpoints]]
-name = "internal-rpc"
-protocol = "grpc"
-address = "127.0.0.1:7001"
-
-[[services]]
-service_name = "player"
-endpoint = "internal-rpc"
-
-[[services]]
-service_name = "guild"
-endpoint = "internal-rpc"
-```
-
-RPC 使用 `CallContext`、`HandlerRegistry` 和 `RpcService` 分离业务上下文、强类型分发与 gRPC 接入。`RpcClients` 只管理有界 Channel 缓存及传输配置；`rpc::player::Client` 和 `rpc::business::Client` 分别适配协议，共享连接，设置调用超时且不重试，通过 metadata 传播 W3C TraceContext。用户可用 `TowerHandler` 接入代码组装的中间件链，决定选择、顺序和作用范围。请求级锁提供独立的 Memory / Redis 后端与 `rpc::lock::Layer`，按逻辑服务名和 bid 互斥；由 Rust 代码显式安装，普通业务入口不自动加锁。示例 guild 默认安装 Memory 锁，多进程通过 `application_with_locks` 注入共享后端。配置式中间件链仍待后续实现。
-
-`just build` 输出当前平台的 `target/release/demo-game.exe` 或 `target/release/demo-game`。同一二进制通过 `--config` 选择服务。当前 Kubernetes 配置仅支持 `--check-config` 校验，实际运行会明确报错。
-
-CI 在 Windows 和 Linux 的 amd64 runner 上分别执行 just 检查、测试及 release 构建。
-
-## 同步本地事件
-
-`tok::events::Event` 声明稳定事件名及跨节点投递选项；`local::Dispatcher<E, C, Failure>` 为一种事件注册有界数量的同步订阅者，在当前业务调用内按顺序借用状态执行。首个错误原样返回，已完成的修改不回滚，无订阅者返回零；不另起任务、不进入 session 队列、不重试或去重。示例生产 timer 在原 player 调用中分发本地完成事件，产出规则及重复触发保护仍由业务负责。
-
-`EventId`、`Envelope` 与 `Message` 提供通用服务器事件契约；任意服务通过 Core NATS 按类型发布和订阅，可显式配置 group 分担消费，`Registry` 注册强类型异步处理函数，回调同时保留原始共享编码。游戏注入网关处理者，按需调用主题筛选、通知下行和会话转发 API；客户端没有事件入口。JetStream、离线加载和跨节点去重仍待实现。使用方法见 [rustdoc 用户指南](crates/tok/docs/guide.md#同步本地事件)。
-
-## Core NATS 开发
-
-显式使用 [events.toml](examples/demo-game/config/events.toml) 开启 `[events]`，独立于发现与所有权配置。网关启动确认普通订阅，运行任务由 Gateway 监督；每个网关筛选自己的在线 session，不使用随机分配消费者的 queue group。
+build 输出当前平台的 `target/release/demo-game.exe` 或 `target/release/demo-game`。同一平台使用同一游戏二进制，通过配置选择服务：
 
 ```text
-just nats-test
-just nats-smoke
-just run examples/demo-game/config/events.toml
+just config-check examples/demo-game/config/game.toml
+just config-check examples/demo-game/config/gateway.toml
+just run examples/demo-game/config/local.toml
 ```
 
-需要可访问的 Core NATS，默认本机 4222；专项测试可用 TOK_TEST_NATS_URL。发布成功仅表示客户端接受操作，不等待 broker 或业务确认；仅订阅初始化等待有界回环就绪确认。不自动重试或去重。离线、满队列和交接窗口允许即时消息丢失；取消订阅不关闭共享连接；慢消费者上报消费任务，断线、发布入队失败或取消会保守停用连接并交给监督者处理。JetStream 和离线加载尚未实现。主题成员由可信服务器的 SessionHandle 管理，随正常交接转移；交接快照保持初始版本 1，客户端 Frame 仍为版本 3。使用和错误边界见 [用户指南](crates/tok/docs/guide.md#core-nats-即时事件)。
+## 多进程与真实集成
 
-## Redis 多进程开发
+| 场景 | 入口 | 依赖 |
+| --- | --- | --- |
+| Redis 开发发现 | redis-game.toml / redis-gateway.toml；`just redis-test redis-smoke` | 真实 Redis，默认本机 6379 |
+| session 共享所有权 | `just ownership-test ownership-smoke` | Redis 与独立进程 |
+| 请求级锁 | `just locks-test` | Redis |
+| 跨网关交接 | redis-handoff-a.toml / redis-handoff-b.toml；`just handoff-smoke` | 共享所有权、共用密钥与内部 RPC |
+| 即时事件 | events.toml；`just nats-test nats-smoke` | 真实 NATS，默认本机 4222 |
 
-Memory 用于单进程与普通单元测试。多进程开发使用 `discovery = "redis"`，每个进程配置唯一 `node_id`，参与联调的进程使用相同 Redis URL 和 namespace。
-在本机启动 Redis 7.4 后，分别在两个终端运行：
+配置文件位于 [demo config](examples/demo-game/config)，字段与完整操作见用户指南。Redis 和 NATS 专项分别可用 TOK_TEST_REDIS_URL、TOK_TEST_NATS_URL 指定地址，测试使用独立命名空间。常规 verify 不要求这些外部服务，不把未执行的专项算作通过。
 
-```text
-just run examples/demo-game/config/redis-game.toml
-just run examples/demo-game/config/redis-gateway.toml
-```
+Kubernetes 配置当前仅可校验，运行该发现后端会明确报未实现；[部署目录](deploy/k8s/README.md)尚无可运行清单。
 
-也可先启动游戏进程，再运行一次客户端验证：
+## 工程约定
 
-```text
-cargo run -p demo-game --locked -- --config examples/demo-game/config/redis-gateway.toml --client-smoke
-```
+库位于 `crates/`，游戏在 `examples/demo-game` 组装二进制。框架协议属于 tok-proto，游戏协议属于 demo；protobuf 及消息 ID 关联在构建期生成到 Cargo OUT_DIR，不提交生成的 Rust 文件。
 
-端点 `address` 用于监听，`advertise_address` 用于发布，省略后者时使用监听地址；Redis 发现禁止发布通配地址。跨开发机时把示例发布地址改成其他机器可访问的 IP。
-注册在服务就绪后发布，默认每秒续租和刷新本地缓存，租期 15 秒；进程退出条件注销，崩溃后依赖 TTL 摘除。同名 node_id 的活动实例不能相互覆盖，旧实例不能删除重启后的记录。
-后台发现错误会失效缓存并触发应用退出，重新启动应用后恢复连接；业务路由只读本地缓存，不同步访问 Redis。
+公开 API 使用中文文档，missing_docs 与 rustdoc 检查由 workspace 统一执行；非测试代码的 unwrap/expect 需要局部说明。完整 lint 说明见用户指南，协作与中文 Conventional Commits 规则见 [AGENTS.md](AGENTS.md)。
 
-`just redis-test` 与 `just redis-smoke` 显式执行真实 Redis 集成测试；后者自动启动独立游戏、网关进程并验证业务、退出、重启和崩溃过期。测试使用独立 namespace，不清空 Redis 数据库。
-测试默认连接 `redis://127.0.0.1:6379/`，可通过环境变量 `TOK_TEST_REDIS_URL` 覆盖；常规 `just verify` 不依赖 Redis。CI 增加独立 Linux Redis 集成任务。
-详细参数及错误边界见 Rust 用户指南中的“Redis 多进程开发发现”。
-
-Redis discovery 只共享服务地址。session 所有权独立选择 `ownership = "memory"`（默认）或 `"redis"`。
-redis-gateway.toml 已配置 `ownership = "redis"` 及 `[redis_ownership]`；多个网关共享相同 Redis URL、数据库和 namespace，节点身份及监听端口各不相同。
-Redis 所有权提供原子获取、epoch 更新、条件续租和释放；活动租约被其他网关持有时拒绝登录，释放或过期后才能建立新会话。携带共享恢复凭证的 Resume 可通过旧网关协作完成交接，保留 session_id 和下行序列并增加 epoch。
-`just ownership-test` 验证竞争、旧身份拒绝、过期与 epoch 精度；`just ownership-smoke` 使用两个独立网关进程验证共享所有权和失效收束。
-
-`just locks-test` 单独验证请求级 Redis 锁的跨进程竞争、租期兜底、旧持有者条件释放和断线释放失败；使用 TOK_TEST_REDIS_URL，默认本机 6379。常规锁与 Layer 测试不依赖 Redis。
-
-租约和 RPC 均有期限且不自动重试。发起业务前根据续租开始时刻检查剩余租期，Redis 获取与续租也拒绝明显超过租期的迟到回应。
-超时不表示远端业务停止或回滚，系统接受检查后暂停、延迟导致的竞态窗口，不默认对每次写入增加远程校验或 fencing。
-后续存储封装将按调用期限和本地已知租约期限做尽力检查；当前示例玩家状态仍在内存，timer 与请求共用串行队列，本地事件在当前调用内执行；恢复及可选跨网关交接已接通。
-
-## 日志、指标与追踪
-
-`tok-observability` 统一初始化 tracing 日志、Prometheus 指标和 OpenTelemetry 追踪，`tok::observability` 提供访问入口。每个进程初始化一次，库和业务通过 tracing/metrics 埋点，服务结束后调用 `Observability::shutdown` 关闭指标端口并刷新追踪。
-
-配置可选，默认 INFO 文本日志、关闭指标端口和追踪导出。生产示例使用 JSON 日志输出到 stdout；部署平台负责日志采集。可以在 TOML 中添加：
-
-```toml
-[observability]
-log_filter = "info,tok_gateway=debug"
-log_format = "json"
-metrics_address = "127.0.0.1:9090"
-otlp_endpoint = "http://127.0.0.1:4317"
-trace_filter = "info"
-trace_sample_ratio = 0.1
-```
-
-`RUST_LOG` 覆盖初始日志规则；`telemetry.logs.filter()` 读取当前规则，`telemetry.logs.set_filter("info,tok_gateway=debug")` 动态更新。规则无效时返回错误并保留原规则。框架提供控制句柄，管理 HTTP/RPC 接口或配置监听器后续接入。日志过滤与追踪过滤、采样互相独立。
-
-指标端口提供 `/metrics`，支持计数、Gauge 和耗时 Histogram；现有埋点包括服务启动次数、启动耗时、运行服务数及运行失败次数。默认延迟桶从 1 毫秒到 30 秒。player_id、bid、request_id 等不作为指标标签。
-
-追踪通过 OTLP gRPC 导出到 Collector，使用 W3C TraceContext 传播器和父级采样决策，采样率作用于新建根 trace。JSON 日志包含 service/node_id，进入有效追踪 span 时同时包含 trace_id/span_id。已接入服务初始化和 RPC 调用 span，RPC metadata 传播上下文；Core NATS headers 和转发事件 RPC 也已接入传播。token 和协议正文默认不记录。
-
-强追踪规则命中时直接采样，优先于父级决定、普通追踪过滤和 ratio。支持 span 名称、target 和字段的精确匹配；一条规则的全部条件必须满足，多条规则任意命中即可。字段值支持字符串、数字和布尔值。下面的规则强制采集 player_id 为 123 的 client_request：
-
-```toml
-[[observability.trace_force_rules]]
-span = "client_request"
-fields = { player_id = 123 }
-```
-
-`telemetry.traces.config()` 读取采样配置，`set_config(SamplingConfig)` 原子更新过滤、ratio 和规则；`set_force_rules(Vec<ForceTraceRule>)` 单独更新规则，空列表清除规则。无效配置保留原值，更新影响后续采样决定，已开始的 span 保持原决定。强追踪子 span 继承已采样父级，即使过滤规则为 off；规则移除也不截断已开始的链路。
-
-`trace_filter` 使用级别和模块规则，如 `info,demo_game::player=debug`，决定普通根 span 的采样资格；span 字段条件通过强追踪规则配置。为避免字段规则被提前排除，span 进入 SDK 后统一决定采样，普通根 span 仍按过滤和 ratio 丢弃。默认比例采样只用于无有效父级且未命中强规则的 span。
-
-匹配字段应在创建 span 时提供。采样后补录字段不会重新采样；尽量在入口请求 span 上命中规则，随后传播采样决定。下游命中规则可开启从该处开始的追踪，但无法补回此前丢弃的上游 span。强制采样需要启用 OTLP 导出，不意味着追踪系统故障时保证数据送达。
-
-## 跨网关交接开发
-
-恢复凭证采用 HMAC-SHA256，使用固定共享密钥在本地签发和验证，不访问 Redis。多网关在 `[resume_token]` 配置相同 secret_key；默认使用进程临时随机密钥。密钥在启动时加载，维护时统一更换并重启，旧 token 随即失效，不提供运行时轮换。
-
-已认证在线连接支持 `RefreshResumeTokenRequest` 主动刷新，成功回应返回新 token 和 TTL；沿用原会话，不重置业务序号与 timer。客户端收到成功回应后替换保存，按 TTL 提前刷新。在线会话可在原 token 到期后刷新；离线过期须普通鉴权。
-
-新登录仍失效旧入口并更新最新 session_id。签名有效不代表能进入当前会话；快速重登在获取所有权时原子比较最新登录标记，旧 token 无法顶回新会话，也无法在新会话释放后重新进入。Redis 只参与所有权及最新会话协调，不保存 token；交接保留原 session_id 和凭证。
-
-示例启用 `[player_gateway] handoff_enabled = true` 和内部 `gateway-rpc` 服务。配合 `redis-game.toml` 启动 `redis-handoff-a.toml` 与 `redis-handoff-b.toml`，客户端端口为 7100、7200。两个示例共用公开的开发共享密钥，部署时应替换。
-
-`just resume-token-test` 离线验证签名、期限和维护换密钥失效；`just handoff-smoke` 使用三个独立进程验证交接及宕机降级，Redis 仅用于发现和所有权。交接先冻结并排空已有任务，再导出有界快照，由旧网关协调提交；失败不回滚业务或自动重发未知结果请求。
+全部工程文本使用 LF；Git、EditorConfig 和 rustfmt 已配置，`just line-endings-check` 在常规测试中拒绝 CRLF/CR。Windows/Linux 分别验证，本机结果不能替代另一平台 CI 或生产压测。

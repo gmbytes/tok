@@ -2,6 +2,20 @@
 
 tok 是实验性的 Rust 游戏服务器框架。游戏通过本 crate 组装组件和服务，输出自己的二进制，并通过 TOML 选择运行的服务。
 
+本指南只说明当前已实现 API。架构与校正目标分别维护在仓库的 `docs/design.md`、`docs/service-runtime.md`，当前缺口见 `docs/status.md`，下一步只按 `docs/implementation-plan.md` 的 P1–P7 推进。旧批次和协议版本已移入历史文档，不作为使用说明。
+
+## 目标与当前 API 的差异
+
+| 目标 | 当前使用方式 | 状态 |
+| --- | --- | --- |
+| 服务与处理链共同构建 | Application / ServiceFactory 与 Gateway 分别组装 | P1/P2/P4 待实施 |
+| 消息、事件、timer 共用上下文与 Layer | RPC CallContext、事件 Handler、网关 Executor 分别使用 | P1/P3/P4 待实施 |
+| 本地与远程共用事件接口 | local::Dispatcher 与 Registry / Subscriber 为两套契约 | P3 待实施 |
+| topic 参与传输并动态聚合 | join_topic / leave_topic 为同步本地成员操作 | P5/P6 待实施 |
+| 完整生命周期、查询和状态扩展 | 当前句柄只提供已公开的有限操作 | P2/P4 待实施 |
+
+下文示例保持可编译，不使用尚未提供的统一 Builder、ExecutionContext 或异步主题接口。实际迁移后再按对应批次替换示例；不靠兼容别名长期维护两套模型。
+
 ## 生成和阅读文档
 
 在仓库根目录执行 `just docs`，或 `cargo doc --workspace --no-deps --locked`。
@@ -14,6 +28,14 @@ Rust 示例随 `cargo test --workspace --locked` 执行文档测试，API 链接
 框架自己的 API 使用中文说明；第三方重导出补充中文介绍，完整 API 说明保留上游原文。
 
 workspace 同时禁止持有同步锁或 RefCell 借用跨越 await、丢弃未处理的 Future、过大 Future、`unimplemented!`、重复模块名、引用计数指针的隐式克隆、无等待的 async 函数，以及匿名忽略 must_use 返回值。对应检查为 `await_holding_lock`、`await_holding_refcell_ref`、`let_underscore_future`、`large_futures`、`unimplemented`、`module_name_repetitions`、`clone_on_ref_ptr`、`unused_async`、`let_underscore_must_use`。引用计数克隆使用 `Arc::clone` 等显式写法；取消和退出中的尽力操作按具体语句使用带原因的 `#[expect]`，手写模块不得整体关闭这些检查。公共角色名称确需保留时也逐项注明原因；tonic 生成模块仅豁免 `clone_on_ref_ptr`。
+
+## 服务模型与框架分层
+
+已确认的目标是统一服务构建与运行：服务由状态、入口路由和处理链组成，处理链由中间件和业务 handler 组成，运行设施负责生命周期与任务监督。RPC、事件和其他业务入口接到同一执行模型；普通服务不要求具备 session。
+
+tok-gateway 是这套基础设施的内置扩展，增加连接、认证、session、串行调度、补发与交接能力。游戏自定义服务和 gateway 应使用相同的构建与扩展机制。
+
+本 crate 是统一导出与应用组装门面。共同契约和运行能力应由下层提供，gateway 不反向依赖本 crate；使用端可以继续从 tok 取得便捷接口。当前 Application 与 Gateway 等执行设施尚未完成目标统一，下文示例仍以已实现 API 为准，不代表统一构建接口已经提供。
 
 ## 配置一个服务
 
@@ -709,6 +731,8 @@ timer 失败或超时只记录本次失败，不重试；周期的后续触发�
 
 ## 同步本地事件
 
+此处为当前同步 API；P3 将迁移到共同事件处理契约，本地仍在当前任务执行，目标异步借用接口尚未提供。
+
 [`events::Event`] 由游戏声明稳定的 `NAME`，使用 1 到 128 字节的 ASCII 字母、数字、点、短横线或下划线，点分段不能为空。
 不要用 Rust 类型名作为跨节点事件标识；事件定义与客户端消息 ID 分开。
 `DELIVERY` 默认 [`events::DeliveryPolicy::Immediate`]；Core NATS 只接受即时投递，本地分发不使用该选项。离线加载是后续会话适配能力，不是通用事件字段。
@@ -757,6 +781,8 @@ ID 限制为 1 到 128 个可打印 ASCII 非空白字节，追踪头每字段�
 标准 OpenTelemetry 传播器负责注入提取，未指定追踪头时 Message 构造默认采集当前 span。
 
 ## Core NATS 即时事件
+
+本节介绍当前固定类型订阅 API。topic 暂仅用于本地会话筛选，动态聊天/区服订阅、统一本地与远程注册表以及完整生命周期/消息 Layer 扩展仍待按 P1–P6 实施，不能按已实现能力使用。
 
 任何服务都可以使用 [`events::nats::Bus::publish_event`] 发布，用 [`events::Registry`] 订阅自己关心的类型。
 目标由业务正文表达，订阅者自行解释；总线不要求 player、session 或 RPC。
@@ -810,6 +836,8 @@ Core NATS 拒绝 Persistent，不静默降级；JetStream、离线加载和去�
 通用 protobuf 事件协议使用初始版本 1；尚未发布，不保留开发中间字段编号或维护其兼容。
 
 ### 游戏自定义网关处理
+
+以下是当前闭包捕获句柄的组装方式；统一上下文、生命周期扩展和消息/事件 Layer 属于 P3/P4，不代表仅捕获 SessionManager 已满足完整目标。
 
 [`events::Subscriber`] 将 Handler 与可选 group 组合为独立订阅组件；同一网关可安装多个组件，各自选择类型、消费组和处理行为。
 [`gateway::player::events::forward`] 提供基本的玩家转发处理者，游戏负责从强类型正文选择 Target，原始事件进入 session FIFO。
@@ -877,6 +905,8 @@ W3C traceparent / tracestate 使用标准 NATS headers；发布、网关接收�
 示例通知 ID 在 proto 枚举中定义，内部 AddValue 没有客户端消息 ID；普通配置不启用 NATS，不依赖消息服务器。
 
 ## 统一 Gateway 与接入组件
+
+本节的“统一”指当前 Player/Scene 共用 Gateway 外壳，尚不代表其构建和监督已与普通服务统一。后者由 P2/P4 迁移。
 
 [`gateway::Gateway`] 共用连接接收、容量控制、后台任务监督与退出流程。
 [`gateway::GatewayIngress`] 定义连接处理和清理钩子，当前
