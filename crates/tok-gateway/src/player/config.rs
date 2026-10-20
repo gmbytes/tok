@@ -1,4 +1,4 @@
-//! Ingress 的协议、session 与租约参数，兼容原有 player_gateway 配置布局。
+//! Ingress 的协议、session 与租约参数；由服务工厂显式选择使用。
 
 use serde::Deserialize;
 use tok_core::{Error, Result};

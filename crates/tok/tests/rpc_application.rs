@@ -237,3 +237,167 @@ async fn configuration_requires_complete_and_unique_endpoint_bindings() {
     app.register_rpc_endpoint("internal", endpoint()).unwrap();
     assert!(app.register_rpc_endpoint("internal", endpoint()).is_err());
 }
+
+fn installing_factory(init: Init) -> InitTask {
+    Box::pin(async move {
+        let binding = init.extensions.get::<tok::rpc::Binding>().unwrap().clone();
+        assert!(!binding.is_installed());
+        binding.install(&init, Arc::new(HandlerRegistry::new()))?;
+        assert!(binding.is_installed());
+        Ok(Box::pin(async move {
+            init.service.cancellation().cancelled().await;
+            Ok(())
+        }) as Task)
+    })
+}
+#[tokio::test]
+async fn configured_rpc_factories_assemble_shared_endpoint_and_reject_missing_install_before_publish()
+ {
+    for install in [true, false] {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        drop(listener);
+        let mut app = Application::new(config(address)).unwrap();
+        app.register_rpc_factory("player", installing_factory, RpcService::into_player)
+            .unwrap();
+        app.register_rpc_factory(
+            "guild",
+            move |init: Init| -> InitTask {
+                if install {
+                    installing_factory(init)
+                } else {
+                    Box::pin(async move {
+                        assert!(init.extensions.get::<tok::rpc::Binding>().is_some());
+                        Ok(Box::pin(async move {
+                            init.service.cancellation().cancelled().await;
+                            Ok(())
+                        }) as Task)
+                    })
+                }
+            },
+            RpcService::into_business,
+        )
+        .unwrap();
+        let directory = app.directory();
+        let running = app.run_until(async {
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while directory.snapshot("guild").unwrap().is_empty() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .map_err(std::io::Error::other)?;
+            assert_eq!(directory.snapshot("player").unwrap().len(), 1);
+            Ok(())
+        });
+        let result = tokio::time::timeout(Duration::from_secs(3), running)
+            .await
+            .unwrap();
+        if install {
+            result.unwrap();
+        } else {
+            assert!(
+                matches!(result, Err(application::Error::Start { service_name, .. }) if service_name == "guild")
+            );
+        }
+        assert!(directory.snapshot("player").unwrap().is_empty());
+        assert!(directory.snapshot("guild").unwrap().is_empty());
+        tokio::net::TcpListener::bind(address).await.unwrap();
+    }
+}
+#[tokio::test]
+async fn rpc_factory_validation_is_atomic_and_custom_bindings_can_complete_the_same_endpoint() {
+    let held = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = held.local_addr().unwrap();
+    let mut cfg = config(address);
+    // 一个工厂的两个实例不能在同一端点覆盖同名 protobuf 协议。
+    for service in &mut cfg.services {
+        service.factory = Some("shared".into());
+    }
+    let mut app = Application::new(cfg).unwrap();
+    assert!(
+        app.register_rpc_factory("shared", installing_factory, RpcService::into_business)
+            .is_err()
+    );
+    // 失败没有残留工厂或半个端点，允许按显式自定义协议完成组装。
+    app.register_factory(
+        "shared",
+        Factory {
+            fail: false,
+            starts: Arc::new(AtomicUsize::new(0)),
+        },
+    )
+    .unwrap();
+    app.bind_rpc(
+        "player",
+        RpcService::new("local", "player", Arc::new(HandlerRegistry::new()))
+            .unwrap()
+            .into_player(),
+    )
+    .unwrap();
+    assert!(
+        app.bind_rpc(
+            "guild",
+            RpcService::new("local", "guild", Arc::new(HandlerRegistry::new()))
+                .unwrap()
+                .into_player()
+        )
+        .is_err()
+    );
+    app.bind_rpc(
+        "guild",
+        RpcService::new("local", "guild", Arc::new(HandlerRegistry::new()))
+            .unwrap()
+            .into_business(),
+    )
+    .unwrap();
+    assert!(app.register_rpc_endpoint("internal", endpoint()).is_err());
+    // 成功声明尚未开始监听，校验不做网络 I/O。
+    drop(held);
+    tokio::net::TcpListener::bind(address).await.unwrap();
+}
+#[tokio::test]
+async fn one_rpc_factory_can_initialize_multiple_identities_on_distinct_endpoints() {
+    let one = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let two = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let config = AppConfig::from_toml(&format!("node_id='local'\ndiscovery='memory'\n[[endpoints]]\nname='a'\nprotocol='grpc'\naddress='{}'\n[[endpoints]]\nname='b'\nprotocol='grpc'\naddress='{}'\n[[services]]\nservice_name='one'\nfactory='shared'\nendpoint='a'\n[[services]]\nservice_name='two'\nfactory='shared'\nendpoint='b'", one.local_addr().unwrap(), two.local_addr().unwrap())).unwrap();
+    drop((one, two));
+    let mut app = Application::new(config).unwrap();
+    app.register_rpc_factory("shared", installing_factory, RpcService::into_business)
+        .unwrap();
+    let directory = app.directory();
+    app.run_until(async {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while directory.snapshot("two").unwrap().is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .map_err(std::io::Error::other)?;
+        assert_eq!(directory.snapshot("one").unwrap().len(), 1);
+        Ok(())
+    })
+    .await
+    .unwrap();
+}
+
+#[test]
+fn rpc_factory_rejects_endpointless_service_without_retaining_registration() {
+    let config = AppConfig::from_toml(
+        "node_id='local'\ndiscovery='memory'\n[[services]]\nservice_name='audit'",
+    )
+    .unwrap();
+    let mut app = Application::new(config).unwrap();
+    assert!(
+        app.register_rpc_factory("audit", installing_factory, RpcService::into_business)
+            .is_err()
+    );
+    app.register_factory(
+        "audit",
+        Factory {
+            fail: false,
+            starts: Arc::new(AtomicUsize::new(0)),
+        },
+    )
+    .unwrap();
+}

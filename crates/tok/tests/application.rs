@@ -392,3 +392,43 @@ async fn startup_failure_also_reclaims_uncooperative_service_children() {
     assert_eq!(handle.tasks().used_capacity(), 0);
     assert_empty(&directory);
 }
+
+#[tokio::test]
+async fn service_without_network_endpoint_is_supervised_without_discovery_publication() {
+    let config = AppConfig::from_toml(
+        "node_id='local'\ndiscovery='memory'\n[[services]]\nservice_name='events'",
+    )
+    .unwrap();
+    assert!(config.service_descriptors().unwrap().is_empty());
+    let mut app = Application::new(config).unwrap();
+    let starts = Arc::new(tokio::sync::Notify::new());
+    let stopped = Arc::new(AtomicUsize::new(0));
+    app.register_factory("events", {
+        let starts = Arc::clone(&starts);
+        let stopped = Arc::clone(&stopped);
+        move |init: Init| -> InitTask {
+            assert_eq!(init.identity.service_name, "events");
+            assert!(init.extensions.get::<application::Binding>().is_none());
+            let starts = Arc::clone(&starts);
+            let stopped = Arc::clone(&stopped);
+            Box::pin(async move {
+                Ok(Box::pin(async move {
+                    starts.notify_one();
+                    init.service.cancellation().cancelled().await;
+                    stopped.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                }) as Task)
+            })
+        }
+    })
+    .unwrap();
+    let directory = app.directory();
+    app.run_until(async {
+        starts.notified().await;
+        assert!(directory.snapshot("events").unwrap().is_empty());
+        Ok(())
+    })
+    .await
+    .unwrap();
+    assert_eq!(stopped.load(Ordering::SeqCst), 1);
+}

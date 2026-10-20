@@ -12,5 +12,5 @@ pub use tok_infra as infra;
 pub use tok_observability as observability;
 pub use tok_rpc as rpc;
 
-/// 通用服务执行、工厂与生命周期设施；业务入口的统一适配仍在推进。
+/// 通用服务执行、工厂与生命周期设施；RPC、事件及网关扩展复用共同处理协议。
 pub use tok_service as service;

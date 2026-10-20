@@ -318,3 +318,37 @@ async fn deferred_rpc_is_initialized_once_by_its_own_factory_and_stops_with_serv
         tonic::Code::Cancelled
     );
 }
+
+#[test]
+fn initialization_binding_is_not_retained_in_its_own_execution_extensions() {
+    let (rpc, binding) = RpcService::deferred("node", "test").unwrap();
+    let identity = Identity {
+        node_id: "node".into(),
+        service_name: "test".into(),
+    };
+    let builder =
+        tok_service::lifecycle::Builder::new(identity.clone(), 1, CancellationToken::new())
+            .unwrap();
+    let marker = Arc::new(AtomicUsize::new(0));
+    let weak = Arc::downgrade(&marker);
+    let mut extensions = tok_core::execution::Extensions::default();
+    extensions.insert(marker);
+    extensions.insert(binding.clone());
+    let init = tok_service::lifecycle::Init {
+        identity,
+        service: builder.handle(),
+        extensions,
+    };
+    binding
+        .install(&init, Arc::new(HandlerRegistry::new()))
+        .unwrap();
+    assert!(binding.is_installed());
+    drop(init);
+    drop(builder);
+    drop(binding);
+    drop(rpc);
+    assert!(
+        weak.upgrade().is_none(),
+        "初始化绑定不能通过自身扩展形成引用环"
+    );
+}

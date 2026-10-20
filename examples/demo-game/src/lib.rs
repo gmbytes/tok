@@ -17,24 +17,12 @@ use tok::{
     application::Application,
     core::{CallContext, ServiceDirectory, SessionIdentity},
     observability::Error,
-    rpc::{RpcClients, RpcEndpoint, RpcService, protocol::internal::v1::Payload},
+    rpc::{RpcClients, RpcService, protocol::internal::v1::Payload},
     service::{
-        lifecycle::{Factory, Init, InitTask},
+        lifecycle::{Init, InitTask},
         task::Task,
     },
 };
-
-struct LifecycleService;
-impl Factory for LifecycleService {
-    fn initialize(&self, init: Init) -> InitTask {
-        Box::pin(async move {
-            Ok(Box::pin(async move {
-                init.service.cancellation().cancelled().await;
-                Ok(())
-            }) as Task)
-        })
-    }
-}
 
 /// 组装 TCP 网关与内部 RPC；所有权按配置选择，公会请求锁默认使用 Memory。
 pub fn application(config: AppConfig) -> Result<Application, Error> {
@@ -71,7 +59,8 @@ pub fn application_with_locks(
             service.service_name == config.player_gateway.gateway_rpc_service_name
                 && service.factory_name() == "gateway-rpc"
                 && config.endpoints.iter().any(|endpoint| {
-                    endpoint.name == service.endpoint && endpoint.protocol == "grpc"
+                    service.endpoint.as_deref() == Some(endpoint.name.as_str())
+                        && endpoint.protocol == "grpc"
                 })
         })
     {
@@ -84,9 +73,12 @@ pub fn application_with_locks(
         let endpoint = config
             .endpoints
             .iter()
-            .find(|entry| entry.name == service.endpoint)
+            .find(|entry| service.endpoint.as_deref() == Some(entry.name.as_str()))
             .ok_or_else(|| {
-                tok::core::Error::InvalidConfig(format!("服务端点未配置：{}", service.endpoint))
+                tok::core::Error::InvalidConfig(format!(
+                    "示例服务缺少网络端点：{}",
+                    service.service_name
+                ))
             })?;
         match service.factory_name() {
             "player-ingress" => {
@@ -131,77 +123,65 @@ pub fn application_with_locks(
     }
     app.register_factory("player-ingress", ingress)?;
 
-    app.register_factory("gateway-rpc", LifecycleService)?;
-    let mut rpc_bindings = std::collections::BTreeMap::new();
-    for endpoint in &config.endpoints {
-        if endpoint.protocol != "grpc" {
-            continue;
-        }
-        let mut rpc = RpcEndpoint::new();
-        let mut count = 0;
-        for service in config
-            .services
-            .iter()
-            .filter(|service| service.endpoint == endpoint.name)
-        {
-            rpc = match service.factory_name() {
-                "gateway-rpc" => {
-                    rpc.add_service(&service.service_name, gateway_rpc.clone().into_rpc())?
-                }
-                "player" | "guild" => {
-                    let (rpc_service, binding) =
-                        RpcService::deferred(&config.node_id, &service.service_name)?;
-                    rpc_bindings.insert(service.service_name.clone(), binding);
-                    if service.factory_name() == "player" {
-                        rpc.add_service(&service.service_name, rpc_service.into_player())?
-                    } else {
-                        rpc.add_service(&service.service_name, rpc_service.into_business())?
-                    }
-                }
-                other => {
-                    return Err(
-                        std::io::Error::other(format!("示例尚未提供 RPC 服务：{other}")).into(),
-                    );
-                }
-            };
-            count += 1;
-        }
-        if count > 0 {
-            app.register_rpc_endpoint(&endpoint.name, rpc)?;
-        }
+    // 自定义 protobuf 服务沿用同一 Factory 生命周期；端点由 Application 按配置合并。
+    app.register_factory("gateway-rpc", |init: Init| -> InitTask {
+        Box::pin(async move {
+            Ok(Box::pin(async move {
+                init.service.cancellation().cancelled().await;
+                Ok(())
+            }) as Task)
+        })
+    })?;
+    for service in config
+        .services
+        .iter()
+        .filter(|service| service.factory_name() == "gateway-rpc")
+    {
+        app.bind_rpc(&service.service_name, gateway_rpc.clone().into_rpc())?;
     }
-    let bindings = Arc::new(rpc_bindings);
     let capacity = config.player_gateway.max_sessions;
-    for factory in ["player", "guild"] {
-        let bindings = Arc::clone(&bindings);
-        let locks = Arc::clone(&locks);
-        app.register_factory(factory, move |init: Init| -> InitTask {
-            let bindings = Arc::clone(&bindings);
-            let locks = Arc::clone(&locks);
+    app.register_rpc_factory(
+        "player",
+        move |init: Init| -> InitTask {
             Box::pin(async move {
-                let binding = bindings
-                    .get(&init.identity.service_name)
-                    .ok_or_else(|| std::io::Error::other("服务缺少 RPC 绑定"))?;
-                let handler: Arc<dyn tok::rpc::CallHandler> = if factory == "player" {
-                    let endpoints = init
-                        .extensions
-                        .get::<tok::application::Binding>()
-                        .ok_or_else(|| std::io::Error::other("服务缺少发现能力"))?;
-                    Arc::new(player::handlers(
-                        Arc::new(player::State::new(capacity)?),
-                        Arc::clone(&endpoints.directory),
-                    )?)
-                } else {
-                    guild::locked_handler(&init.identity.service_name, locks)?
-                };
-                binding.install(&init, handler)?;
+                let endpoints = init
+                    .extensions
+                    .get::<tok::application::Binding>()
+                    .ok_or_else(|| std::io::Error::other("服务缺少发现能力"))?;
+                let handlers = player::handlers(
+                    Arc::new(player::State::new(capacity)?),
+                    Arc::clone(&endpoints.directory),
+                )?;
+                init.extensions
+                    .get::<tok::rpc::Binding>()
+                    .ok_or_else(|| std::io::Error::other("服务缺少 RPC 绑定"))?
+                    .install(&init, Arc::new(handlers))?;
                 Ok(Box::pin(async move {
                     init.service.cancellation().cancelled().await;
                     Ok(())
                 }) as Task)
             })
-        })?;
-    }
+        },
+        RpcService::into_player,
+    )?;
+    app.register_rpc_factory(
+        "guild",
+        move |init: Init| -> InitTask {
+            let locks = Arc::clone(&locks);
+            Box::pin(async move {
+                let handlers = guild::locked_handler(&init.identity.service_name, locks)?;
+                init.extensions
+                    .get::<tok::rpc::Binding>()
+                    .ok_or_else(|| std::io::Error::other("服务缺少 RPC 绑定"))?
+                    .install(&init, handlers)?;
+                Ok(Box::pin(async move {
+                    init.service.cancellation().cancelled().await;
+                    Ok(())
+                }) as Task)
+            })
+        },
+        RpcService::into_business,
+    )?;
     Ok(app)
 }
 

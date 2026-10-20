@@ -1,4 +1,5 @@
 //! 配置驱动的服务生命周期；具体服务由游戏注册。
+mod rpc;
 
 use std::{collections::BTreeMap, future::Future, sync::Arc, time::Duration};
 
@@ -35,6 +36,9 @@ pub enum Error {
     /// 配置校验或本地目录操作失败。
     #[error(transparent)]
     Core(#[from] tok_core::Error),
+    /// RPC 入口的组装错误。
+    #[error(transparent)]
+    Rpc(#[from] tok_rpc::Error),
     /// 配置选用的初始化工厂尚未注册。
     #[error("初始化工厂未注册：{0}")]
     MissingFactory(String),
@@ -83,6 +87,7 @@ pub struct Application {
     shutdown_timeout: Duration,
     max_service_tasks: usize,
     rpc_endpoints: BTreeMap<String, RpcEndpoint>,
+    rpc_registrations: Vec<rpc::Registration>,
     service_directory: Arc<dyn ServiceDirectory>,
     registry: Arc<dyn ServiceRegistry>,
     redis: Option<Arc<RedisDirectory>>,
@@ -93,6 +98,7 @@ struct Registrations {
     directory: MemoryDirectory,
     shutdown: CancellationToken,
     services: Vec<ServiceDescriptor>,
+    running_services: Vec<String>,
     rpc_readiness: Vec<RpcReadiness>,
     service_handles: Vec<Handle>,
 }
@@ -110,7 +116,9 @@ impl Drop for Registrations {
             let _ = self
                 .directory
                 .unregister(&service.node_id, &service.service_name);
-            metrics::gauge!("tok_services_running", "service_name" => service.service_name.clone())
+        }
+        for service in &self.running_services {
+            metrics::gauge!("tok_services_running", "service_name" => service.clone())
                 .decrement(1.0);
         }
         self.shutdown.cancel();
@@ -151,6 +159,7 @@ impl Application {
             shutdown_timeout: Duration::from_secs(10),
             max_service_tasks: 64,
             rpc_endpoints: BTreeMap::new(),
+            rpc_registrations: Vec::new(),
             service_directory,
             registry,
             redis,
@@ -209,7 +218,7 @@ impl Application {
             .config
             .services
             .iter()
-            .filter(|service| service.endpoint == endpoint_name)
+            .filter(|service| service.endpoint.as_deref() == Some(endpoint_name.as_str()))
             .map(|service| service.service_name.as_str())
             .collect();
         let actual: std::collections::BTreeSet<_> = endpoint.service_names().collect();
@@ -217,6 +226,10 @@ impl Application {
             || expected.is_empty()
             || expected != actual
             || self.rpc_endpoints.contains_key(&endpoint_name)
+            || self
+                .rpc_registrations
+                .iter()
+                .any(|entry| entry.endpoint == endpoint_name)
         {
             return Err(tok_core::Error::InvalidConfig(format!(
                 "RPC 端点协议、业务绑定无效或重复：{endpoint_name}"
@@ -255,12 +268,14 @@ impl Application {
                 return Err(Error::MissingFactory(service.factory_name().into()));
             }
         }
+        self.assemble_rpc()?;
         let token = CancellationToken::new();
         let mut tasks = JoinSet::new();
         let mut registered = Registrations {
             directory: self.directory.clone(),
             shutdown: token.clone(),
             services: Vec::new(),
+            running_services: Vec::new(),
             rpc_readiness: Vec::new(),
             service_handles: Vec::new(),
         };
@@ -296,60 +311,62 @@ impl Application {
                 };
                 tasks.spawn(async move { (endpoint_name, task.await.map_err(|source| Box::new(source) as BoxError)) });
             }
-            for service in self.config.service_descriptors()? {
-                let binding = self.config.services.iter().find(|entry| entry.service_name == service.service_name)
-                    .ok_or_else(|| tok_core::Error::InvalidConfig(format!("服务未配置：{}", service.service_name)))?;
-                let listen_address = self.config.endpoints.iter().find(|entry| entry.name == binding.endpoint)
-                    .ok_or_else(|| tok_core::Error::InvalidConfig(format!("服务端点未配置：{}", binding.endpoint)))?.address;
-                let builder = Builder::new(Identity { node_id: service.node_id.clone(), service_name: service.service_name.clone() }, self.max_service_tasks, token.child_token())?;
+            let descriptors: BTreeMap<_, _> = self.config.service_descriptors()?.into_iter().map(|service| (service.service_name.clone(), service)).collect();
+            for configured in &self.config.services {
+                let service_name = &configured.service_name;
+                let network = descriptors.get(service_name);
+                let builder = Builder::new(Identity { node_id: self.config.node_id.clone(), service_name: service_name.clone() }, self.max_service_tasks, token.child_token())?;
                 registered.service_handles.push(builder.handle());
                 let mut extensions = Extensions::default();
-                extensions.insert(Binding {
-                    listen_address,
-                    service: service.clone(),
-                    directory: Arc::clone(&self.service_directory),
-                });
-                let factory = Arc::clone(self.factories.get(binding.factory_name())
-                    .ok_or_else(|| Error::MissingFactory(binding.factory_name().into()))?);
+                if let Some(service) = network {
+                    let listen_address = self.config.endpoints.iter().find(|endpoint| Some(endpoint.name.as_str()) == configured.endpoint.as_deref())
+                        .ok_or_else(|| tok_core::Error::InvalidConfig(format!("服务端点未配置：{service_name}")))?.address;
+                    extensions.insert(Binding { listen_address, service: service.clone(), directory: Arc::clone(&self.service_directory) });
+                }
+                let factory = Arc::clone(self.factories.get(configured.factory_name())
+                    .ok_or_else(|| Error::MissingFactory(configured.factory_name().into()))?);
                 let started = std::time::Instant::now();
-                let span = tracing::info_span!("service_start", node_id = %self.config.node_id, service_name = %service.service_name);
+                let span = tracing::info_span!("service_start", node_id = %self.config.node_id, service_name = %service_name);
                 let prepared = tokio::select! {
                     biased;
                     signal = &mut shutdown => return signal.map_err(Error::Signal),
                     result = tasks.join_next(), if !tasks.is_empty() => return Err(unexpected(result)),
                     result = builder.build(factory, extensions, self.startup_timeout).instrument(span) => {
-                        result.map_err(|error| service_error(&service.service_name, error, true))?
+                        result.map_err(|error| service_error(service_name, error, true))?
                     }
                 };
                 let running = prepared.start();
                 // 发布可能失败或被取消；先把主任务与运行范围交给监督，确保仍会执行退出清理。
-                let service_name = service.service_name.clone();
+                let task_name = service_name.clone();
                 let shutdown_timeout = self.shutdown_timeout;
                 tasks.spawn(async move {
                     let result = running.run(shutdown_timeout).await.map_err(|error| Box::new(error) as BoxError);
-                    (service_name, result)
+                    (task_name, result)
                 });
                 for readiness in &registered.rpc_readiness {
-                    readiness.set(&service.service_name, true);
+                    readiness.set(service_name, true);
                 }
-                // 快照对外可见时对应入口必须已就绪，不能先发布再开启入口。
-                let publication = tokio::select! {
-                    biased;
-                    signal = &mut shutdown => return signal.map_err(Error::Signal),
-                    result = tasks.join_next(), if !tasks.is_empty() => return Err(unexpected(result)),
-                    result = self.registry.register(service.clone()) => result,
-                };
-                if let Err(error) = publication {
-                    for readiness in &registered.rpc_readiness {
-                        readiness.set(&service.service_name, false);
+                if let Some(service) = network {
+                    // 快照对外可见时对应入口必须已就绪，不能先发布再开启入口。
+                    let publication = tokio::select! {
+                        biased;
+                        signal = &mut shutdown => return signal.map_err(Error::Signal),
+                        result = tasks.join_next(), if !tasks.is_empty() => return Err(unexpected(result)),
+                        result = self.registry.register(service.clone()) => result,
+                    };
+                    if let Err(error) = publication {
+                        for readiness in &registered.rpc_readiness {
+                            readiness.set(service_name, false);
+                        }
+                        return Err(error.into());
                     }
-                    return Err(error.into());
+                    if self.redis.is_some() { self.directory.register(service.clone())?; }
+                    registered.services.push(service.clone());
                 }
-                if self.redis.is_some() { self.directory.register(service.clone())?; }
-                metrics::histogram!("tok_service_start_duration_seconds", "service_name" => service.service_name.clone()).record(started.elapsed().as_secs_f64());
-                metrics::counter!("tok_service_starts_total", "service_name" => service.service_name.clone()).increment(1);
-                metrics::gauge!("tok_services_running", "service_name" => service.service_name.clone()).increment(1.0);
-                registered.services.push(service.clone());
+                metrics::histogram!("tok_service_start_duration_seconds", "service_name" => service_name.clone()).record(started.elapsed().as_secs_f64());
+                metrics::counter!("tok_service_starts_total", "service_name" => service_name.clone()).increment(1);
+                metrics::gauge!("tok_services_running", "service_name" => service_name.clone()).increment(1.0);
+                registered.running_services.push(service_name.clone());
             }
             tokio::select! {
                 biased;
@@ -367,9 +384,10 @@ impl Application {
         for readiness in &registered.rpc_readiness {
             readiness.clear();
         }
+        for service in registered.running_services.drain(..) {
+            metrics::gauge!("tok_services_running", "service_name" => service).decrement(1.0);
+        }
         for service in registered.services.drain(..).rev() {
-            metrics::gauge!("tok_services_running", "service_name" => service.service_name.clone())
-                .decrement(1.0);
             if let Err(error) = self
                 .directory
                 .unregister(&service.node_id, &service.service_name)

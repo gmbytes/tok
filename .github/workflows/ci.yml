@@ -30,7 +30,7 @@ jobs:
       - name: 构建示例二进制
         run: just build
       - name: 验证共同执行、生命周期与事件处理链
-        run: just execution-smoke lifecycle-smoke events-smoke
+        run: just execution-smoke lifecycle-smoke events-smoke application-smoke
       - name: 验证示例服务启动与退出
         run: just smoke
       - name: 验证共享端点内部 RPC
@@ -65,7 +65,28 @@ jobs:
         run: just redis-smoke
       - name: 验证 Redis 会话所有权
         run: just ownership-test
+      - name: 验证 Redis 请求级锁
+        run: just locks-test
       - name: 验证独立网关共享所有权
         run: just ownership-smoke
       - name: 验证三进程跨网关交接及宕机降级
         run: just handoff-smoke
+
+  nats-integration:
+    name: NATS 事件与多网关集成
+    runs-on: ubuntu-latest
+    services:
+      nats:
+        image: nats:2-alpine
+        ports:
+          - 4222:4222
+    steps:
+      - uses: actions/checkout@v4
+      - name: 安装 Rust 工具链
+        run: rustup show
+      - name: 安装 just
+        run: cargo install just --version 1.58.0 --locked
+      - name: 验证真实 NATS 订阅与动态主题
+        run: just nats-test
+      - name: 验证事件转发与广播
+        run: just nats-smoke

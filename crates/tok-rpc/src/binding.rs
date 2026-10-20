@@ -27,6 +27,10 @@ impl Binding {
             installed: Arc::new(OnceLock::new()),
         }
     }
+    /// 查询一次性处理者是否安装；应用在初始化结束后据此检查入口就绪。
+    pub fn is_installed(&self) -> bool {
+        self.installed.get().is_some()
+    }
     /// 在所属服务工厂中安装实际 handler、生命周期与能力；拒绝错误身份和重复安装。
     pub fn install(&self, init: &Init, handler: Arc<dyn CallHandler>) -> Result<(), crate::Error> {
         if init.identity != self.identity {
@@ -34,11 +38,14 @@ impl Binding {
                 "RPC 绑定与初始化服务身份不匹配".into(),
             ));
         }
+        let mut extensions = init.extensions.clone();
+        // 初始化装配能力不能存回自身，避免 Binding → Installed → Extensions 的引用环。
+        drop(extensions.remove::<Self>());
         self.installed
             .set(Installed {
                 handler,
                 service: init.service.clone(),
-                extensions: init.extensions.clone(),
+                extensions,
             })
             .map_err(|_| crate::Error::Configuration("RPC 服务处理者已安装".into()))
     }

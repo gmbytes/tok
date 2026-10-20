@@ -34,7 +34,7 @@ RPC 返回回应，事件返回当前处理阶段的结果，不自动生成客�
 
 Gateway 复用构建、上下文、Layer、任务监督和退出设施；监听、session 调度、恢复与交接保留各自状态机，不强制合并成一个循环。通用设施不能到处判断 player/scene。游戏自定义服务与内置 gateway 使用相同扩展契约。
 
-现有 Application、Gateway、CallHandler、Executor 与事件 Handler 尚未完成此统一。迁移以可运行样例和验收结果为准，不能把目标模型表述为现成 API。
+Application / Gateway 已复用同一 Factory 与生命周期，RPC、事件及网关业务入口使用共同 Request / Tower 协议。协议适配仍保留 CallHandler、Executor 等不同输入与结果，不另建平行的执行或事件中间件系统；具体能力与未实现范围以实现状态为准。
 
 ## 身份、路由与作用域
 
@@ -127,6 +127,6 @@ Kubernetes 配置可校验但后端未实现，部署目录尚无可运行清单
 
 ## 后续范围
 
-本轮优先统一执行、构建与生命周期，再迁移 gateway 和动态 topic，按七批计划验收。JetStream、离线加载、通用跨节点去重、生产安全、Kubernetes、Redis Cluster、Scene、配置式中间件及无缝场景切换另行实施。
+本轮已沿七批计划完成统一执行、构建、生命周期、gateway 扩展和动态 topic，并收敛配置组装；验收结果与平台边界分别记录。JetStream、离线加载、通用跨节点去重、生产安全、Kubernetes、Redis Cluster、Scene、配置式中间件及无缝场景切换另行实施。
 
 Redis Cluster 缓存与 MongoDB 集群是存储选型方向，存储 API 由业务定义、实现独立；缓存失效、持久化时机、事务和版本检查尚未设计，不纳入本轮。跨实体一致性由业务处理，框架不扩展通用补偿事务。

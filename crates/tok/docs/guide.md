@@ -2,19 +2,17 @@
 
 tok 是实验性的 Rust 游戏服务器框架。游戏通过本 crate 组装组件和服务，输出自己的二进制，并通过 TOML 选择运行的服务。
 
-本指南只说明当前已实现 API。架构与校正目标分别维护在仓库的 `docs/design.md`、`docs/service-runtime.md`，当前缺口见 `docs/status.md`，下一步只按 `docs/implementation-plan.md` 的 P1–P7 推进。旧批次和协议版本已移入历史文档，不作为使用说明。
+本指南只说明当前已实现 API。架构与校正目标分别维护在仓库的 `docs/design.md`、`docs/service-runtime.md`，当前缺口见 `docs/status.md`，方向校正的实施与验收记录见 `docs/implementation-plan.md`。旧批次和协议版本已移入历史文档，不作为使用说明。
 
-## 目标与当前 API 的差异
+## 当前运行模型
 
-| 目标 | 当前使用方式 | 状态 |
-| --- | --- | --- |
-| 服务与处理链共同构建 | Factory / Supervisor 与 gateway 作用域能力已接通 | P1–P4 已实施，P7 汇总应用装配 |
-| 消息、事件、timer 共用上下文与 Layer | RPC 及 gateway 的准入、请求、事件、timer、新下行均使用共同协议 | P3/P4 已实施 |
-| 本地与远程共用事件接口 | 同一 Registry、Envelope 与类型化 Tower 链；解码器显式安装 | P3 已实施 |
-| topic 参与传输并动态聚合 | Topic / TopicFilter 路由，Pool 聚合所绑定组件的成员兴趣，异步 join/leave | P5/P6 已实施 |
-| 生命周期、查询和状态扩展 | gateway、管理器、会话快照与结束等待，显式状态工厂及交接适配 | P4 已实施 |
-
-下文示例保持可编译，不使用尚未提供的统一 Builder 或异步主题接口。实际迁移后再按对应批次替换示例；不靠兼容别名长期维护两套模型。
+| 范围 | 接口与边界 |
+| --- | --- |
+| 服务构建与运行 | Factory / Init / Builder / Running；Application 按配置组装，Gateway 作为扩展 |
+| 统一处理协议 | Request / execution::Context / Tower Layer；保留各入口的输入、结果及调度约束 |
+| RPC 与事件 | 配置驱动的 RPC 工厂、统一事件 Registry，本地借用与远程解码共用处理链 |
+| 主题兴趣 | Event::topic 决定路由，Pool 聚合固定与会话兴趣，group 属于订阅组件 |
+| 生命周期扩展 | 网关、管理器、会话快照与结束等待，会话状态工厂及显式交接适配 |
 
 ## 生成和阅读文档
 
@@ -35,13 +33,13 @@ workspace 同时禁止持有同步锁或 RefCell 借用跨越 await、丢弃未�
 
 tok-gateway 是这套基础设施的内置扩展，增加连接、认证、session、串行调度、补发与交接能力。游戏自定义服务和 gateway 应使用相同的构建与扩展机制。
 
-本 crate 是统一导出与应用组装门面。共同契约和运行能力应由下层提供，gateway 不反向依赖本 crate；使用端可以继续从 tok 取得便捷接口。当前 Application 与 Gateway 已复用公共工厂和任务生命周期，业务入口尚未完成统一，下文示例以已实现 API 为准。
+本 crate 是统一导出与应用组装门面。共同契约和运行能力应由下层提供，gateway 不反向依赖本 crate；使用端可以继续从 tok 取得便捷接口。Application 与 Gateway 复用公共工厂和任务生命周期；RPC、事件、timer 及网关消息链使用共同执行协议。
 
-## P1 通用执行原型
+## 通用执行与处理链
 
-P1 已提供 [`core::execution::Context`]、类型化 [`service::Request`] 与共同的 [`service::Layer`]。
-上下文的 `service()` 表示当前执行所属服务，`operation()` 是入口适配器填写的稳定操作标识，不拼接实体或请求 ID。业务实体身份、路由输入等按需使用类型化输入或扩展携带；当前原型没有通用路由器或熔断器。
-原型位于 tok-core / tok-service，构建普通调用与 gateway 能力时共用；Application/Gateway 已复用 P2 生命周期；P3 已将 RPC/事件及 RPC timer 路由迁移到共同执行核心，P4 已提供 gateway/session 的作用域能力、生命周期与消息链。
+使用 [`core::execution::Context`]、类型化 [`service::Request`] 与共同的 [`service::Layer`]。
+上下文的 `service()` 表示当前执行所属服务，`operation()` 是入口适配器填写的稳定操作标识，不拼接实体或请求 ID。业务实体身份、路由输入等按需使用类型化输入或扩展携带；当前未提供通用路由器或熔断器。
+共同上下文位于 tok-core，类型化执行与生命周期位于 tok-service；普通服务与 gateway 共用，网关另行增加会话能力及专用协议状态机。
 
 以下普通 Rust 输入不要求 protobuf，本地状态直接借用，经过 await 后仍在当前任务中修改：
 
@@ -272,26 +270,14 @@ player 使用 `into_player`，普通业务服务使用 `into_business`，两者�
 
 ```rust,no_run
 use std::sync::Arc;
-use tok::{AppConfig, rpc::{HandlerRegistry, RpcEndpoint, RpcService},
+use tok::{AppConfig, rpc::{HandlerRegistry, RpcService},
     application::{Application, shutdown_signal},
-    service::{lifecycle::{Init, Factory, InitTask}, task::Task}};
+    service::{lifecycle::{Init, InitTask}, task::Task}};
 
 #[derive(Clone, PartialEq, prost::Message)]
 struct ReadGuild {
     #[prost(uint64, tag = "1")]
     guild_id: u64,
-}
-
-struct Lifecycle;
-impl Factory for Lifecycle {
-    fn initialize(&self, init: Init) -> InitTask {
-        Box::pin(async move {
-            Ok(Box::pin(async move {
-                init.service.cancellation().cancelled().await;
-                Ok(())
-            }) as Task)
-        })
-    }
 }
 
 #[tokio::main]
@@ -307,25 +293,36 @@ address = "127.0.0.1:7001"
 service_name = "guild"
 endpoint = "internal-rpc"
 "#)?;
-
-    let mut handlers = HandlerRegistry::new();
-    handlers.register(1, 2, |context, request: ReadGuild| async move {
-        if context.bid.as_deref() != Some(request.guild_id.to_string().as_str()) {
-            return Err(tok::rpc::tonic::Status::invalid_argument("业务 ID 不匹配"));
-        }
-        Ok(request)
-    })?;
-    let service = RpcService::new("local", "guild", Arc::new(handlers))?;
-    let endpoint = RpcEndpoint::new().add_service("guild", service.into_business())?;
     let mut app = Application::new(config)?;
-    app.register_factory("guild", Lifecycle)?;
-    app.register_rpc_endpoint("internal-rpc", endpoint)?;
+    app.register_rpc_factory("guild", |init: Init| -> InitTask {
+        Box::pin(async move {
+            // 状态、入口和 Layer 在同一个工厂中初始化。
+            let mut handlers = HandlerRegistry::new();
+            handlers.register(1, 2, |context, request: ReadGuild| async move {
+                if context.bid.as_deref() != Some(request.guild_id.to_string().as_str()) {
+                    return Err(tok::rpc::tonic::Status::invalid_argument("业务 ID 不匹配"));
+                }
+                Ok(request)
+            })?;
+            init.extensions.get::<tok::rpc::Binding>()
+                .ok_or_else(|| std::io::Error::other("缺少 RPC 初始化绑定"))?
+                .install(&init, Arc::new(handlers))?;
+            Ok(Box::pin(async move {
+                init.service.cancellation().cancelled().await;
+                Ok(())
+            }) as Task)
+        })
+    }, RpcService::into_business)?;
     app.run_until(shutdown_signal()).await?;
     Ok(())
 }
 ```
 
-应用先绑定共享监听，业务初始化完成后才开启对应服务的就绪入口。
+Application::register_rpc_factory 按配置的 factory（默认服务名）建立入口，将所属 `rpc::Binding` 注入 Init.extensions；工厂安装实际处理链，未安装会在初始化结束时失败，不发布服务。多个服务可共用工厂，但同一端点仍不能重复绑定同一个 protobuf 服务。协议转换函数不决定锁或中间件。
+
+自定义 protobuf 服务通过 `Application::bind_rpc(service_name, server)` 声明；生命周期沿用 register_factory。已有完整 RpcEndpoint 可交给 register_rpc_endpoint，端点必须与配置完全匹配，同一端点不与逐服务声明混用。高级自定义组装仍可手动使用 RpcService::deferred；不需要普通使用者维护一份按服务名查询的绑定表。
+
+应用先合并并校验共享端点，再绑定监听，业务初始化完成后才开启对应服务的就绪入口。
 初始化失败、监听失败和运行异常都进入同一清理流程。
 工厂初始化不能等待尚未启动的其他服务；依赖调用应在必要服务就绪后发起。
 
@@ -346,6 +343,19 @@ Channel 缓存有界，节点和地址相同的服务复用连接；节点变更
 
 运行 `just rpc-smoke` 可以验证示例 player 与 guild 的内部调用并退出。
 此检查使用构造的内部会话上下文；登录认证和客户端 session 由 `just client-smoke` 单独验证。
+
+### 无端点的事件服务
+
+ServiceConfig.endpoint 是可选引用。纯事件或后台服务省略 endpoint，仍经过相同 Factory 初始化、主任务及后台监督、停止和结束等待；不生成 ServiceDescriptor，不发布发现地址，也不注入网络用 application::Binding。需要查询其他服务时，可以在组装时取得 Application::service_directory 并注入自己的工厂。
+
+```toml
+node_id = "local"
+discovery = "memory"
+[[services]]
+service_name = "audit"
+```
+
+服务工厂仍负责构造事件 Registry、状态和 Layer，并将接收循环作为主任务或受监督任务；可以选择本地来源或 Core NATS，不要求构造 gateway。可运行的组合见示例 `examples/demo-game/examples/application.rs`，执行 `just application-smoke`：RPC 发布本地事件，无端点审计服务借用状态处理，两者安装同一个泛型 Layer。网关及区服主题的完整组合继续由 demo 主程序与 nats-smoke 验证。
 
 ## 请求级锁
 
@@ -718,7 +728,7 @@ ACK 不使用 `request_id`，不进入 player 队列，不触发 RPC。零值、
 与登录、恢复及业务请求共用计数。成功回应丢失时客户端可在仍在线的连接用新请求 ID 重试。
 旧 token 保留原到期时间，不因刷新立即撤销；同一会话的多个未过期 token 都可验证，
 新登录替换 session_id 后全部失去会话接入资格。断线后不能凭已过期 token 刷新，须普通鉴权。
-客户端 Frame 仍为版本 3，仅新增 oneof 字段 12、13，既有字段和行为兼容；使用刷新能力须更新客户端协议。
+客户端 Frame 为版本 3，刷新凭证使用 oneof 字段 12、13；使用刷新能力须更新客户端协议。
 
 
 新登录仍会失效旧入口。签名有效不代表能进入当前会话：Resume 必须匹配原 session；快速重登通过
@@ -867,7 +877,7 @@ timer 失败或超时只记录本次失败，不重试；周期的后续触发�
 
 ## 在工厂中安装 RPC 处理链
 
-[`rpc::RpcService::deferred`] 返回端点服务和一次性 [`rpc::Binding`]。将端点交给 Application 组装，在所属工厂中初始化业务状态并安装处理链。
+普通应用使用 `Application::register_rpc_factory` 自动注入一次性 [`rpc::Binding`]。下面是高级手动组装方式：[`rpc::RpcService::deferred`] 返回端点服务和绑定，再在所属 Factory 中安装状态与处理链。
 绑定校验服务身份、拒绝重复安装；安装前调用返回 Unavailable，服务停止后拒绝继续执行业务。共享端点的就绪门控仍由 Application 管理。
 
 ```rust
@@ -1191,7 +1201,7 @@ Player 保留 `[player_gateway]` 配置布局，`Config::gateway_limits` 从连�
 运行 future 被强制丢弃时会取消并中止受监督任务、调用 `stop`，无法等待异步 `finish`。
 
 玩家接入统一使用 `Gateway::player` 或 `Gateway::new` 与 `Ingress` 组装，
-通过 `gateway.ingress().sessions()` 获取会话管理器；不再保留 `PlayerGateway` 兼容包装。
+通过 `gateway.ingress().sessions()` 获取会话管理器。
 玩家接入参数使用 `Config`，网关容量使用 `gateway::GatewayConfig`。
 Scene 目前仅预留模块，不套用 Player 的串行与所有权语义。
 
@@ -1251,15 +1261,15 @@ fn pipeline(executor: Arc<dyn Executor>) -> Pipeline {
 | [`config`] | TOML 加载、校验与端点引用 |
 | [`application`] | 服务工厂、启动监督与退出 |
 | [`core`] | 共享类型、错误、执行上下文和组件契约 |
-| [`service`] | 类型化执行与预算/取消 Layer，以及 P2 公共工厂、任务监督和生命周期 |
+| [`service`] | 类型化执行与预算/取消 Layer，以及公共工厂、任务监督和生命周期 |
 | [`infra`] | 服务目录、路由及协调后端 |
 | [`rpc`] | 内部 RPC 与 Tower 组装 |
-| [`gateway`] | 统一 Gateway 运行框架与 Player、Scene 接入组件 |
+| [`gateway`] | 统一 Gateway 运行框架与已实现的 Player 接入；Scene 尚未实现 |
 | [`events`] | 统一异步事件、本地状态借用、Core NATS 即时投递及网关广播/转发 |
 | [`observability`] | 日志、指标与追踪 |
 
 目前示例监听共享内部 gRPC 和客户端 TCP 端点，已接通注入认证、有界串行 session、状态读写及服务组合。
 Redis 开发发现、session 所有权、timer、ACK 缓存、同网关恢复、可选跨网关交接和 Core NATS 已接通；JetStream、离线加载及生产安全仍待实现。
-配置端点地址本身不启动监听，内部端点需显式注册 RpcEndpoint，TCP 由网关工厂绑定。
+配置端点地址本身不启动监听；内部 RPC 使用 register_rpc_factory / bind_rpc 或显式完整端点注册，TCP 由网关工厂绑定。
 Kubernetes 配置可校验，运行该发现后端仍会明确报错。
 游戏业务协议和 handler 由游戏定义，框架组件不反向依赖具体游戏。

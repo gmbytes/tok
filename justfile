@@ -9,11 +9,11 @@ default:
 check:
     cargo check --workspace --all-targets --locked
 
-# 验证 P1 类型化处理链、本地状态借用与最小网关能力组装，不绑定端口
+# 验证类型化处理链、本地状态借用与最小网关能力组装，不绑定端口
 execution-smoke:
     cargo run -p demo-game --example execution --locked
 
-# 验证 P2 普通服务与 TCP 网关共用的构建、任务监督和生命周期
+# 验证普通服务与 TCP 网关共用的构建、任务监督和生命周期
 lifecycle-smoke:
     cargo run -p demo-game --example lifecycle --locked
 
@@ -112,3 +112,7 @@ nats-smoke:
 # 验证本地与远程解码共用事件注册链，不依赖外部服务
 events-smoke:
     cargo run -p demo-game --example events --locked
+
+# 验证应用配置组装 RPC 与无端点事件服务，共用 Layer 与服务生命周期
+application-smoke:
+    cargo run -p demo-game --example application --locked

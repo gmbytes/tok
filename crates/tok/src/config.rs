@@ -38,8 +38,9 @@ pub enum OwnershipBackend {
 pub struct ServiceConfig {
     /// 节点内唯一的业务服务名，由游戏定义。
     pub service_name: String,
-    /// 引用 endpoints 中的端点名称。
-    pub endpoint: String,
+    /// 可选端点引用；纯事件或后台服务省略，不发布网络地址。
+    #[serde(default)]
+    pub endpoint: Option<String>,
     /// 可选的初始化工厂名称；省略时使用 service_name 查找注册工厂。
     #[serde(default)]
     pub factory: Option<String>,
@@ -98,9 +99,10 @@ pub struct AppConfig {
     /// ownership=redis 时必需的共享所有权配置。
     #[serde(default)]
     pub redis_ownership: Option<tok_infra::ownership::redis::RedisOwnershipConfig>,
-    /// 节点声明的端点列表，实际监听需显式组装。
+    /// 节点声明的端点列表，实际监听需显式组装；纯事件应用可以省略。
+    #[serde(default)]
     pub endpoints: Vec<EndpointConfig>,
-    /// 本进程启用的业务服务与端点绑定。
+    /// 本进程启用的业务服务与可选端点绑定。
     pub services: Vec<ServiceConfig>,
     /// 进程级日志、指标和追踪配置。
     #[serde(default)]
@@ -225,10 +227,12 @@ impl AppConfig {
             if service.service_name.trim().is_empty() {
                 return Err(Error::InvalidConfig("服务名不能为空".into()));
             }
-            if !endpoint_names.contains(&service.endpoint) {
+            if let Some(endpoint) = &service.endpoint
+                && !endpoint_names.contains(endpoint)
+            {
                 return Err(Error::InvalidConfig(format!(
                     "服务 {} 引用了不存在的端点：{}",
-                    service.service_name, service.endpoint
+                    service.service_name, endpoint
                 )));
             }
             if !identities.insert(&service.service_name) {
@@ -241,17 +245,18 @@ impl AppConfig {
         Ok(())
     }
 
-    /// 返回配置描述，不表示服务已经启动或就绪。
+    /// 返回有网络端点的配置描述；无端点服务不进入发现，不表示服务已经启动或就绪。
     pub fn service_descriptors(&self) -> Result<Vec<ServiceDescriptor>> {
         self.services
             .iter()
+            .filter(|service| service.endpoint.is_some())
             .map(|service| {
                 let endpoint = self
                     .endpoints
                     .iter()
-                    .find(|endpoint| endpoint.name == service.endpoint)
+                    .find(|endpoint| Some(endpoint.name.as_str()) == service.endpoint.as_deref())
                     .ok_or_else(|| {
-                        Error::InvalidConfig(format!("端点不存在：{}", service.endpoint))
+                        Error::InvalidConfig(format!("服务端点不存在：{}", service.service_name))
                     })?;
                 Ok(ServiceDescriptor {
                     node_id: self.node_id.clone(),
