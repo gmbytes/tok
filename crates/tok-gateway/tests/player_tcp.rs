@@ -10,7 +10,7 @@ use std::{
     time::Duration,
 };
 use tok_core::{
-    LogicalMessage, MessageKind, SessionIdentity,
+    LogicalMessage, MessageKind,
     coordination::{CoordinationTask, OwnershipStore, SessionOwner, SessionOwnership},
 };
 use tok_gateway::{
@@ -70,30 +70,44 @@ struct TestExecutor(Arc<Tracker>);
 impl Executor for TestExecutor {
     fn execute_event(
         &self,
-        identity: SessionIdentity,
-        request_id: u64,
-        event: Arc<tok_events::Message>,
+        input: tok_service::Request<tok_gateway::player::EventInput>,
     ) -> tok_gateway::player::EventTask<'_> {
+        let context = input.context;
+        let tok_gateway::player::EventInput {
+            identity,
+            request_id,
+            event,
+        } = input.input;
         Box::pin(async move {
             self.0.events.lock().unwrap().push(request_id);
             let reply = self
-                .execute_request(
-                    identity,
-                    LogicalMessage {
-                        kind: MessageKind::Request,
-                        message_id: 1,
-                        request_id,
-                        server_seq: None,
-                        error_code: 0,
-                        body: event.body.clone(),
+                .execute_request(tok_service::Request::new(
+                    context,
+                    tok_gateway::player::RequestInput {
+                        identity,
+                        message: LogicalMessage {
+                            kind: MessageKind::Request,
+                            message_id: 1,
+                            request_id,
+                            server_seq: None,
+                            error_code: 0,
+                            body: event.body.clone(),
+                        },
                     },
-                )
+                ))
                 .await?;
             Ok(reply.timers)
         })
     }
 
-    fn execute_request(&self, identity: SessionIdentity, request: LogicalMessage) -> Task<'_> {
+    fn execute_request(
+        &self,
+        input: tok_service::Request<tok_gateway::player::RequestInput>,
+    ) -> Task<'_> {
+        let tok_gateway::player::RequestInput {
+            identity,
+            message: request,
+        } = input.input;
         Box::pin(async move {
             self.0.calls.fetch_add(1, Ordering::SeqCst);
             assert_ne!(request.message_id, 666, "测试 session 任务崩溃");
@@ -172,7 +186,7 @@ impl Fixture {
         if events.is_some() {
             limits.max_tasks += 1;
         }
-        let gateway = Gateway::new(limits, |context| {
+        let gateway = Gateway::new(tok_core_identity(), limits, |context| {
             tok_gateway::player::Ingress::new(
                 context,
                 config,
@@ -475,6 +489,7 @@ async fn reconnect_replays_inflight_result_without_reexecution_and_preserves_req
             error_code: 0,
             body: vec![9],
         })
+        .await
         .unwrap();
     fixture.tracker.permits.add_permits(1);
     tokio::time::timeout(Duration::from_secs(1), async {
@@ -637,6 +652,7 @@ async fn cache_gap_requires_fast_login_and_never_silently_skips_messages() {
                 error_code: 0,
                 body: vec![],
             })
+            .await
             .unwrap();
     }
     let mut second = fixture.connect().await;
@@ -814,6 +830,7 @@ async fn oversized_response_is_cached_after_normalization_and_notify_rejection_p
                 server_seq: None,
                 body: vec![8; 512],
             })
+            .await
             .unwrap_err()
             .code,
         ErrorCode::FrameTooLarge
@@ -912,6 +929,7 @@ async fn same_player_is_serial_and_queue_full_is_immediate() {
             server_seq: None,
             body: vec![9],
         })
+        .await
         .unwrap();
     let Content::Notify(notify) = client.read().await else {
         panic!("缺少通知");
@@ -967,6 +985,7 @@ async fn duplicate_login_waits_for_old_call_and_invalidates_old_handle() {
             server_seq: None,
             body: vec![],
         })
+        .await
         .unwrap();
     let Content::Notify(notify) = first.read().await else {
         panic!()
@@ -1115,15 +1134,15 @@ async fn notify_uses_bounded_outbound_without_executing_player() {
         error_code: 0,
         body: vec![9],
     };
-    handle.notify(notification.clone()).unwrap();
+    handle.notify(notification.clone()).await.unwrap();
     let Content::Notify(message) = client.read().await else {
         panic!("缺少通知");
     };
     assert_eq!(message.body, vec![9]);
     assert_eq!(message.server_seq, 1);
     assert_eq!(fixture.tracker.calls.load(Ordering::SeqCst), 0);
-    handle.notify(notification.clone()).unwrap();
-    assert!(handle.notify(notification).is_err());
+    handle.notify(notification.clone()).await.unwrap();
+    assert!(handle.notify(notification).await.is_err());
     #[expect(
         clippy::let_underscore_must_use,
         reason = "慢连接退出可能是帧错误或 EOF，随后以所有权释放和缓存关闭作断言。"
@@ -1949,4 +1968,11 @@ fn event_request<T>(input: T) -> tok_service::Request<T> {
     )
     .unwrap();
     tok_service::Request::new(context, input)
+}
+
+fn tok_core_identity() -> tok_core::service::Identity {
+    tok_core::service::Identity {
+        node_id: "local".into(),
+        service_name: "player-gateway".into(),
+    }
 }

@@ -8,11 +8,11 @@ tok 是实验性的 Rust 游戏服务器框架。游戏通过本 crate 组装组
 
 | 目标 | 当前使用方式 | 状态 |
 | --- | --- | --- |
-| 服务与处理链共同构建 | 通用 Factory / Supervisor 已被 Application 与 Gateway 复用 | P2/P3 已实施，P4 继续迁移 gateway 扩展 |
-| 消息、事件、timer 共用上下文与 Layer | RPC、事件及 RPC timer 路由使用共同 Request / Layer | P3 已接通，P4 迁移 gateway/session 扩展 |
+| 服务与处理链共同构建 | Factory / Supervisor 与 gateway 作用域能力已接通 | P1–P4 已实施，P7 汇总应用装配 |
+| 消息、事件、timer 共用上下文与 Layer | RPC 及 gateway 的准入、请求、事件、timer、新下行均使用共同协议 | P3/P4 已实施 |
 | 本地与远程共用事件接口 | 同一 Registry、Envelope 与类型化 Tower 链；解码器显式安装 | P3 已实施 |
 | topic 参与传输并动态聚合 | join_topic / leave_topic 为同步本地成员操作 | P5/P6 待实施 |
-| 完整生命周期、查询和状态扩展 | 通用任务阶段/停止/结束等待可用，session 查询仍有限 | P2 已实施，完整业务扩展待 P4 |
+| 生命周期、查询和状态扩展 | gateway、管理器、会话快照与结束等待，显式状态工厂及交接适配 | P4 已实施 |
 
 下文示例保持可编译，不使用尚未提供的统一 Builder 或异步主题接口。实际迁移后再按对应批次替换示例；不靠兼容别名长期维护两套模型。
 
@@ -41,7 +41,7 @@ tok-gateway 是这套基础设施的内置扩展，增加连接、认证、sessi
 
 P1 已提供 [`core::execution::Context`]、类型化 [`service::Request`] 与共同的 [`service::Layer`]。
 上下文的 `service()` 表示当前执行所属服务，`operation()` 是入口适配器填写的稳定操作标识，不拼接实体或请求 ID。业务实体身份、路由输入等按需使用类型化输入或扩展携带；当前原型没有通用路由器或熔断器。
-原型位于 tok-core / tok-service，构建普通调用与 gateway 能力时共用；Application/Gateway 已复用 P2 生命周期；P3 已将 RPC/事件及 RPC timer 路由迁移到共同执行核心，gateway/session 的业务扩展留在 P4。
+原型位于 tok-core / tok-service，构建普通调用与 gateway 能力时共用；Application/Gateway 已复用 P2 生命周期；P3 已将 RPC/事件及 RPC timer 路由迁移到共同执行核心，P4 已提供 gateway/session 的作用域能力、生命周期与消息链。
 
 以下普通 Rust 输入不要求 protobuf，本地状态直接借用，经过 await 后仍在当前任务中修改：
 
@@ -230,8 +230,8 @@ Drop 只发起取消和中止，不能承诺异步清理完成，应通过 wait_
 
 服务 Running::run 先停止准入，收束主任务清理，再关闭任务范围；主任务持有的子组件与清理均属于完整服务退出。
 Supervisor::child 创建独立容量的子范围，父取消向子传播；Supervisor::track 跟踪外部调度工作，容量和回收仍由调用方控制。
-工厂使用 [`gateway::Gateway::new_in`] 关联所属服务；Gateway 保留连接循环和 ingress finish。
-Gateway::tasks 暴露后台/连接任务范围，其结束不表示 ingress finish 已完成；完整退出等待所属服务 Handle 或 serve future。
+工厂使用 [`gateway::Gateway::new_in`] 并传入 `&Init`，继承所属服务身份、能力和取消关系；Gateway 保留连接循环和 ingress finish。
+Gateway::tasks 暴露后台/连接任务范围，其结束不表示 ingress finish 已完成；完整网关退出使用 `Gateway::handle().wait_finished()`，也可等待所属服务 Handle 或 serve future。
 
 Application 默认每服务允许 64 个后台名额，可用 [`application::Application::with_task_capacity`] 调整。
 共享端点和发现任务由应用统一管理，子任务范围有独立容量。
@@ -950,7 +950,7 @@ ID 限制为 1 到 128 个可打印 ASCII 非空白字节，追踪头每字段�
 
 ## Core NATS 即时事件
 
-本节介绍当前固定类型订阅 API。topic 暂仅用于本地会话筛选，本地与远程注册表已统一；动态聊天/区服订阅及完整 gateway/session 生命周期/消息 Layer 扩展仍待按 P4–P6 实施，不能按已实现能力使用。
+本节介绍当前固定类型订阅 API。topic 暂仅用于本地会话筛选，本地与远程注册表及 gateway/session 处理链已接通；动态聊天/区服订阅仍待按 P5/P6 实施，不能按已实现能力使用。
 
 任何服务都可以使用 [`events::nats::Bus::publish_event`] 发布，用 [`events::Registry`] 订阅自己关心的类型。
 目标由业务正文表达，订阅者自行解释；总线不要求 player、session 或 RPC。
@@ -1007,7 +1007,7 @@ Core NATS 拒绝 Persistent，不静默降级；JetStream、离线加载和去�
 
 ### 游戏自定义网关处理
 
-以下是当前闭包捕获句柄的组装方式；共同事件上下文和 Layer 已接通，完整 gateway/session 生命周期及消息 Layer 属于 P4，不代表仅捕获 SessionManager 已满足完整目标。
+以下是当前闭包捕获句柄的组装方式；共同事件上下文和 gateway/session 处理链均已接通，动态传输主题与兴趣聚合留在 P5/P6，不代表仅捕获 SessionManager 已满足完整目标。
 
 [`events::Subscriber`] 将 Handler 与可选 group 组合为独立订阅组件；同一网关可安装多个组件，各自选择类型、消费组和处理行为。
 [`gateway::player::events::forward`] 提供基本的玩家转发处理者，游戏负责从强类型正文选择 Target，原始事件进入 session FIFO。
@@ -1076,7 +1076,7 @@ W3C traceparent / tracestate 使用标准 NATS headers；发布、网关接收�
 
 ## 统一 Gateway 与接入组件
 
-Player/Scene 共用 Gateway 外壳，P2 已将其后台任务监督与普通服务统一；完整业务扩展和消息 Layer 在 P4 迁移。
+Player/Scene 共用 Gateway 外壳，P2 已统一后台任务监督；P4 已接通作用域能力、扩展状态及业务处理链。
 
 [`gateway::Gateway`] 共用连接接收、容量控制、后台任务监督与退出流程。
 [`gateway::GatewayIngress`] 定义连接处理和清理钩子，当前
@@ -1109,13 +1109,13 @@ Player 接入组件要求独占 TCP 端点，业务组件要求 gRPC 端点；�
 初始化工厂使用 `register_factory` 按名称注册，同一工厂注册一次即可供多个服务使用。
 RPC 端点仍显式绑定服务名；业务调用方、路由与发现查询使用实际的 `service_name`。
 
-自定义组件通过 `Gateway::new` 获取 [`service::task::Handle`]，调用 `launch(name, task)` 提交受监督的后台任务。Gateway::tasks 返回同一种句柄，不另加网关上下文或预留包装。
+独立构造使用 `Gateway::new(identity, config, build)`；服务工厂中使用 `Gateway::new_in(config, &init, build)`。构造回调取得 [`gateway::Handle`]，可查询身份与能力；其 `tasks()` 取得共同任务句柄，提交受监督任务。`Gateway::tasks()` 仍直接返回任务句柄。
 [`gateway::GatewayConfig`] 单独限制连接数和后台任务总数，任务总数包含等待启动的任务。
 Player 保留 `[player_gateway]` 配置布局，`Config::gateway_limits` 从连接数和最大 session 数
 生成网关容量；会话、队列、所有权与协议参数仍由 Player 组件使用。
 
 普通连接错误只关闭该连接；连接 panic、后台任务错误或 panic 会使网关退出。
-退出时运行框架取消任务、调用组件 `stop`、收束后台任务，再调用异步 `finish`。
+完整组装后调用一次组件 `initialize`，再由外层驱动 `serve`。退出时取消任务、调用组件 `stop`、收束后台任务，再调用异步 `finish`。
 `stop` 必须可重复调用；组件收到取消后应停止新业务并完成清理，整体退出期限由外层 Application 或调用方控制。
 运行 future 被强制丢弃时会取消并中止受监督任务、调用 `stop`，无法等待异步 `finish`。
 
@@ -1123,6 +1123,55 @@ Player 保留 `[player_gateway]` 配置布局，`Config::gateway_limits` 从连�
 通过 `gateway.ingress().sessions()` 获取会话管理器；不再保留 `PlayerGateway` 兼容包装。
 玩家接入参数使用 `Config`，网关容量使用 `gateway::GatewayConfig`。
 Scene 目前仅预留模块，不套用 Player 的串行与所有权语义。
+
+## 网关与会话能力
+
+[`gateway::Handle`] 提供网关身份、阶段、连接/后台容量、取消、停止请求与完整结束等待。其阶段为 Prepared、Serving、Stopping、Stopped，Stopped 包含组件 finish；`tasks().wait_finished()` 只观察任务范围。
+[`gateway::player::SessionManager`] 提供 owner、gateway、snapshot、cancellation、request_stop 和 wait_finished；其 Open / Stopping / Stopped 记录玩家接入范围的准入与活动工作。停止管理器不强制关闭其他接入组件，网关 finish 的额外清理通过 gateway 句柄观察。
+[`gateway::player::SessionHandle`] 提供身份、snapshot、extensions、关闭、取消及 wait_finished。会话阶段区分 Opening、Online、Detached、Resuming、Handoff、Stopping、Stopped；快照包含连接代次、主题、请求/下行位置及 FIFO 容量。快照不是后续操作的许可，框架在实际准入或发布时重新检查。
+
+`SessionManager::extensions()` 返回当前管理器作用域的能力副本，包含 gateway 和 manager 句柄；工厂创建的服务生命周期句柄也随网关能力继承。
+将它交给 `Subscriber::with_extensions` 后，网关事件回调与消息中间件可查询相同作用域能力。会话执行再增加当前 SessionHandle 和会话工厂的能力；远程 RPC 不传播这些本地对象。
+
+## 玩家中间件与扩展状态
+
+[`gateway::player::Pipeline`] 使用同一 Tower 协议，分别安装 `with_admission_layer`、`with_request_layer`、`with_event_layer`、`with_timer_layer`、`with_downlink_layer`。
+准入与新下行使用 `Request<LogicalMessage>`；执行器使用 `Request<RequestInput>`、`Request<EventInput>`、`Request<TimerInput>`，不再使用无共同上下文的多参数调用。
+每个入口保留自己的结果类型。事件只返回 timer 效果，不生成客户端 Response；timer 也不自动下发客户端回应。
+
+```rust
+use std::sync::Arc;
+use tok::{core::LogicalMessage, gateway::player::{Executor, Pipeline, SessionHandle}, service::Request};
+use tok::rpc::tower::util::MapRequestLayer;
+fn pipeline(executor: Arc<dyn Executor>) -> Pipeline {
+    let downlink = MapRequestLayer::new(|mut request: Request<LogicalMessage>| {
+        // 此时尚未编号和编码；可查询当前会话并修改新消息正文。
+        if let Some(session) = request.context.extensions().get::<SessionHandle>() {
+            let _identity = session.identity();
+            request.input.body.push(1);
+        }
+        request
+    });
+    Pipeline::new(executor).with_downlink_layer(downlink)
+}
+```
+
+在 Gateway 构造回调内，通过 `Ingress::with_pipeline` 安装完整链；配置完成后再导出 manager/session 句柄。`with_gateway_rpc` 只声明绑定，实际注册在组件 initialize 时执行，避免链式配置顺序使 RPC 看见旧工厂；stop 按实例撤销注册。
+准入 Layer 不能绕过认证、当前绑定、来源、序号及容量校验；拒绝也会消耗已收到的请求 ID。执行 Layer 在原 session FIFO 内、所有权检查之后运行，不改变单玩家串行约束。
+准入预算从连接处理开始，执行预算从出队并完成所有权检查后开始；两者是独立阶段，FIFO 等待由容量约束。一个阶段内的 readiness、中间件与处理者共享同一期限，本地派生事件继续继承该期限。
+顶号、关闭和停机停止新业务，在途执行按原预算收束；会话取消信号可通过 SessionHandle 观察，本次执行上下文的取消令牌用于本次调用，不因优雅停止立即中断已开始的业务。
+准入及绑定回应使用连接代次的取消范围，同会话重连也会使旧绑定的异步准入失效。
+
+新下行中间件在异步串行门锁内执行；通道状态锁不跨 await，完成后重新校验连接/主题等条件，再分配序号、编码和缓存。`SessionHandle::notify` 改为显式 await；异步处理期间退出主题不会产生新缓存或序号。
+缓存补发直接重用原编码，不再运行 Layer。普通通知被中间件拒绝时返回错误，内部/会话关闭错误才自动关闭会话；回应发布失败则关闭会话，不重执原业务。
+
+[`gateway::player::session::extension::Factory`] 创建每个逻辑会话的线程安全能力，并提供 initialize、snapshot、validate、restore 和 on_change。网关与管理器作用域的数据由服务工厂初始化，分别通过 Init.extensions 和 Ingress::with_extensions 安装。
+扩展能力可包含游戏自定义句柄或状态；它们不授予任意改写内建状态的权限。业务内部借用 `&mut` 的本地执行仍使用统一事件注册表，不要求为了本地分发把状态放入共享锁。
+生命周期通知覆盖初始化、绑定/解除绑定、恢复开始/完成、交接准备/取消/提交、目标恢复、关闭和执行结束，携带相应连接代次。回调同步、短小且在通道锁外执行；查询到的是当前状态，可能晚于通知描述的代次。回调 panic 会记录并关闭会话，不回滚内建迁移。
+
+通过 `Ingress::with_session_extension` 显式安装状态及迁移适配。源端冻结并排空前序执行后采集扩展快照；目标端在提交前检查格式名称和 validate，提交后用新身份恢复。格式不匹配、校验失败或快照超限都不转移所有权；提交后恢复失败会关闭接管并尽力释放目标所有权，不重开旧端。
+未安装自定义工厂时只接受显式空状态格式，不静默丢弃其他格式或缺失的扩展快照。交接快照仍为未发布的版本 1，客户端 Frame 仍为版本 3，不承诺开发中间版本混跑。
+完整可运行实现见 demo 的 `gateway/middleware.rs`：同一个 Observe Layer 安装到五个入口，会话统计状态通过显式适配跨网关恢复。`just client-smoke nats-smoke handoff-smoke` 覆盖真实使用链路。
 
 ## 组件入口与当前边界
 

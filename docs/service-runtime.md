@@ -1,6 +1,6 @@
 # 服务执行、事件与网关扩展设计
 
-本文细化已确认的服务执行、上下文、中间件、事件和网关扩展契约。P1 基线为 `f54b545`，文档基线为 `2552274`；P2 已下沉公共工厂与生命周期，P3 已接通 RPC/事件/timer 共同执行链；gateway 扩展及其他目标仍待分批迁移。总体定位见[总体设计](design.md)，现状见[实现状态](status.md)，批次顺序与验收统一由[实施计划](implementation-plan.md)维护。
+本文细化已确认的服务执行、上下文、中间件、事件和网关扩展契约。P1 基线为 `f54b545`，文档基线为 `2552274`；P2 已下沉公共工厂与生命周期，P3 已接通 RPC/事件/timer 共同执行链；P4 已迁移 gateway/session 能力、状态工厂及消息链；topic 路由和动态兴趣仍待 P5/P6。总体定位见[总体设计](design.md)，现状见[实现状态](status.md)，批次顺序与验收统一由[实施计划](implementation-plan.md)维护。
 
 ## 现状与缺口
 
@@ -8,8 +8,8 @@
 | --- | --- | --- |
 | 网关订阅 | 组件按固定事件类型创建订阅，可选 group | 支持固定主题、按会话需求动态聚合主题，以及可信策略自动加入区服等主题 |
 | topic | 本地会话成员集合、反向索引、交接恢复 | 同时成为事件路由维度；本地成员与传输兴趣有明确的绑定关系 |
-| 扩展上下文 | task::Supervisor 监督任务，SessionManager / SessionHandle 提供部分操作 | 补齐身份、状态快照、停止与结束等待、受监督任务和生命周期扩展点 |
-| 消息中间件 | RPC、事件、RPC timer 使用共同 Request / Tower 链，网关仍可替换 Executor | 提供带网关和会话上下文的消息 Layer 组装入口，覆盖业务请求、内部事件、timer 与新下行消息 |
+| 扩展上下文 | gateway::Handle、SessionManager / SessionHandle 提供身份、快照、取消、停止和结束等待，工厂管理扩展状态 | 动态兴趣使用这些生命周期能力，完整组装在 P7 收敛 |
+| 消息中间件 | Pipeline 将准入、请求/事件/timer 执行及新下行接入共同 Request / Tower 链，注入三层能力 | 保留各入口的协议、FIFO 和结果边界 |
 | 事件接口 | 本地 dispatch、远程 receive 共用 Registry、Envelope、上下文及类型化处理链 | 统一事件封装、处理上下文、注册表和订阅描述，传输与编解码作为适配 |
 
 不把 topic、group、player_id 混为同一维度；不默认按玩家创建 NATS 订阅，不要求所有网关订阅环境中的全部事件。
@@ -84,7 +84,7 @@ RPC 调用产生对应回应，事件产生当前 handler 的执行结果或允�
 
 跨 await 的本地借用、同步 ready 适配、同一 Layer 对不同结果类型的使用、原业务错误及顺序首错已由原型测试验证。借用调用不能进入要求静态任务的 Buffer/spawn；owned 输入可在满足 Send 条件时提交运行时。每次调用克隆内层 Service，限额必须由相应 Layer 在克隆间共享，不能把外层立即 ready 误读为已有容量。
 
-P1 只验证执行核心；P2 已提供下述工厂与生命周期设施。RPC/事件处理注册已在 P3 迁移，gateway 业务入口及完整扩展待 P4，动态主题仍待 P5/P6。
+P1 只验证执行核心；P2 已提供下述工厂与生命周期设施。RPC/事件处理注册已在 P3 迁移，P4 已迁移 gateway 业务入口及扩展，动态主题仍待 P5/P6。
 
 ## P2 公共构建与生命周期落点
 
@@ -102,7 +102,7 @@ Application 通过 `tok::application::Binding` 扩展注入监听地址、发布
 
 Supervisor::child 建立独立容量的子范围，父取消向子传播，父结束等待包含子范围回收；子组件负责拥有和驱动自己的监督者。Supervisor::track 跟踪另有容量/调度策略的工作。服务 Running::run 收束主任务清理后关闭任务范围，完成语义包含组件清理及子范围；工厂不得把子范围脱管到服务之外。
 
-Gateway::new_in 关联所属服务，后台任务使用同一通用 Supervisor；连接仍由专用循环拥有，通过 track 纳入结束等待。Gateway::tasks 返回后台与连接任务范围句柄，其结束不等于 ingress finish 已完成。完整 gateway 服务退出等待所属 lifecycle::Handle 或 serve future，finish 本身继续属于服务主任务。独立 serve 的整体期限由调用方提供；Application 运行时由应用期限控制。session 状态机、业务消息 Layer 和完整扩展生命周期仍属 P4。
+Gateway::new_in 接收 Init，继承所属服务身份、生命周期句柄和扩展，后台任务复用通用 Supervisor；连接仍由专用循环拥有，通过 track 纳入结束等待。Gateway::tasks 返回任务范围句柄，其结束不等于 ingress.finish 已完成。Gateway::handle 返回完整网关范围句柄，wait_finished 包含连接、后台任务及 ingress.finish；所属 lifecycle::Handle 还包含服务级清理。独立 serve 的整体期限由调用方提供；Application 运行时由应用期限控制。未启动或强制 Drop 只执行同步停止，不承诺异步清理。
 
 
 ## topic、事件类型与 group
@@ -196,6 +196,14 @@ Envelope / Message / EventEnvelope 增加一致的路由主题信息，接收时
 Layer 可以拒绝调用、调用一次下游并观察结果，不默认提供自动重试。异步就绪等待与执行计入对应阶段预算，取消和错误沿原入口收束。不得在准入层等待自身入队任务，或在同一 session 执行链内等待再次排入自身队列的任务。
 
 认证仍通过 Authenticator 等专门入口扩展；本批业务消息 Layer 不替代登录、ACK、恢复凭证、交接等协议状态机。若后续需要改写控制协议，单独提出，不开放任意客户端帧转发到内部接口的通用中间件。
+
+### P4 当前扩展实现
+
+Gateway 构造闭包完成 Pipeline、状态工厂和自定义 RPC 等配置后，才调用 Ingress::initialize 注册最终 manager。不要在配置完成前导出 manager 句柄。manager 扩展与工厂创建的每会话扩展按作用域合并，执行上下文再注入实际三层句柄。能力是 Send + Sync 的共享句柄；本地 Registry 仍支持借用业务状态，静态安装的网关 Pipeline 使用拥有所有权的类型化输入，不暴露 SessionState 的可变借用。
+
+session::extension::Factory 的 initialize / snapshot / validate / restore 为同步有界步骤；on_change 在框架锁外观察初始化、绑定、恢复、交接和关闭。回调应短小，不阻塞、不等待自身队列；panic 会关闭当前会话。通知中的连接代次标识发生变化的绑定，查询时可能已进入更新阶段。manager.wait_finished 等待已接纳的协调操作与会话任务，网关完整清理另由 gateway::Handle 等待。
+
+准入、FIFO 执行、新下行各有独立阶段预算，阶段内的就绪与 Layer 等待共享预算；队列等待受容量限制。停止阻止新业务，已开始的执行按原预算收束，不因 session 停止立即中断。异步准入继承连接取消令牌，重连/顶号使旧提交失效；异步新下行最终再次验证连接、主题和状态。普通通知拒绝返回错误，回应无法发布时关闭会话，均不重新执行业务。
 
 ## 统一事件接口
 

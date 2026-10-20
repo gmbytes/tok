@@ -40,6 +40,12 @@ pub(super) struct Binding {
     pub(super) cancellation: CancellationToken,
 }
 
+impl Binding {
+    pub(super) fn generation(&self) -> u64 {
+        self.generation
+    }
+}
+
 struct AttachedConnection {
     binding: Binding,
     outbound_sender: OutboundSender,
@@ -48,6 +54,7 @@ struct AttachedConnection {
 
 // 需要在同一锁下协调的通道可变状态，不包含固定配置及自身支持并发访问的同步工具。
 struct ChannelState {
+    changes: Vec<super::extension::Change>,
     topics: BTreeSet<String>,
     handoff: bool,
     logged_in: bool,
@@ -68,6 +75,28 @@ pub(super) struct Channel {
     binding_changed: Notify,
     state: Mutex<ChannelState>,
     topic_membership: OnceLock<TopicMembership>,
+    session: OnceLock<std::sync::Weak<SessionState>>,
+}
+
+// 后声明的状态锁先释放，再由此守卫取出变化并通知；不在锁内执行游戏回调。
+struct Observations<'a>(&'a Channel);
+impl Drop for Observations<'_> {
+    fn drop(&mut self) {
+        let changes = match self.0.state.lock() {
+            Ok(mut state) => std::mem::take(&mut state.changes),
+            Err(_) => return,
+        };
+        if let Some(state) = self.0.session.get().and_then(std::sync::Weak::upgrade) {
+            let handle = super::SessionHandle(state);
+            for change in changes {
+                if change == super::extension::Change::Closing {
+                    handle.closing();
+                } else {
+                    handle.changed(change);
+                }
+            }
+        }
+    }
 }
 
 impl Channel {
@@ -77,6 +106,9 @@ impl Channel {
         session: &Arc<SessionState>,
     ) -> Result<()> {
         let state = self.state.lock().map_err(|_| ErrorCode::Internal)?;
+        self.session
+            .set(Arc::downgrade(session))
+            .map_err(|_| ErrorCode::Internal)?;
         let topic_membership = TopicMembership::new(index, session);
         self.topic_membership
             .set(topic_membership)
@@ -89,6 +121,40 @@ impl Channel {
         Ok(())
     }
 
+    pub(super) fn status(&self) -> Result<super::Snapshot> {
+        let state = self.state.lock().map_err(|_| ErrorCode::Internal)?;
+        let phase = if state.closed || self.session_cancel.is_cancelled() {
+            super::Phase::Stopping
+        } else if state.handoff {
+            super::Phase::Handoff
+        } else if !state.logged_in {
+            super::Phase::Opening
+        } else if state
+            .connection
+            .as_ref()
+            .is_some_and(|connection| connection.replaying)
+        {
+            super::Phase::Resuming
+        } else if state
+            .connection
+            .as_ref()
+            .is_some_and(|connection| !connection.binding.cancellation.is_cancelled())
+        {
+            super::Phase::Online
+        } else {
+            super::Phase::Detached
+        };
+        Ok(super::Snapshot {
+            phase,
+            connection_generation: state.generation,
+            connected: state.connection.is_some(),
+            topics: state.topics.iter().cloned().collect(),
+            last_request_id: state.last_request_id,
+            last_server_seq: state.replay_cache.last_published_seq(),
+            queue_len: 0,
+            queue_capacity: 0,
+        })
+    }
     pub(super) fn max_event_bytes(&self) -> usize {
         self.max_frame_size.min(1_048_576)
     }
@@ -157,28 +223,26 @@ impl Channel {
         Self::ensure_event_admissible(&state, topic)?;
         enqueue()
     }
-    pub(super) fn notify_event(
-        &self,
-        message_id: u32,
-        body: &[u8],
-        topic: Option<&str>,
-    ) -> Result<()> {
+    pub(super) fn check_event(&self, topic: Option<&str>) -> Result<()> {
+        let state = self.state.lock().map_err(|_| ErrorCode::Internal)?;
+        Self::ensure_event_admissible(&state, topic)
+    }
+    pub(super) fn publish_event(&self, message: LogicalMessage, topic: Option<&str>) -> Result<()> {
+        let _observations = Observations(self);
         let mut state = self.state.lock().map_err(|_| ErrorCode::Internal)?;
         Self::ensure_event_admissible(&state, topic)?;
-        // 成员及在线状态已在同一锁下确认，拒绝目标不分配通知正文。
-        self.publish_locked(
-            &mut state,
-            None,
-            LogicalMessage {
-                kind: MessageKind::Notify,
-                message_id,
-                request_id: 0,
-                server_seq: None,
-                error_code: 0,
-                body: body.to_vec(),
-            },
-            0,
-        )
+        self.publish_locked(&mut state, None, message, 0)
+    }
+    pub(super) fn admit_bound<T>(
+        &self,
+        binding: &Binding,
+        enqueue: impl FnOnce() -> Result<T>,
+    ) -> Result<T> {
+        let state = self.state.lock().map_err(|_| ErrorCode::Internal)?;
+        if state.handoff || Self::require_current_binding(&state, binding)?.replaying {
+            return Err(ErrorCode::InvalidState.into());
+        }
+        enqueue()
     }
     pub(super) fn admit_internal<T>(&self, enqueue: impl FnOnce() -> Result<T>) -> Result<T> {
         let state = self.state.lock().map_err(|_| ErrorCode::Internal)?;
@@ -191,6 +255,7 @@ impl Channel {
         enqueue()
     }
     pub(super) fn begin_handoff(&self) -> Result<()> {
+        let _observations = Observations(self);
         let mut state = self.state.lock().map_err(|_| ErrorCode::Internal)?;
         if state.closed
             || !state.logged_in
@@ -308,7 +373,9 @@ impl Channel {
             session_cancel,
             binding_changed: Notify::new(),
             topic_membership: OnceLock::new(),
+            session: OnceLock::new(),
             state: Mutex::new(ChannelState {
+                changes: Vec::new(),
                 topics: BTreeSet::new(),
                 handoff: false,
                 logged_in: false,
@@ -345,6 +412,7 @@ impl Channel {
     }
 
     pub(super) fn complete_login(&self, login: Frame) -> Result<Binding> {
+        let _observations = Observations(self);
         let mut state = self.state.lock().map_err(|_| ErrorCode::Internal)?;
         if state.closed || state.logged_in {
             return Err(ErrorCode::SessionClosed.into());
@@ -360,6 +428,9 @@ impl Channel {
         let binding = connection.binding.clone();
         // 完成的是服务端登录回应入队；不表示 socket 已写完或客户端已确认。
         state.logged_in = true;
+        state.changes.push(super::extension::Change::Bound {
+            generation: binding.generation(),
+        });
         Ok(binding)
     }
 
@@ -413,6 +484,7 @@ impl Channel {
             .last_request_id)
     }
 
+    #[cfg(test)]
     pub(super) fn publish(&self, message: LogicalMessage, request_message_id: u32) -> Result<()> {
         self.publish_from(None, message, request_message_id)
     }
@@ -424,8 +496,36 @@ impl Channel {
         message: LogicalMessage,
         request_message_id: u32,
     ) -> Result<()> {
+        let _observations = Observations(self);
         let mut state = self.state.lock().map_err(|_| ErrorCode::Internal)?;
         self.publish_locked(&mut state, binding, message, request_message_id)
+    }
+    pub(super) fn check_publication(
+        &self,
+        binding: Option<&Binding>,
+        kind: MessageKind,
+    ) -> Result<()> {
+        let state = self.state.lock().map_err(|_| ErrorCode::Internal)?;
+        Self::ensure_publishable(&state, binding, kind)
+    }
+    fn ensure_publishable(
+        state: &ChannelState,
+        binding: Option<&Binding>,
+        kind: MessageKind,
+    ) -> Result<()> {
+        if state.handoff && kind == MessageKind::Notify {
+            return Err(ErrorCode::InvalidState.into());
+        }
+        if let Some(binding) = binding {
+            Self::require_current_binding(state, binding)?;
+        }
+        if state.closed {
+            return Err(ErrorCode::SessionClosed.into());
+        }
+        if !state.logged_in {
+            return Err(ErrorCode::InvalidState.into());
+        }
+        Ok(())
     }
     fn publish_locked(
         &self,
@@ -434,18 +534,9 @@ impl Channel {
         mut message: LogicalMessage,
         request_message_id: u32,
     ) -> Result<()> {
-        if state.handoff && message.kind == MessageKind::Notify {
-            return Err(ErrorCode::InvalidState.into());
-        }
-        if let Some(binding) = binding {
-            Self::require_current_binding(state, binding)?;
+        Self::ensure_publishable(state, binding, message.kind)?;
+        if binding.is_some() {
             state.last_request_id = state.last_request_id.max(message.request_id);
-        }
-        if state.closed {
-            return Err(ErrorCode::SessionClosed.into());
-        }
-        if !state.logged_in {
-            return Err(ErrorCode::InvalidState.into());
         }
         let seq = state.replay_cache.next_seq()?;
         message.server_seq = Some(seq);
@@ -498,6 +589,7 @@ impl Channel {
         ack: u64,
         mut response: protocol::ResumeResponse,
     ) -> Result<Binding> {
+        let _observations = Observations(self);
         let mut state = self.state.lock().map_err(|_| ErrorCode::Internal)?;
         if state.closed
             || state.handoff
@@ -525,6 +617,9 @@ impl Channel {
             .ok_or(ErrorCode::SessionClosed)?;
         state.replay_cache.acknowledge(ack)?;
         if let Some(old) = state.connection.take() {
+            state.changes.push(super::extension::Change::Detached {
+                generation: old.binding.generation(),
+            });
             old.binding.cancellation.cancel();
         }
         let binding = Binding {
@@ -533,6 +628,9 @@ impl Channel {
         };
         state.generation = generation;
         state.grace_deadline = None;
+        state.changes.push(super::extension::Change::Resuming {
+            generation: binding.generation(),
+        });
         state.connection = Some(AttachedConnection {
             binding: binding.clone(),
             outbound_sender: outbound_sender.clone(),
@@ -574,6 +672,9 @@ impl Channel {
 
     fn detach_locked(&self, state: &mut ChannelState) {
         if let Some(connection) = state.connection.take() {
+            state.changes.push(super::extension::Change::Detached {
+                generation: connection.binding.generation(),
+            });
             connection.binding.cancellation.cancel();
             state.grace_deadline = Some(Instant::now() + self.disconnect_grace);
             if self.disconnect_grace.is_zero() {
@@ -583,16 +684,20 @@ impl Channel {
         }
     }
 
-    pub(super) fn detach(&self, binding: &Binding) {
+    pub(super) fn detach(&self, binding: &Binding) -> bool {
+        let _observations = Observations(self);
         if let Ok(mut state) = self.state.lock()
             && Self::require_current_binding(&state, binding).is_ok()
         {
             self.detach_locked(&mut state);
+            return true;
         }
+        false
     }
 
     // 协议错误终止整个逻辑会话；旧连接不能通过此入口关闭已重绑定的会话。
     pub(super) fn close_bound_session(&self, binding: &Binding) {
+        let _observations = Observations(self);
         if let Ok(mut state) = self.state.lock()
             && Self::require_current_binding(&state, binding).is_ok()
         {
@@ -601,12 +706,18 @@ impl Channel {
     }
 
     fn close_locked(&self, state: &mut ChannelState) {
+        if !state.closed {
+            state.changes.push(super::extension::Change::Closing);
+        }
         state.closed = true;
         if let Some(topic_membership) = self.topic_membership.get() {
             topic_membership.clear(&state.topics);
         }
         state.topics.clear();
         if let Some(connection) = state.connection.take() {
+            state.changes.push(super::extension::Change::Detached {
+                generation: connection.binding.generation(),
+            });
             connection.binding.cancellation.cancel();
         }
         state.replay_cache.clear();
@@ -615,12 +726,14 @@ impl Channel {
     }
 
     pub(super) fn close(&self) {
+        let _observations = Observations(self);
         if let Ok(mut state) = self.state.lock() {
             self.close_locked(&mut state);
         }
     }
 
     pub(super) async fn run_grace_timer(&self) {
+        let _observations = Observations(self);
         loop {
             let binding_changed = self.binding_changed.notified();
             let deadline = match self.state.lock() {
@@ -671,7 +784,7 @@ impl ReplayPlan {
             let cursor = batch.through_seq;
             batch = self.channel.next_replay_batch(&self.binding, cursor)?;
             if batch.frames.is_empty() {
-                return codec
+                let result = codec
                     .write(
                         writer,
                         &wrap_frame(Content::Recovered(protocol::RecoveryComplete {
@@ -679,6 +792,19 @@ impl ReplayPlan {
                         })),
                     )
                     .await;
+                if result.is_ok()
+                    && !self.binding.cancellation.is_cancelled()
+                    && let Some(state) = self
+                        .channel
+                        .session
+                        .get()
+                        .and_then(std::sync::Weak::upgrade)
+                {
+                    super::SessionHandle(state).changed(super::extension::Change::Resumed {
+                        generation: self.binding.generation(),
+                    });
+                }
+                return result;
             }
         }
     }

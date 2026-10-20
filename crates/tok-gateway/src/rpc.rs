@@ -41,6 +41,19 @@ impl GatewayRpcService {
         player_managers.insert(name, manager);
         Ok(())
     }
+    pub(crate) fn unregister_player(&self, manager: &SessionManager) -> Result<()> {
+        let mut managers = self
+            .player_managers
+            .lock()
+            .map_err(|_| ErrorCode::Internal)?;
+        if managers
+            .get(manager.service_name())
+            .is_some_and(|current| current.same_instance(manager))
+        {
+            managers.remove(manager.service_name());
+        }
+        Ok(())
+    }
     /// 生成可由 RpcEndpoint 显式绑定的 tonic 服务。
     pub fn into_rpc(self) -> proto::gateway_rpc_server::GatewayRpcServer<Self> {
         let limit = self.max_handoff_bytes + 65536;

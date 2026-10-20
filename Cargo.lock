@@ -2039,6 +2039,7 @@ dependencies = [
  "tok-service",
  "tokio",
  "tokio-util",
+ "tower",
  "tracing",
  "tracing-opentelemetry",
  "uuid",

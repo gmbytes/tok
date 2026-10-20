@@ -43,6 +43,13 @@ struct Registry {
 /// 持有者不能直接创建未认证的 session；不同玩家的登录协调锁互相独立。
 #[derive(Clone)]
 pub struct SessionManager {
+    pub(super) inner: Arc<ManagerState>,
+}
+
+#[derive(Clone)]
+pub(super) struct ManagerState {
+    pub(super) extension: Arc<dyn super::extension::Factory>,
+    pub(super) activities: Arc<super::state::Activities>,
     pub(super) handoffs: Arc<handoff::Handoffs>,
     pub(super) gateway_directory: Option<Arc<dyn tok_core::ServiceDirectory>>,
     registry: Arc<Registry>,
@@ -50,8 +57,10 @@ pub struct SessionManager {
     pub(super) config: Arc<Config>,
     pub(super) owner: SessionOwner,
     pub(super) ownership_store: Arc<dyn OwnershipStore>,
-    pub(super) executor: Arc<dyn Executor>,
+    pub(super) pipeline: Arc<crate::player::Pipeline>,
+    pub(super) extensions: tok_core::execution::Extensions,
     pub(super) tasks: task::Handle,
+    pub(super) gateway: crate::Handle,
     pub(super) shutdown: CancellationToken,
     resume_token_codec: Arc<dyn tok_core::credentials::ResumeTokenCodec>,
 }
@@ -62,30 +71,36 @@ impl SessionManager {
         owner: SessionOwner,
         ownership_store: Arc<dyn OwnershipStore>,
         executor: Arc<dyn Executor>,
-        tasks: task::Handle,
+        gateway: crate::Handle,
         shutdown: CancellationToken,
     ) -> Result<Self> {
         Ok(Self {
-            handoffs: Arc::new(handoff::Handoffs::new(config.max_handoffs)),
-            gateway_directory: None,
-            resume_token_codec: Arc::new(
-                SignedResumeTokens::ephemeral().map_err(|_| ErrorCode::Internal)?,
-            ),
-            subscriptions: Arc::new(subscriptions::Index::default()),
-            registry: Arc::new(Registry {
-                slots: Mutex::new(BTreeMap::new()),
-                session_counter: AtomicU64::new(0),
-                process_instance_id: SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_nanos(),
+            inner: Arc::new(ManagerState {
+                extension: Arc::new(super::extension::Empty),
+                activities: Arc::default(),
+                handoffs: Arc::new(handoff::Handoffs::new(config.max_handoffs)),
+                gateway_directory: None,
+                resume_token_codec: Arc::new(
+                    SignedResumeTokens::ephemeral().map_err(|_| ErrorCode::Internal)?,
+                ),
+                subscriptions: Arc::new(subscriptions::Index::default()),
+                registry: Arc::new(Registry {
+                    slots: Mutex::new(BTreeMap::new()),
+                    session_counter: AtomicU64::new(0),
+                    process_instance_id: SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_nanos(),
+                }),
+                config,
+                owner,
+                ownership_store,
+                pipeline: Arc::new(crate::player::Pipeline::new(executor)),
+                extensions: gateway.extensions().clone(),
+                tasks: gateway.tasks(),
+                gateway,
+                shutdown,
             }),
-            config,
-            owner,
-            ownership_store,
-            executor,
-            tasks,
-            shutdown,
         })
     }
 
@@ -97,7 +112,8 @@ impl SessionManager {
     }
 
     fn verify_resume_token(&self, token: &str) -> Result<tok_core::credentials::ResumeClaims> {
-        self.resume_token_codec
+        self.inner
+            .resume_token_codec
             .verify(token)
             .map_err(|_| ErrorCode::Internal)?
             .ok_or(ErrorCode::AuthenticationFailed.into())
@@ -108,7 +124,7 @@ impl SessionManager {
         mut self,
         codec: Arc<dyn tok_core::credentials::ResumeTokenCodec>,
     ) -> Self {
-        self.resume_token_codec = codec;
+        Arc::make_mut(&mut self.inner).resume_token_codec = codec;
         self
     }
 
@@ -117,12 +133,106 @@ impl SessionManager {
         mut self,
         directory: Arc<dyn tok_core::ServiceDirectory>,
     ) -> Self {
-        self.gateway_directory = Some(directory);
+        Arc::make_mut(&mut self.inner).gateway_directory = Some(directory);
         self
     }
 
+    pub(super) fn activity(&self) -> Result<super::state::ActivityGuard> {
+        let guard = self.inner.activities.guard();
+        if self.inner.shutdown.is_cancelled() {
+            return Err(ErrorCode::SessionClosed.into());
+        }
+        Ok(guard)
+    }
+    /// 玩家接入阶段及容量快照，不替代登录或业务准入检查。
+    pub fn snapshot(&self) -> Result<super::ManagerSnapshot> {
+        let sessions = self.sessions()?;
+        Ok(super::ManagerSnapshot {
+            owner: self.inner.owner.clone(),
+            phase: if !self.inner.shutdown.is_cancelled() {
+                super::ManagerPhase::Open
+            } else if self.inner.activities.count() == 0 {
+                super::ManagerPhase::Stopped
+            } else {
+                super::ManagerPhase::Stopping
+            },
+            sessions: sessions.len(),
+            max_sessions: self.inner.config.max_sessions,
+            queue_capacity: self.inner.config.queue_capacity,
+        })
+    }
+    /// 等待停止以及已准入的协调工作和会话 future 释放，不得在自身会话中等待。
+    /// 网关 finish 的额外清理由 gateway().wait_finished() 观察。
+    pub async fn wait_finished(&self) {
+        self.inner.shutdown.cancelled().await;
+        self.inner.activities.wait().await;
+    }
+    pub(in crate::player) fn with_session_extension(
+        mut self,
+        extension: Arc<dyn super::extension::Factory>,
+    ) -> Result<Self> {
+        tok_events::validate_name(extension.kind()).map_err(|_| ErrorCode::InvalidRequest)?;
+        Arc::make_mut(&mut self.inner).extension = extension;
+        Ok(self)
+    }
+    pub(super) fn extension_context(
+        &self,
+        operation: &str,
+    ) -> Result<tok_core::execution::Context> {
+        let mut context = tok_core::execution::Context::new(
+            self.inner.gateway.identity().clone(),
+            operation,
+            tok_core::execution::Source::Internal,
+            Duration::from_millis(self.inner.config.rpc_timeout_ms),
+            self.inner.shutdown.child_token(),
+        )
+        .map_err(|_| ErrorCode::Internal)?;
+        context.extensions_mut().extend(&self.inner.extensions);
+        context.extensions_mut().insert(self.inner.gateway.clone());
+        context.extensions_mut().insert(self.clone());
+        Ok(context)
+    }
+    pub(in crate::player) fn with_pipeline(mut self, pipeline: crate::player::Pipeline) -> Self {
+        Arc::make_mut(&mut self.inner).pipeline = Arc::new(pipeline);
+        self
+    }
+    /// 玩家管理器作用域的能力，与消息及事件的执行上下文共用。
+    pub fn extensions(&self) -> tok_core::execution::Extensions {
+        let mut extensions = self.inner.extensions.clone();
+        extensions.insert(self.inner.gateway.clone());
+        extensions.insert(self.clone());
+        extensions
+    }
+    pub(in crate::player) fn with_extensions(
+        mut self,
+        extensions: tok_core::execution::Extensions,
+    ) -> Self {
+        Arc::make_mut(&mut self.inner)
+            .extensions
+            .extend(&extensions);
+        self
+    }
+    /// 当前玩家接入所属网关，提供身份、容量与完整退出观察。
+    pub fn gateway(&self) -> crate::Handle {
+        self.inner.gateway.clone()
+    }
+    /// 当前可信所有者身份，不等于 player 业务服务的 RPC 地址。
+    pub fn owner(&self) -> &SessionOwner {
+        &self.inner.owner
+    }
+    /// 请求停止所有玩家会话及新登录，不等待清理。
+    pub fn request_stop(&self) {
+        self.inner.shutdown.cancel();
+    }
+    /// 玩家接入范围的取消信号。
+    pub fn cancellation(&self) -> CancellationToken {
+        self.inner.shutdown.clone()
+    }
+    pub(crate) fn same_instance(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.inner, &other.inner)
+    }
     pub(crate) fn service_name(&self) -> &str {
-        &self.owner.service_name
+        &self.inner.owner.service_name
     }
 
     // 凭证刷新复用已认证连接，不要求旧 token 仍有效；与顶号和交接串行协调。
@@ -131,8 +241,10 @@ impl SessionManager {
         bound: &BoundSession,
         request_id: u64,
     ) -> Result<()> {
+        let _activity = self.activity()?;
         let state = &bound.session.0;
         let slot = self
+            .inner
             .registry
             .slots
             .lock()
@@ -142,7 +254,7 @@ impl SessionManager {
             .ok_or(ErrorCode::SessionClosed)?;
         let _gate = tokio::select! {
             biased;
-            _ = self.shutdown.cancelled() => return Err(ErrorCode::SessionClosed.into()),
+            _ = self.inner.shutdown.cancelled() => return Err(ErrorCode::SessionClosed.into()),
             _ = bound.binding.cancellation.cancelled() => return Err(ErrorCode::SessionReplaced.into()),
             gate = slot.transition_gate.lock() => gate,
         };
@@ -157,9 +269,9 @@ impl SessionManager {
         }
         if !renew_ownership(
             state,
-            self.ownership_store.as_ref(),
-            Duration::from_millis(self.config.rpc_timeout_ms),
-            Duration::from_millis(self.config.ownership_ttl_ms),
+            self.inner.ownership_store.as_ref(),
+            Duration::from_millis(self.inner.config.rpc_timeout_ms),
+            Duration::from_millis(self.inner.config.ownership_ttl_ms),
         )
         .await
         {
@@ -170,10 +282,11 @@ impl SessionManager {
                 return Err(ErrorCode::SessionClosed.into());
             }
             let token = self
+                .inner
                 .resume_token_codec
                 .issue(
                     &state.ownership.identity,
-                    Duration::from_millis(self.config.resume_token_ttl_ms),
+                    Duration::from_millis(self.inner.config.resume_token_ttl_ms),
                 )
                 .map_err(|_| ErrorCode::Internal)?;
             Ok(crate::protocol::Frame {
@@ -183,7 +296,7 @@ impl SessionManager {
                         request_id,
                         error_code: 0,
                         resume_token: token,
-                        resume_token_ttl_ms: self.config.resume_token_ttl_ms,
+                        resume_token_ttl_ms: self.inner.config.resume_token_ttl_ms,
                     },
                 )),
             })
@@ -197,9 +310,11 @@ impl SessionManager {
         request_id: u64,
         sender: OutboundSender,
     ) -> Result<BoundSession> {
+        let _activity = self.activity()?;
         let claims = self.verify_resume_token(token)?;
-        if self.config.handoff_enabled {
+        if self.inner.config.handoff_enabled {
             let ownership = self
+                .inner
                 .ownership_store
                 .lookup(&claims.player_id)
                 .await
@@ -208,11 +323,12 @@ impl SessionManager {
             if ownership.identity.session_id != claims.session_id {
                 return Err(ErrorCode::ResumeUnavailable.into());
             }
-            if ownership.owner != self.owner {
+            if ownership.owner != self.inner.owner {
                 return handoff::receive(self, token, ownership, ack_seq, request_id, sender).await;
             }
         }
         let slot = self
+            .inner
             .registry
             .slots
             .lock()
@@ -220,7 +336,7 @@ impl SessionManager {
             .get(&claims.player_id)
             .cloned()
             .ok_or(ErrorCode::ResumeUnavailable)?;
-        let _gate = tokio::select! { biased; _ = self.shutdown.cancelled() => return Err(ErrorCode::SessionClosed.into()), gate = slot.transition_gate.lock() => gate };
+        let _gate = tokio::select! { biased; _ = self.inner.shutdown.cancelled() => return Err(ErrorCode::SessionClosed.into()), gate = slot.transition_gate.lock() => gate };
         let session_state = slot
             .current_session
             .lock()
@@ -234,9 +350,9 @@ impl SessionManager {
         }
         if !renew_ownership(
             &session_state,
-            self.ownership_store.as_ref(),
-            Duration::from_millis(self.config.rpc_timeout_ms),
-            Duration::from_millis(self.config.ownership_ttl_ms),
+            self.inner.ownership_store.as_ref(),
+            Duration::from_millis(self.inner.config.rpc_timeout_ms),
+            Duration::from_millis(self.inner.config.ownership_ttl_ms),
         )
         .await
         {
@@ -263,6 +379,7 @@ impl SessionManager {
     /// 查询活动 session，仅返回尚未失效的有界提交入口。
     pub fn session(&self, player_id: &str) -> Result<Option<SessionHandle>> {
         let slot = self
+            .inner
             .registry
             .slots
             .lock()
@@ -287,6 +404,7 @@ impl SessionManager {
     pub fn sessions(&self) -> Result<Vec<SessionHandle>> {
         // 目录锁只用于复制 slot 引用，不在持有目录锁时等待各个 slot。
         let slots: Vec<_> = self
+            .inner
             .registry
             .slots
             .lock()
@@ -311,6 +429,7 @@ impl SessionManager {
     }
     pub(super) fn slot(&self, player_id: &str) -> Result<Arc<Slot>> {
         let mut slots = self
+            .inner
             .registry
             .slots
             .lock()
@@ -330,7 +449,7 @@ impl SessionManager {
                     })
                     .unwrap_or(true)
         });
-        if slots.len() >= self.config.max_sessions {
+        if slots.len() >= self.inner.config.max_sessions {
             return Err(ErrorCode::CapacityExceeded.into());
         }
         let slot = Arc::new(Slot::default());
@@ -344,11 +463,12 @@ impl SessionManager {
         sender: OutboundSender,
         previous: Option<tok_core::credentials::ResumeClaims>,
     ) -> Result<SessionHandle> {
-        if player_id.trim().is_empty() || self.shutdown.is_cancelled() {
+        let _activity = self.activity()?;
+        if player_id.trim().is_empty() || self.inner.shutdown.is_cancelled() {
             return Err(ErrorCode::SessionClosed.into());
         }
         let slot = self.slot(&player_id)?;
-        let _gate = tokio::select! { biased; _ = self.shutdown.cancelled() => return Err(ErrorCode::SessionClosed.into()), gate = slot.transition_gate.lock() => gate };
+        let _gate = tokio::select! { biased; _ = self.inner.shutdown.cancelled() => return Err(ErrorCode::SessionClosed.into()), gate = slot.transition_gate.lock() => gate };
         let old = slot
             .current_session
             .lock()
@@ -364,10 +484,10 @@ impl SessionManager {
         if let Some(old) = &old {
             old.cancel.cancel();
             old.channel.close();
-            tokio::select! { biased; _ = self.shutdown.cancelled() => return Err(ErrorCode::SessionClosed.into()), _ = old.completion.wait() => {} }
+            tokio::select! { biased; _ = self.inner.shutdown.cancelled() => return Err(ErrorCode::SessionClosed.into()), _ = old.completion.wait() => {} }
         }
-        let timeout = Duration::from_millis(self.config.rpc_timeout_ms);
-        let existing = tokio::time::timeout(timeout, self.ownership_store.lookup(&player_id))
+        let timeout = Duration::from_millis(self.inner.config.rpc_timeout_ms);
+        let existing = tokio::time::timeout(timeout, self.inner.ownership_store.lookup(&player_id))
             .await
             .map_err(|_| ErrorCode::Timeout)?
             .map_err(|_| ErrorCode::Unavailable)?;
@@ -377,6 +497,7 @@ impl SessionManager {
             return Err(ErrorCode::Unavailable.into());
         }
         let counter = self
+            .inner
             .registry
             .session_counter
             .try_update(Ordering::SeqCst, Ordering::SeqCst, |value| {
@@ -385,22 +506,24 @@ impl SessionManager {
             .map_err(|_| ErrorCode::Internal)?;
         let session_id = format!(
             "{}:{}:{}:{counter}",
-            self.owner.node_id, self.owner.service_name, self.registry.process_instance_id
+            self.inner.owner.node_id,
+            self.inner.owner.service_name,
+            self.inner.registry.process_instance_id
         );
-        let ttl = Duration::from_millis(self.config.ownership_ttl_ms);
+        let ttl = Duration::from_millis(self.inner.config.ownership_ttl_ms);
         let expected_epoch = existing.map(|record| record.identity.epoch);
         let acquire = match previous {
-            Some(previous) => self.ownership_store.acquire_for_relogin(
+            Some(previous) => self.inner.ownership_store.acquire_for_relogin(
                 previous,
                 session_id,
-                self.owner.clone(),
+                self.inner.owner.clone(),
                 expected_epoch,
                 ttl,
             ),
-            None => self.ownership_store.acquire(
+            None => self.inner.ownership_store.acquire(
                 player_id,
                 session_id,
-                self.owner.clone(),
+                self.inner.owner.clone(),
                 expected_epoch,
                 ttl,
             ),
@@ -412,9 +535,9 @@ impl SessionManager {
                 tok_core::Error::OwnershipConflict => ErrorCode::SessionReplaced,
                 _ => ErrorCode::Unavailable,
             })?;
-        let resume_token = match self.resume_token_codec.issue(
+        let resume_token = match self.inner.resume_token_codec.issue(
             &ownership.identity,
-            Duration::from_millis(self.config.resume_token_ttl_ms),
+            Duration::from_millis(self.inner.config.resume_token_ttl_ms),
         ) {
             Ok(token) => token,
             Err(_) => {
@@ -423,20 +546,48 @@ impl SessionManager {
                     reason = "签发失败后尽力释放，有限租期兜底，不覆盖签发错误。"
                 )]
                 let _ =
-                    tokio::time::timeout(timeout, self.ownership_store.release(ownership)).await;
+                    tokio::time::timeout(timeout, self.inner.ownership_store.release(ownership))
+                        .await;
                 return Err(ErrorCode::Internal.into());
             }
         };
-        let (job_sender, receiver) = mpsc::channel(self.config.queue_capacity);
-        let cancel = self.shutdown.child_token();
+        let extensions = match self.inner.extension.initialize(tok_service::Request::new(
+            self.extension_context("player/session/initialize")?,
+            ownership.identity.clone(),
+        )) {
+            Ok(extensions) => extensions,
+            Err(error) => {
+                #[expect(
+                    clippy::let_underscore_must_use,
+                    reason = "扩展初始化失败后尽力条件释放；保留原始初始化错误，有限租期兜底。"
+                )]
+                let _ =
+                    tokio::time::timeout(timeout, self.inner.ownership_store.release(ownership))
+                        .await;
+                return Err(error);
+            }
+        };
+        let (job_sender, receiver) = mpsc::channel(self.inner.config.queue_capacity);
+        let cancel = self.inner.shutdown.child_token();
         let session_state = Arc::new(SessionState {
+            manager: Arc::downgrade(&self.inner),
+            extension: Arc::clone(&self.inner.extension),
+            closing_notified: AtomicBool::new(false),
+            extensions,
+            pipeline: Arc::clone(&self.inner.pipeline),
+            execution_budget: timeout,
+            downlink_gate: tokio::sync::Mutex::new(()),
             timers: Arc::new(timer::Scheduler::new(
-                self.config.max_timers,
-                self.config.max_timer_bytes,
+                self.inner.config.max_timers,
+                self.inner.config.max_timer_bytes,
             )),
             initial_execution: None,
             ownership,
-            channel: Arc::new(channel::Channel::new(sender, &self.config, cancel.clone())),
+            channel: Arc::new(channel::Channel::new(
+                sender,
+                &self.inner.config,
+                cancel.clone(),
+            )),
             cancel,
             resume_token,
             completion: Completion {
@@ -447,7 +598,8 @@ impl SessionManager {
         });
         session_state
             .channel
-            .bind_topic_membership(Arc::clone(&self.subscriptions), &session_state)?;
+            .bind_topic_membership(Arc::clone(&self.inner.subscriptions), &session_state)?;
+        SessionHandle(Arc::clone(&session_state)).changed(super::extension::Change::Initialized);
         // 登录 future 在运行时接收任务后被取消时，不能遗留无人绑定却持续续租的 session。
         let opening = session_state.cancel.clone().drop_guard();
         // 在下一次 await 前登记已确认的租约，取消登录时退出流程仍能条件释放。
@@ -458,15 +610,15 @@ impl SessionManager {
         let task = worker::task(
             Arc::clone(&session_state),
             receiver,
-            Arc::clone(&self.config),
-            Arc::clone(&self.ownership_store),
-            Arc::clone(&self.executor),
+            Arc::clone(&self.inner.config),
+            Arc::clone(&self.inner.ownership_store),
+            Arc::clone(&self.inner.pipeline) as Arc<dyn Executor>,
         );
         let task = Box::pin(async move {
             task.await;
             Ok(())
         });
-        let launched = tokio::select! { biased; _ = self.shutdown.cancelled() => false, result = self.tasks.launch("player-session", task) => result.is_ok() };
+        let launched = tokio::select! { biased; _ = self.inner.shutdown.cancelled() => false, result = self.inner.tasks.launch("player-session", task) => result.is_ok() };
         if !launched {
             #[expect(
                 clippy::let_underscore_must_use,
@@ -474,7 +626,8 @@ impl SessionManager {
             )]
             let _ = tokio::time::timeout(
                 timeout,
-                self.ownership_store
+                self.inner
+                    .ownership_store
                     .release(session_state.ownership.clone()),
             )
             .await;
@@ -488,11 +641,12 @@ impl SessionManager {
     }
 
     pub(crate) fn close_all(&self) {
-        self.shutdown.cancel();
+        self.inner.shutdown.cancel();
     }
 
     pub(crate) async fn release_all_ownership(&self) {
         let records = self
+            .inner
             .registry
             .slots
             .lock()
@@ -516,8 +670,8 @@ impl SessionManager {
                 reason = "退出阶段尽力条件释放，后端失败由有限租期兜底。"
             )]
             let _ = tokio::time::timeout(
-                Duration::from_millis(self.config.rpc_timeout_ms),
-                self.ownership_store.release(record),
+                Duration::from_millis(self.inner.config.rpc_timeout_ms),
+                self.inner.ownership_store.release(record),
             )
             .await;
         }

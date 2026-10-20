@@ -118,12 +118,17 @@ fn gateway(init: Init) -> InitTask {
                 max_connections: 1,
                 max_tasks: 1,
             },
-            &init.service,
+            &init,
             |_| Ok(Ingress(finished)),
         )?;
+        let gateway_handle = gateway.handle();
         Ok(Box::pin(async move {
             reports.0.send(("gateway", 0)).await?;
             gateway.serve(listener, init.service.cancellation()).await?;
+            gateway_handle.wait_finished().await;
+            if gateway_handle.phase() != tok::gateway::Phase::Stopped {
+                return Err(io::Error::other("网关未完成退出").into());
+            }
             Ok(())
         }) as Task)
     })

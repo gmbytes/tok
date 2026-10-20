@@ -10,9 +10,11 @@ use std::{
     sync::{Arc, atomic::Ordering},
     time::Duration,
 };
+use tok_core::execution::Source;
 use tok_core::{LogicalMessage, MessageKind, coordination::OwnershipStore};
+use tok_service::Request;
 use tokio::sync::{mpsc, oneshot};
-use tracing::Instrument;
+use tower::{Layer as _, ServiceExt};
 
 pub(super) type SessionTask = Pin<Box<dyn Future<Output = ()> + Send>>;
 
@@ -32,13 +34,20 @@ pub(super) struct RequestJob {
     // Some 将回应交给等待方；None 通过会话通信通道发布给游戏客户端。
     pub(super) response_sender: Option<oneshot::Sender<LogicalMessage>>,
 }
-struct SessionGuard(Arc<SessionState>);
+struct SessionGuard {
+    state: Arc<SessionState>,
+    // 持有到任务 future 释放；Drop 归还管理器活动计数。
+    _activity: Option<super::state::ActivityGuard>,
+}
 impl Drop for SessionGuard {
     fn drop(&mut self) {
-        self.0.cancel.cancel();
-        self.0.channel.close();
-        self.0.completion.done.store(true, Ordering::Release);
-        self.0.completion.notify.notify_waiters();
+        self.state.cancel.cancel();
+        self.state.channel.close();
+        let handle = SessionHandle(Arc::clone(&self.state));
+        handle.closing();
+        handle.changed(super::extension::Change::Closed);
+        self.state.completion.done.store(true, Ordering::Release);
+        self.state.completion.notify.notify_waiters();
     }
 }
 
@@ -49,7 +58,14 @@ pub(super) fn task(
     ownership_store: Arc<dyn OwnershipStore>,
     executor: Arc<dyn Executor>,
 ) -> SessionTask {
-    let guard = SessionGuard(Arc::clone(&session_state));
+    let activity = session_state
+        .manager
+        .upgrade()
+        .map(|manager| manager.activities.guard());
+    let guard = SessionGuard {
+        state: Arc::clone(&session_state),
+        _activity: activity,
+    };
     Box::pin(async move {
         // 即使任务尚未首次 poll 就被丢弃，也失效入口并唤醒等待的重复登录。
         let _guard = guard;
@@ -94,7 +110,7 @@ pub(super) fn task(
                                 let Some(next) = event_request.checked_add(1) else { session_state.cancel.cancel(); break; };
                                 event_request = next;
                                 let span = tracing::info_span!(parent: &job.parent, "player_event", player_id = %session_state.ownership.identity.player_id, event_id = %job.event.event_id, event_type = %job.event.event_type);
-                                let result = tokio::time::timeout(timeout, executor.execute_event(session_state.ownership.identity.clone(), event_request, job.event).instrument(span)).await;
+                                let result = tokio::time::timeout(timeout, execute_event(&session_state,executor.as_ref(),event_request,job.event,span)).await;
                                 let success = match result {
                                     Ok(Ok(timers_update)) => {
                                         let mut success = true;
@@ -118,7 +134,7 @@ pub(super) fn task(
                                 let Some(next) = timer_request.checked_add(1) else { session_state.cancel.cancel(); break; };
                                 timer_request = next;
                                 let span = tracing::info_span!("player_timer", player_id = %session_state.ownership.identity.player_id, timer_id = %trigger.timer_id, scheduled_at_ms = trigger.scheduled_at_ms, fired_at_ms = trigger.fired_at_ms);
-                                let result = tokio::time::timeout(timeout, executor.execute_timer(session_state.ownership.identity.clone(), timer_request, spec, trigger).instrument(span)).await;
+                                let result = tokio::time::timeout(timeout, execute_timer(&session_state,executor.as_ref(),timer_request,spec,trigger,span)).await;
                                 let success = match result {
                                     Ok(Ok(reply)) => {
                                         let mut success = reply.response.as_ref().is_none_or(|response| response.error_code == 0);
@@ -149,7 +165,7 @@ pub(super) fn task(
                                 channel::error_response(&request, ErrorCode::SessionClosed)
                             } else {
                                 let span = tracing::info_span!("client_request", player_id = %session_state.ownership.identity.player_id, request_id = request.request_id, message_id = request.message_id);
-                                let result = tokio::time::timeout(timeout, executor.execute_request(session_state.ownership.identity.clone(), request.clone()).instrument(span)).await;
+                                let result = tokio::time::timeout(timeout, execute_request(&session_state,executor.as_ref(),request.clone(),span)).await;
                                 match result {
                                     Ok(Ok(Reply { response: Some(mut response), timers: timer_update })) if response.kind == MessageKind::Response => {
                                         if let Some(update) = timer_update && let Err(error) = timers.apply(update) {
@@ -184,7 +200,7 @@ pub(super) fn task(
                                 reason = "publish_response 在发布失败时已关闭会话，不重复处理或重执业务。"
                             )]
                             let _ = SessionHandle(Arc::clone(&session_state))
-                                .publish_response(response, request.message_id);
+                                .publish_response(response, request.message_id).await;
                         }
                     }
                 }
@@ -247,4 +263,103 @@ pub(super) async fn renew_ownership(
         session_state.cancel.cancel();
     }
     !session_state.cancel.is_cancelled()
+}
+
+pub(super) fn execution_error(
+    error: tok_service::Error<crate::GatewayError>,
+) -> crate::GatewayError {
+    match error {
+        tok_service::Error::Inner(error) => error,
+        tok_service::Error::Stopped(tok_core::execution::StopReason::Cancelled) => {
+            ErrorCode::SessionClosed.into()
+        }
+        tok_service::Error::Stopped(tok_core::execution::StopReason::DeadlineExceeded) => {
+            ErrorCode::Timeout.into()
+        }
+    }
+}
+async fn execute_request(
+    state: &Arc<SessionState>,
+    executor: &dyn Executor,
+    message: LogicalMessage,
+    span: tracing::Span,
+) -> Result<Reply> {
+    let context = SessionHandle(Arc::clone(state))
+        .execution_context(
+            format!("player/request/{}", message.message_id),
+            Source::Client {
+                request_id: message.request_id,
+                message_id: message.message_id,
+            },
+        )?
+        .with_span(span);
+    tok_service::Layer
+        .layer(tower::service_fn(|request| {
+            executor.execute_request(request)
+        }))
+        .oneshot(Request::new(
+            context,
+            crate::player::RequestInput {
+                identity: state.ownership.identity.clone(),
+                message,
+            },
+        ))
+        .await
+        .map_err(execution_error)
+}
+async fn execute_event(
+    state: &Arc<SessionState>,
+    executor: &dyn Executor,
+    request_id: u64,
+    event: Arc<tok_events::Message>,
+    span: tracing::Span,
+) -> Result<Option<tok_core::TimerUpdate>> {
+    let context = SessionHandle(Arc::clone(state))
+        .execution_context(
+            format!("player/event/{}", event.event_type),
+            Source::Event {
+                event_id: event.event_id.to_string(),
+            },
+        )?
+        .with_span(span);
+    tok_service::Layer
+        .layer(tower::service_fn(|request| executor.execute_event(request)))
+        .oneshot(Request::new(
+            context,
+            crate::player::EventInput {
+                identity: state.ownership.identity.clone(),
+                request_id,
+                event,
+            },
+        ))
+        .await
+        .map_err(execution_error)
+}
+async fn execute_timer(
+    state: &Arc<SessionState>,
+    executor: &dyn Executor,
+    request_id: u64,
+    spec: tok_core::TimerSpec,
+    trigger: tok_core::TimerTrigger,
+    span: tracing::Span,
+) -> Result<Reply> {
+    let context = SessionHandle(Arc::clone(state))
+        .execution_context(
+            format!("player/timer/{}", spec.message_id),
+            Source::Timer(trigger.clone()),
+        )?
+        .with_span(span);
+    tok_service::Layer
+        .layer(tower::service_fn(|request| executor.execute_timer(request)))
+        .oneshot(Request::new(
+            context,
+            crate::player::TimerInput {
+                identity: state.ownership.identity.clone(),
+                request_id,
+                spec,
+                trigger,
+            },
+        ))
+        .await
+        .map_err(execution_error)
 }

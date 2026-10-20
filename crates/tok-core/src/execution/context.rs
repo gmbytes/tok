@@ -11,6 +11,8 @@ use tokio_util::sync::CancellationToken;
 /// 由可信入口创建的调用来源；不是客户端正文可选择的分发类型。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Source {
+    /// 可信服务端内部操作，例如生命周期变化或主动下行。
+    Internal,
     /// 服务间请求；序号只关联当前请求与回应。
     Rpc {
         /// RPC 请求关联序号。

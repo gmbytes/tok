@@ -5,7 +5,7 @@ use std::{io, sync::Arc, time::Duration};
 use tok::{
     application::CancellationToken,
     core::{
-        LogicalMessage, SessionIdentity, TimerTrigger,
+        TimerTrigger,
         coordination::SessionOwner,
         execution::{Context, Source},
         service::Identity,
@@ -27,9 +27,12 @@ struct ReadOnly;
 impl player::Executor for ReadOnly {
     fn execute_request(
         &self,
-        _identity: SessionIdentity,
-        _request: LogicalMessage,
+        input: tok::service::Request<tok::gateway::player::RequestInput>,
     ) -> player::Task<'_> {
+        let tok::gateway::player::RequestInput {
+            identity: _identity,
+            message: _request,
+        } = input.input;
         Box::pin(std::future::ready(Err(
             tok::gateway::ErrorCode::Unavailable.into(),
         )))
@@ -101,7 +104,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     // gateway 只添加自身能力，同一执行设施没有 gateway 依赖，也未改现有 worker。
     let config = player::Config::default();
-    let gateway = Gateway::new(config.gateway_limits(), |tasks| {
+    let gateway = Gateway::new(tok_core_identity(), config.gateway_limits(), |tasks| {
         player::Ingress::new(
             tasks,
             config,
@@ -155,4 +158,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         state.value
     );
     Ok(())
+}
+
+fn tok_core_identity() -> tok::core::service::Identity {
+    tok::core::service::Identity {
+        node_id: "local".into(),
+        service_name: "gateway".into(),
+    }
 }

@@ -24,6 +24,13 @@ impl Completion {
     }
 }
 pub(super) struct SessionState {
+    pub(super) extension: Arc<dyn super::extension::Factory>,
+    pub(super) closing_notified: AtomicBool,
+    pub(super) manager: std::sync::Weak<super::manager::ManagerState>,
+    pub(super) extensions: tok_core::execution::Extensions,
+    pub(super) pipeline: Arc<crate::player::Pipeline>,
+    pub(super) execution_budget: std::time::Duration,
+    pub(super) downlink_gate: tokio::sync::Mutex<()>,
     pub(super) timers: Arc<timer::Scheduler>,
     pub(super) initial_execution: Option<tok_rpc::protocol::internal::v1::ExecutionSnapshot>,
     pub(super) ownership: SessionOwnership,
@@ -32,4 +39,35 @@ pub(super) struct SessionState {
     pub(super) job_sender: mpsc::Sender<Job>,
     pub(super) channel: Arc<channel::Channel>,
     pub(super) resume_token: String,
+}
+
+#[derive(Default)]
+pub(super) struct Activities {
+    count: std::sync::atomic::AtomicUsize,
+    changed: Notify,
+}
+pub(super) struct ActivityGuard(Arc<Activities>);
+impl Activities {
+    pub(super) fn count(&self) -> usize {
+        self.count.load(Ordering::SeqCst)
+    }
+    pub(super) fn guard(self: &Arc<Self>) -> ActivityGuard {
+        self.count.fetch_add(1, Ordering::SeqCst);
+        ActivityGuard(Arc::clone(self))
+    }
+    pub(super) async fn wait(&self) {
+        loop {
+            let changed = self.changed.notified();
+            if self.count() == 0 {
+                return;
+            }
+            changed.await;
+        }
+    }
+}
+impl Drop for ActivityGuard {
+    fn drop(&mut self) {
+        self.0.count.fetch_sub(1, Ordering::SeqCst);
+        self.0.changed.notify_waiters();
+    }
 }

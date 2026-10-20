@@ -34,28 +34,43 @@ impl From<LogicalMessage> for Reply {
     }
 }
 
-/// 所有玩家执行来源应进入 session 队列后使用的执行扩展点。
+/// 客户端业务执行输入，身份由会话所有权确定。
+pub struct RequestInput {
+    /// 当前会话的可信身份。
+    pub identity: SessionIdentity,
+    /// 已准入的客户端业务请求。
+    pub message: LogicalMessage,
+}
+/// 服务器内部事件执行输入，不与客户端请求共用序号。
+pub struct EventInput {
+    /// 当前会话的可信身份。
+    pub identity: SessionIdentity,
+    /// 当前会话的内部事件调用序号。
+    pub request_id: u64,
+    /// 保留原始 ID 和编码的共享事件。
+    pub event: Arc<tok_events::Message>,
+}
+/// 内部 timer 执行输入，与客户端业务入口隔离。
+pub struct TimerInput {
+    /// 当前会话的可信身份。
+    pub identity: SessionIdentity,
+    /// 当前会话的内部 timer 调用序号。
+    pub request_id: u64,
+    /// 当前有效的计时需求。
+    pub spec: TimerSpec,
+    /// 本次预定和实际触发时刻。
+    pub trigger: TimerTrigger,
+}
+/// 只在 session FIFO 和所有权检查之后执行的业务扩展点，使用共同执行上下文。
 pub trait Executor: Send + Sync {
-    /// 执行内部转发事件，序号独立于请求与 timer；默认拒绝，不自动回应客户端。
-    fn execute_event(
-        &self,
-        _identity: SessionIdentity,
-        _request_id: u64,
-        _event: Arc<tok_events::Message>,
-    ) -> EventTask<'_> {
+    /// 执行服务器事件；默认拒绝，不自动向客户端回应。
+    fn execute_event(&self, _request: tok_service::Request<EventInput>) -> EventTask<'_> {
         Box::pin(async { Err(ErrorCode::UnknownMessage.into()) })
     }
-
-    /// 使用 session 身份执行请求，不能从消息正文选择其他玩家。
-    fn execute_request(&self, identity: SessionIdentity, request: LogicalMessage) -> Task<'_>;
-    /// 执行内部 timer；序号由 session 独立分配，不占用客户端请求序列。默认拒绝未支持的计时调用。
-    fn execute_timer(
-        &self,
-        _identity: SessionIdentity,
-        _request_id: u64,
-        _spec: TimerSpec,
-        _trigger: TimerTrigger,
-    ) -> Task<'_> {
+    /// 执行已准入的客户端业务请求。
+    fn execute_request(&self, request: tok_service::Request<RequestInput>) -> Task<'_>;
+    /// 执行内部 timer；默认拒绝未支持的来源。
+    fn execute_timer(&self, _request: tok_service::Request<TimerInput>) -> Task<'_> {
         Box::pin(async { Err(ErrorCode::UnknownMessage.into()) })
     }
 }
@@ -117,12 +132,12 @@ impl RpcExecutor {
 }
 
 impl Executor for RpcExecutor {
-    fn execute_event(
-        &self,
-        identity: SessionIdentity,
-        request_id: u64,
-        event: Arc<tok_events::Message>,
-    ) -> EventTask<'_> {
+    fn execute_event(&self, request: tok_service::Request<EventInput>) -> EventTask<'_> {
+        let EventInput {
+            identity,
+            request_id,
+            event,
+        } = request.input;
         Box::pin(async move {
             let target = self
                 .router
@@ -157,16 +172,16 @@ impl Executor for RpcExecutor {
         })
     }
 
-    fn execute_request(&self, identity: SessionIdentity, request: LogicalMessage) -> Task<'_> {
-        self.call(identity, request, None)
+    fn execute_request(&self, request: tok_service::Request<RequestInput>) -> Task<'_> {
+        self.call(request.input.identity, request.input.message, None)
     }
-    fn execute_timer(
-        &self,
-        identity: SessionIdentity,
-        request_id: u64,
-        spec: TimerSpec,
-        trigger: TimerTrigger,
-    ) -> Task<'_> {
+    fn execute_timer(&self, request: tok_service::Request<TimerInput>) -> Task<'_> {
+        let TimerInput {
+            identity,
+            request_id,
+            spec,
+            trigger,
+        } = request.input;
         self.call(
             identity,
             LogicalMessage {

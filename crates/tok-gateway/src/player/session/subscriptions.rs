@@ -118,6 +118,13 @@ mod tests {
         let (sender, mut outgoing) = mpsc::channel(8);
         let (jobs, _) = mpsc::channel(8);
         let state = Arc::new(SessionState {
+            extension: Arc::new(crate::player::session::extension::Empty),
+            closing_notified: std::sync::atomic::AtomicBool::new(false),
+            manager: std::sync::Weak::new(),
+            extensions: Default::default(),
+            pipeline: crate::player::pipeline::test_pipeline(),
+            execution_budget: std::time::Duration::from_millis(Config::default().rpc_timeout_ms),
+            downlink_gate: tokio::sync::Mutex::new(()),
             timers: Arc::new(Scheduler::new(8, 4096)),
             initial_execution: None,
             ownership: SessionOwnership {
@@ -179,8 +186,8 @@ mod tests {
         assert!(index.topics.lock().unwrap().is_empty());
     }
 
-    #[test]
-    fn index_does_not_keep_sessions_alive_and_admission_rechecks_stale_snapshots() {
+    #[tokio::test]
+    async fn index_does_not_keep_sessions_alive_and_admission_rechecks_stale_snapshots() {
         let index = Arc::new(Index::default());
         let (handle, mut output) = session(&index, "1", 1);
         handle.join_topic("guild:7").unwrap();
@@ -189,6 +196,7 @@ mod tests {
         assert!(
             candidates[0]
                 .notify_event(9, b"stale", Some("guild:7"))
+                .await
                 .is_err()
         );
         assert!(output.try_recv().is_err());

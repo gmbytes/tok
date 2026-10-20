@@ -38,27 +38,56 @@ impl BoundSession {
     pub(in crate::player) fn last_request_id(&self) -> Result<u64> {
         self.session.0.channel.last_request_id()
     }
-    pub(in crate::player) fn submit(&self, request: LogicalMessage) -> Result<()> {
+    pub(in crate::player) async fn submit(&self, request: LogicalMessage) -> Result<()> {
         self.session
             .0
             .channel
-            .admit_request(&self.binding, request.request_id, || {
-                self.session.enqueue_request(request, None)
-            })
+            .admit_request(&self.binding, request.request_id, || Ok(()))?;
+        let original = (request.kind, request.request_id, request.message_id);
+        let context = self.session.context_with_cancellation(
+            format!("player/admission/{}", request.message_id),
+            tok_core::execution::Source::Client {
+                request_id: request.request_id,
+                message_id: request.message_id,
+            },
+            self.binding.cancellation.child_token(),
+        )?;
+        let pipeline = Arc::clone(&self.session.0.pipeline);
+        use tower::{Layer as _, ServiceExt};
+        let request = tok_service::Layer
+            .layer(tower::service_fn(move |request| {
+                let pipeline = Arc::clone(&pipeline);
+                async move { pipeline.admit(request).await }
+            }))
+            .oneshot(tok_service::Request::new(context, request))
+            .await
+            .map_err(super::worker::execution_error)?;
+        if (request.kind, request.request_id, request.message_id) != original
+            || request.server_seq.is_some()
+        {
+            return Err(ErrorCode::InvalidRequest.into());
+        }
+        self.session.0.channel.admit_bound(&self.binding, || {
+            self.session.enqueue_request(request, None)
+        })
     }
     pub(in crate::player) fn acknowledge(&self, seq: u64) -> Result<()> {
         self.session.0.channel.acknowledge(&self.binding, seq)
     }
-    pub(in crate::player) fn publish_response(
+    pub(in crate::player) async fn publish_response(
         &self,
         response: LogicalMessage,
         request_message_id: u32,
     ) -> Result<()> {
-        let result =
-            self.session
-                .0
-                .channel
-                .publish_from(Some(&self.binding), response, request_message_id);
+        let result = self
+            .session
+            .process_downlink(
+                response,
+                request_message_id,
+                Some(self.binding.clone()),
+                None,
+            )
+            .await;
         if let Err(error) = &result
             && matches!(error.code, ErrorCode::SessionClosed | ErrorCode::Internal)
         {
@@ -66,6 +95,11 @@ impl BoundSession {
         }
         result
     }
+}
+
+#[derive(Clone)]
+struct EventTarget {
+    topic: Option<String>,
 }
 
 impl SessionHandle {
@@ -111,7 +145,7 @@ impl SessionHandle {
                 })
         })
     }
-    pub(super) fn notify_event(
+    pub(super) async fn notify_event(
         &self,
         message_id: u32,
         body: &[u8],
@@ -120,7 +154,127 @@ impl SessionHandle {
         if self.0.cancel.is_cancelled() {
             return Err(ErrorCode::SessionClosed.into());
         }
-        self.0.channel.notify_event(message_id, body, topic)
+        self.0.channel.check_event(topic)?;
+        self.process_downlink(
+            LogicalMessage {
+                kind: MessageKind::Notify,
+                message_id,
+                request_id: 0,
+                server_seq: None,
+                error_code: 0,
+                body: body.to_vec(),
+            },
+            0,
+            None,
+            Some(EventTarget {
+                topic: topic.map(str::to_owned),
+            }),
+        )
+        .await
+    }
+
+    pub(super) fn closing(&self) {
+        if !self
+            .0
+            .closing_notified
+            .swap(true, std::sync::atomic::Ordering::SeqCst)
+        {
+            self.changed(super::extension::Change::Closing);
+        }
+    }
+    pub(super) fn changed(&self, change: super::extension::Change) {
+        let Ok(context) = self.context(
+            "player/session/change".into(),
+            tok_core::execution::Source::Internal,
+        ) else {
+            return;
+        };
+        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.0
+                .extension
+                .on_change(tok_service::Request::new(context, change))
+        }))
+        .is_err()
+        {
+            tracing::error!("会话生命周期观察者异常，关闭会话");
+            self.0.cancel.cancel();
+            self.0.channel.close();
+        }
+    }
+    /// 当前会话工厂安装的本地能力；不会隐式写入远端上下文。
+    pub fn extensions(&self) -> &tok_core::execution::Extensions {
+        &self.0.extensions
+    }
+    pub(super) fn context(
+        &self,
+        operation: String,
+        source: tok_core::execution::Source,
+    ) -> Result<tok_core::execution::Context> {
+        self.context_with_cancellation(operation, source, self.0.cancel.child_token())
+    }
+    // 停止新业务后仍按原预算收束在途执行；会话取消信号通过 SessionHandle 单独提供。
+    pub(super) fn execution_context(
+        &self,
+        operation: String,
+        source: tok_core::execution::Source,
+    ) -> Result<tok_core::execution::Context> {
+        if self.0.cancel.is_cancelled() {
+            return Err(ErrorCode::SessionClosed.into());
+        }
+        self.context_with_cancellation(operation, source, CancellationToken::new())
+    }
+    fn context_with_cancellation(
+        &self,
+        operation: String,
+        source: tok_core::execution::Source,
+        cancellation: CancellationToken,
+    ) -> Result<tok_core::execution::Context> {
+        let owner = &self.0.ownership.owner;
+        let mut context = tok_core::execution::Context::new(
+            tok_core::service::Identity {
+                node_id: owner.node_id.clone(),
+                service_name: owner.service_name.clone(),
+            },
+            operation,
+            source,
+            self.0.execution_budget,
+            cancellation,
+        )
+        .map_err(|_| ErrorCode::Internal)?;
+        let manager = self
+            .0
+            .manager
+            .upgrade()
+            .map(|inner| super::manager::SessionManager { inner });
+        if let Some(manager) = &manager {
+            context.extensions_mut().extend(&manager.extensions());
+        }
+        context.extensions_mut().extend(&self.0.extensions);
+        if let Some(manager) = manager {
+            context.extensions_mut().insert(manager.gateway());
+            context.extensions_mut().insert(manager);
+        }
+        context.extensions_mut().insert(self.clone());
+        Ok(context)
+    }
+    /// 查询会话阶段、连接、主题及 FIFO 容量，不替代后续准入检查。
+    pub fn snapshot(&self) -> Result<super::Snapshot> {
+        let mut snapshot = self.0.channel.status()?;
+        if self
+            .0
+            .completion
+            .done
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            snapshot.phase = super::Phase::Stopped;
+        }
+        snapshot.queue_capacity = self.0.job_sender.max_capacity();
+        snapshot.queue_len = snapshot.queue_capacity - self.0.job_sender.capacity();
+        Ok(snapshot)
+    }
+    /// 等待当前会话任务及其 timer/宽限期 future 释放，不得在自身执行中等待。
+    pub async fn wait_finished(&self) {
+        self.0.completion.wait().await;
     }
 
     /// 读取当前可信身份，不能据此绕过所有权与队列直接调用 player。
@@ -135,6 +289,7 @@ impl SessionHandle {
     pub fn close(&self) {
         self.0.cancel.cancel();
         self.0.channel.close();
+        self.closing();
     }
 
     pub(in crate::player) fn complete_login(
@@ -162,7 +317,7 @@ impl SessionHandle {
         self.0.channel.replay_after(ack_seq)
     }
 
-    pub(super) fn publish_response(
+    pub(super) async fn publish_response(
         &self,
         response: LogicalMessage,
         request_message_id: u32,
@@ -170,7 +325,10 @@ impl SessionHandle {
         if self.0.cancel.is_cancelled() {
             return Err(ErrorCode::SessionClosed.into());
         }
-        if let Err(error) = self.0.channel.publish(response, request_message_id) {
+        if let Err(error) = self
+            .process_downlink(response, request_message_id, None, None)
+            .await
+        {
             self.close();
             return Err(error);
         }
@@ -225,20 +383,79 @@ impl SessionHandle {
         self.enqueue(request, Some(sender))?;
         Ok(Box::pin(async move { receiver.await.unwrap_or(fallback) }))
     }
+    async fn process_downlink(
+        &self,
+        message: LogicalMessage,
+        request_message_id: u32,
+        binding: Option<channel::Binding>,
+        event_target: Option<EventTarget>,
+    ) -> Result<()> {
+        self.0
+            .channel
+            .check_publication(binding.as_ref(), message.kind)?;
+        let original = (message.kind, message.request_id);
+        let cancellation = binding.as_ref().map_or_else(
+            || self.0.cancel.child_token(),
+            |binding| binding.cancellation.child_token(),
+        );
+        let context = self.context_with_cancellation(
+            format!("player/downlink/{}", message.message_id),
+            tok_core::execution::Source::Internal,
+            cancellation,
+        )?;
+        let session = self.clone();
+        use tower::{Layer as _, ServiceExt};
+        let service = tower::service_fn(move |request: tok_service::Request<LogicalMessage>| {
+            let session = session.clone();
+            let binding = binding.clone();
+            let event_target = event_target.clone();
+            async move {
+                // 异步串行门锁只保护新下行处理；通道锁不跨 await，ACK 和补发可继续推进。
+                let _gate = session.0.downlink_gate.lock().await;
+                let message = session.0.pipeline.downlink(request).await?;
+                if (message.kind, message.request_id) != original
+                    || message.server_seq.is_some()
+                    || (message.kind == MessageKind::Notify && message.message_id == 0)
+                {
+                    return Err(ErrorCode::InvalidRequest.into());
+                }
+                if let Some(target) = event_target {
+                    session
+                        .0
+                        .channel
+                        .publish_event(message, target.topic.as_deref())
+                } else if binding.is_none() && original.0 == MessageKind::Notify {
+                    session
+                        .0
+                        .channel
+                        .publish_from(None, message, request_message_id)
+                } else {
+                    session
+                        .0
+                        .channel
+                        .publish_from(binding.as_ref(), message, request_message_id)
+                }
+            }
+        });
+        tok_service::Layer
+            .layer(service)
+            .oneshot(tok_service::Request::new(context, message))
+            .await
+            .map_err(super::worker::execution_error)
+    }
     /// 主动通知进入下行入口，不调用 player；断线或慢连接时在宽限期内继续缓存。
     /// 超大通知返回 FrameTooLarge，不消耗序号；登录回应入队前返回 InvalidState。
-    pub fn notify(&self, message: LogicalMessage) -> Result<()> {
+    pub async fn notify(&self, message: LogicalMessage) -> Result<()> {
         if self.0.cancel.is_cancelled() {
             return Err(ErrorCode::SessionClosed.into());
         }
-        if message.kind != MessageKind::Notify || message.message_id == 0 {
+        if message.kind != MessageKind::Notify
+            || (message.kind == MessageKind::Notify && message.message_id == 0)
+        {
             return Err(ErrorCode::InvalidRequest.into());
         }
-        if let Err(error) = self.0.channel.publish(message, 0) {
-            if !matches!(
-                error.code,
-                ErrorCode::FrameTooLarge | ErrorCode::InvalidState
-            ) {
+        if let Err(error) = self.process_downlink(message, 0, None, None).await {
+            if matches!(error.code, ErrorCode::SessionClosed | ErrorCode::Internal) {
                 self.close();
             }
             return Err(error);

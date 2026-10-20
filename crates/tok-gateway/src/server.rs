@@ -1,9 +1,11 @@
 //! 接入组件共用的监听、容量控制、后台任务监督和退出管理。
 
+use crate::Handle;
 use crate::{ErrorCode, Result, transport::GatewayTransport};
 use std::{future::Future, pin::Pin, sync::Arc};
-use tok_service::task::{Handle, Supervisor};
-use tokio::{sync::Semaphore, task::JoinSet};
+use tok_core::{execution::Extensions, service::Identity};
+use tok_service::{lifecycle::Init, task::Supervisor};
+use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
 /// 受网关监督的连接或后台任务，不能自行遗留脱管任务。
@@ -34,6 +36,10 @@ impl GatewayConfig {
 pub trait GatewayIngress: Send + Sync + 'static {
     /// 此组件接受的连接对象，由相匹配的传输适配器提供。
     type Connection: Send + 'static;
+    /// 完成组装后执行一次同步注册；不启动连接任务，失败时撤销本组件并关闭范围。
+    fn initialize(&self) -> Result<()> {
+        Ok(())
+    }
     /// 处理一个连接；返回错误仅结束该连接，panic 则使网关整体失败。
     fn connection(&self, connection: Self::Connection, shutdown: CancellationToken) -> GatewayTask;
     /// 同步停止新业务入口；运行 future 被丢弃时也会调用，须可重复调用。
@@ -46,46 +52,72 @@ pub trait GatewayIngress: Send + Sync + 'static {
 
 /// 统一网关运行框架，连接语义由传输适配器与接入组件组装。
 pub struct Gateway<I: GatewayIngress> {
-    config: GatewayConfig,
     ingress: Arc<I>,
     supervisor: Supervisor,
+    handle: Handle,
+    _owner: Owner<I>,
 }
-struct Stop<I: GatewayIngress>(Arc<I>, CancellationToken);
-impl<I: GatewayIngress> Drop for Stop<I> {
+struct Owner<I: GatewayIngress> {
+    ingress: Option<Arc<I>>,
+    handle: Handle,
+}
+impl<I: GatewayIngress> Drop for Owner<I> {
     fn drop(&mut self) {
-        self.1.cancel();
-        self.0.stop();
+        self.handle.request_stop();
+        if let Some(ingress) = &self.ingress {
+            ingress.stop();
+        }
+        self.handle.close_owner();
     }
 }
 impl<I: GatewayIngress> Gateway<I> {
     /// 创建运行框架并注入组件所需的任务入口，不启动监听或后台任务。
-    pub fn new(config: GatewayConfig, build: impl FnOnce(Handle) -> Result<I>) -> Result<Self> {
+    pub fn new(
+        identity: Identity,
+        config: GatewayConfig,
+        build: impl FnOnce(Handle) -> Result<I>,
+    ) -> Result<Self> {
         config.validate()?;
         let supervisor = Supervisor::new(config.max_tasks, CancellationToken::new())
             .map_err(|_| ErrorCode::InvalidRequest)?;
-        Self::build(config, supervisor, build)
+        Self::build(identity, Extensions::default(), config, supervisor, build)
     }
     /// 在所属服务内创建网关；共享父取消关系，父结束等待覆盖网关内部任务的实际回收。
     pub fn new_in(
         config: GatewayConfig,
-        parent: &tok_service::lifecycle::Handle,
+        init: &Init,
         build: impl FnOnce(Handle) -> Result<I>,
     ) -> Result<Self> {
         config.validate()?;
-        let supervisor = Supervisor::child(config.max_tasks, &parent.tasks())
+        let supervisor = Supervisor::child(config.max_tasks, &init.service.tasks())
             .map_err(|_| ErrorCode::InvalidRequest)?;
-        Self::build(config, supervisor, build)
+        let mut extensions = init.extensions.clone();
+        extensions.insert(init.service.clone());
+        Self::build(init.identity.clone(), extensions, config, supervisor, build)
     }
     fn build(
+        identity: Identity,
+        extensions: Extensions,
         config: GatewayConfig,
         supervisor: Supervisor,
         build: impl FnOnce(Handle) -> Result<I>,
     ) -> Result<Self> {
-        let ingress = Arc::new(build(supervisor.handle())?);
+        if identity.node_id.trim().is_empty() || identity.service_name.trim().is_empty() {
+            return Err(ErrorCode::InvalidRequest.into());
+        }
+        let handle = Handle::new(identity, config, extensions, supervisor.handle());
+        let mut owner = Owner {
+            ingress: None,
+            handle: handle.clone(),
+        };
+        let ingress = Arc::new(build(handle.clone())?);
+        owner.ingress = Some(Arc::clone(&ingress));
+        ingress.initialize()?;
         Ok(Self {
-            config,
             ingress,
             supervisor,
+            handle,
+            _owner: owner,
         })
     }
     /// 访问已组装的接入组件，如取得 Ingress 的 session 查询句柄。
@@ -93,8 +125,13 @@ impl<I: GatewayIngress> Gateway<I> {
         &self.ingress
     }
 
+    /// 获取网关阶段、容量、能力与完整退出观察句柄。
+    pub fn handle(&self) -> Handle {
+        self.handle.clone()
+    }
+
     /// 获取通用任务监督入口；游戏组装层可预留容量并安装事件等后台任务。
-    pub fn tasks(&self) -> Handle {
+    pub fn tasks(&self) -> tok_service::task::Handle {
         self.supervisor.handle()
     }
 
@@ -108,8 +145,8 @@ impl<I: GatewayIngress> Gateway<I> {
         T: GatewayTransport<Connection = I::Connection>,
     {
         let signal = self.supervisor.handle().cancellation();
-        let _stop = Stop(Arc::clone(&self.ingress), signal.clone());
-        let capacity = Arc::new(Semaphore::new(self.config.max_connections));
+        self.handle.serving();
+        let capacity = self.handle.connections();
         let mut connections = JoinSet::new();
         let mut outcome = loop {
             tokio::select! {

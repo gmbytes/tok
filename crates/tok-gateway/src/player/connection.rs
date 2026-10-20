@@ -342,17 +342,19 @@ async fn handle_frames(
                 {
                     Err(ErrorCode::InvalidRequest.into())
                 } else if let Some(session) = &session {
-                    session.submit(request.clone())
+                    session.submit(request.clone()).await
                 } else {
                     Err(ErrorCode::Unauthenticated.into())
                 };
                 last_request_id = last_request_id.max(request.request_id);
                 if let Err(error) = result {
                     if let Some(session) = &session {
-                        session.publish_response(
-                            channel::error_response(&request, error.code),
-                            request.message_id,
-                        )?;
+                        session
+                            .publish_response(
+                                channel::error_response(&request, error.code),
+                                request.message_id,
+                            )
+                            .await?;
                     } else {
                         enqueue_content(
                             &sender,

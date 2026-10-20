@@ -22,12 +22,14 @@ message ExecutionSnapshot {
   repeated ScheduledTimer timers = 4;
   uint64 event_request_id = 5;
 }
+message ExtensionSnapshot { string kind = 1; bytes body = 2; }
 message HandoffSnapshot {
   uint32 version = 1;
   string snapshot_id = 2;
   GatewayOwnership source = 3;
   ChannelSnapshot channel = 4;
   ExecutionSnapshot execution = 5;
+  ExtensionSnapshot extension = 6;
 }
 message HandoffRequest {
   string handoff_id = 1;

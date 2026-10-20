@@ -417,3 +417,15 @@ Core NATS、JetStream、网关事件入口、主题订阅、离线加载及交�
 以 P2 提交 `c6ffdc3` 为基线，移除同步 local::Dispatcher，统一事件 Envelope、Registry 与 Tower 处理链；RPC、事件接收及 RPC timer 路由使用共同 Request / execution::Context。远程适配显式安装 protobuf 解码器，保留原始 Arc<Message>，本地可跨 await 借用状态。通过 rpc::Binding 在服务工厂中初始化并安装实际处理链，demo player/guild 已迁移；客户端 Frame 和 NATS subject 未改变。
 
 本批工作区 214 项测试、全目标 Clippy、rustdoc、六个 smoke、13 项真实 NATS 及 5 项 Redis 发现/多进程专项通过。该记录仅覆盖 Windows 本地验证；release 和 Linux 未在本批运行。P3 已完成本批验收，P4–P7 仍按当前实施计划推进。
+
+## P4 gateway 服务扩展迁移（2026-10-20 Windows）
+
+以 P3 提交 `368fc74` 为基线，新增完整网关范围句柄、manager/session 快照与结束等待、作用域状态工厂及锁外生命周期观察；Pipeline 统一准入、FIFO 内请求/事件/timer 和新下行的执行协议。补发仍使用缓存原字节，扩展交接必须显式快照/校验/恢复。未改变客户端 Frame v3 和 NATS subject，topic 路由与动态兴趣仍属后续批次。
+
+### P4 验收记录（2026-10-20 Windows）
+
+工作区 226 项测试通过（含 11 项指南示例及 2 项编译失败文档测试）。新增覆盖三层能力和生命周期查询、请求/事件/timer 共用 Layer、下行改写与补发不重复执行、等待准入时顶号/重连、等待下行时退出主题、初始化失败释放所有权、扩展状态迁移与失败边界、完整网关退出等待。原有 FIFO、timer、续租、ACK、同网关恢复和跨网关交接回归通过。
+
+全目标 Clippy、workspace rustdoc、格式、UTF-8/LF 及仓库内文档链接检查通过。events-smoke、execution-smoke、lifecycle-smoke、rpc-smoke、client-smoke、nats-smoke 通过；真实 NATS 13 项、Redis 发现 2 项及发现双进程/共享所有权/三进程交接 3 项集成通过。外部回归串行运行，demo 实际安装观察 Layer 和可交接的会话统计扩展。
+
+P4 尚未提交。未运行 release 构建或 Linux 本地验证。下一批为 P5 传输 topic 路由，P6 动态兴趣及 P7 整体组装仍未实施。

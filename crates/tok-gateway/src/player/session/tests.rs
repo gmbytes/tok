@@ -17,7 +17,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tok_core::{
-    LogicalMessage, MessageKind, SessionIdentity, TimerSpec, TimerTrigger, TimerUpdate,
+    LogicalMessage, MessageKind, TimerSpec, TimerTrigger, TimerUpdate,
     coordination::{OwnershipStore, SessionOwner},
 };
 use tok_infra::ownership::MemoryOwnership;
@@ -38,7 +38,14 @@ struct TestExecutor {
     block_timer: AtomicBool,
 }
 impl Executor for TestExecutor {
-    fn execute_request(&self, _identity: SessionIdentity, request: LogicalMessage) -> Task<'_> {
+    fn execute_request(
+        &self,
+        input: tok_service::Request<crate::player::RequestInput>,
+    ) -> Task<'_> {
+        let crate::player::RequestInput {
+            identity: _identity,
+            message: request,
+        } = input.input;
         Box::pin(async move {
             self.events
                 .send(Event::Request(request.message_id))
@@ -59,13 +66,13 @@ impl Executor for TestExecutor {
             })
         })
     }
-    fn execute_timer(
-        &self,
-        identity: SessionIdentity,
-        _request_id: u64,
-        _spec: TimerSpec,
-        trigger: TimerTrigger,
-    ) -> Task<'_> {
+    fn execute_timer(&self, input: tok_service::Request<crate::player::TimerInput>) -> Task<'_> {
+        let crate::player::TimerInput {
+            identity,
+            request_id: _request_id,
+            spec: _spec,
+            trigger,
+        } = input.input;
         Box::pin(async move {
             assert_eq!(identity.player_id, "42");
             self.events.send(Event::Timer(trigger)).unwrap();
@@ -116,6 +123,13 @@ impl Fixture {
         let (channel, mut outgoing) = mpsc::channel(8);
         let cancel = CancellationToken::new();
         let active = Arc::new(SessionState {
+            extension: Arc::new(super::extension::Empty),
+            closing_notified: std::sync::atomic::AtomicBool::new(false),
+            manager: std::sync::Weak::new(),
+            extensions: Default::default(),
+            pipeline: crate::player::pipeline::test_pipeline(),
+            execution_budget: std::time::Duration::from_millis(Config::default().rpc_timeout_ms),
+            downlink_gate: tokio::sync::Mutex::new(()),
             timers: Arc::new(timer::Scheduler::new(128, 1048576)),
             initial_execution: None,
             ownership: lease,

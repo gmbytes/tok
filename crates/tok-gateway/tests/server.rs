@@ -86,12 +86,13 @@ impl Fixture {
         let finished = Arc::new(AtomicBool::new(false));
         let mut tasks = None;
         let gateway = Gateway::new(
+            tok_core_identity(),
             GatewayConfig {
                 max_connections: 1,
                 max_tasks: 1,
             },
             |handle| {
-                tasks = Some(handle);
+                tasks = Some(handle.tasks());
                 Ok(Ingress {
                     started,
                     stopped: Arc::clone(&stopped),
@@ -287,6 +288,7 @@ async fn dropping_serve_future_cancels_ingress_and_background_tasks() {
 async fn failed_gateway_construction_cancels_exported_task_handle() {
     let mut exported = None;
     let result = Gateway::<Ingress>::new(
+        tok_core_identity(),
         GatewayConfig {
             max_connections: 1,
             max_tasks: 1,
@@ -300,7 +302,7 @@ async fn failed_gateway_construction_cancels_exported_task_handle() {
     let handle = exported.unwrap();
     assert!(handle.cancellation().is_cancelled());
     handle.wait_finished().await;
-    assert!(handle.reserve().is_err());
+    assert!(handle.tasks().reserve().is_err());
 }
 
 #[tokio::test]
@@ -310,4 +312,97 @@ async fn stopped_before_serve_still_runs_ingress_cleanup() {
     fixture.result().await.unwrap();
     fixture.tasks.wait_finished().await;
     assert!(fixture.finished.load(Ordering::SeqCst));
+}
+
+fn tok_core_identity() -> tok_core::service::Identity {
+    tok_core::service::Identity {
+        node_id: "test".into(),
+        service_name: "gateway".into(),
+    }
+}
+
+#[tokio::test]
+async fn full_gateway_completion_waits_for_ingress_finish_after_tasks_stop() {
+    struct Delayed {
+        entered: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+    }
+    impl GatewayIngress for Delayed {
+        type Connection = Connection;
+        fn connection(&self, _: Connection, _: CancellationToken) -> GatewayTask {
+            Box::pin(async { Ok(()) })
+        }
+        fn finish(&self) -> GatewayTask {
+            let entered = Arc::clone(&self.entered);
+            let release = Arc::clone(&self.release);
+            Box::pin(async move {
+                entered.notify_one();
+                release.notified().await;
+                Ok(())
+            })
+        }
+    }
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let gateway = Gateway::new(
+        tok_core_identity(),
+        GatewayConfig {
+            max_connections: 2,
+            max_tasks: 1,
+        },
+        |_| {
+            Ok(Delayed {
+                entered: Arc::clone(&entered),
+                release: Arc::clone(&release),
+            })
+        },
+    )
+    .unwrap();
+    let handle = gateway.handle();
+    assert_eq!(handle.phase(), tok_gateway::Phase::Prepared);
+    let (_sender, receiver) = mpsc::channel(2);
+    let task = tokio::spawn(gateway.serve(Transport(receiver), CancellationToken::new()));
+    tokio::task::yield_now().await;
+    assert_eq!(handle.phase(), tok_gateway::Phase::Serving);
+    handle.request_stop();
+    entered.notified().await;
+    assert_eq!(handle.tasks().state(), task::State::Stopped);
+    assert_eq!(handle.phase(), tok_gateway::Phase::Stopping);
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(10), handle.wait_finished())
+            .await
+            .is_err()
+    );
+    release.notify_one();
+    task.await.unwrap().unwrap();
+    handle.wait_finished().await;
+    assert_eq!(handle.phase(), tok_gateway::Phase::Stopped);
+    assert_eq!(handle.snapshot().connections, 0);
+}
+#[tokio::test]
+async fn dropping_unstarted_gateway_closes_its_exported_scope() {
+    let stopped = Arc::new(AtomicUsize::new(0));
+    let finished = Arc::new(AtomicBool::new(false));
+    let (started, _receiver) = mpsc::unbounded_channel();
+    let gateway = Gateway::new(
+        tok_core_identity(),
+        GatewayConfig {
+            max_connections: 1,
+            max_tasks: 1,
+        },
+        |_| {
+            Ok(Ingress {
+                started,
+                stopped: Arc::clone(&stopped),
+                finished: Arc::clone(&finished),
+            })
+        },
+    )
+    .unwrap();
+    let handle = gateway.handle();
+    drop(gateway);
+    handle.wait_finished().await;
+    assert_eq!(handle.phase(), tok_gateway::Phase::Stopped);
+    assert_eq!(stopped.load(Ordering::SeqCst), 1);
+    assert!(!finished.load(Ordering::SeqCst));
 }

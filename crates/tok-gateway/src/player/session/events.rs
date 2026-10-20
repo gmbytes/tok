@@ -19,7 +19,7 @@ impl SessionManager {
     /// 显式玩家列表去重，未知玩家不创建会话或所有权。取消后已准入的投递不回滚。
     pub async fn deliver(&self, delivery: &Delivery) -> Result<Report> {
         delivery
-            .validate(self.config.max_frame_size.min(1_048_576))
+            .validate(self.inner.config.max_frame_size.min(1_048_576))
             .map_err(|_| ErrorCode::InvalidRequest)?;
         let mut report = Report::default();
         let (sessions, topic) = match &delivery.target {
@@ -34,7 +34,10 @@ impl SessionManager {
                 }
                 (sessions, None)
             }
-            Target::Topic(topic) => (self.subscriptions.members(topic)?, Some(topic.as_str())),
+            Target::Topic(topic) => (
+                self.inner.subscriptions.members(topic)?,
+                Some(topic.as_str()),
+            ),
             Target::All => (self.sessions()?, None),
         };
         for (position, session) in sessions.into_iter().enumerate() {
@@ -43,7 +46,7 @@ impl SessionManager {
             }
             let result = match &delivery.action {
                 Action::Notify { message_id, body } => {
-                    session.notify_event(*message_id, body, topic)
+                    session.notify_event(*message_id, body, topic).await
                 }
                 Action::Forward(event) => session.enqueue_event(Arc::clone(event), topic),
             };

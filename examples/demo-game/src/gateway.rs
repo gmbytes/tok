@@ -1,5 +1,6 @@
 //! 本地开发的 TCP 网关组装与示例认证，生产应用应替换认证实现和安全适配。
 
+mod middleware;
 use std::{sync::Arc, time::Duration};
 use tok::{
     application::Binding,
@@ -94,11 +95,17 @@ impl Factory for PlayerIngressFactory {
                 Arc::new(RendezvousRouter::new(Arc::clone(&binding.directory))),
                 tok::rpc::player::Client::new(clients),
             )?);
+            let pipeline = player::Pipeline::new(Arc::<player::RpcExecutor>::clone(&executor))
+                .with_admission_layer(middleware::Observe)
+                .with_request_layer(middleware::Observe)
+                .with_event_layer(middleware::Observe)
+                .with_timer_layer(middleware::Observe)
+                .with_downlink_layer(middleware::Observe);
             let mut limits = config.gateway_limits();
             if events.is_some() {
                 limits.max_tasks += 2;
             }
-            let gateway = Gateway::new_in(limits, &init.service, |gateway_context| {
+            let gateway = Gateway::new_in(limits, &init, |gateway_context| {
                 let ingress = player::Ingress::new(
                     gateway_context,
                     config.clone(),
@@ -109,13 +116,15 @@ impl Factory for PlayerIngressFactory {
                     Arc::new(DemoAuthenticator),
                     ownership,
                     executor,
-                )?;
+                )?
+                .with_pipeline(pipeline)
+                .with_session_extension(Arc::new(middleware::SessionStatistics))?;
                 let ingress = match tokens {
                     Some(tokens) => ingress.with_resume_token_codec(tokens),
                     None => ingress,
                 };
                 match gateway_rpc {
-                    Some(service) => ingress.with_gateway_rpc(binding.directory, &service),
+                    Some(service) => Ok(ingress.with_gateway_rpc(binding.directory, &service)),
                     None => Ok(ingress),
                 }
             })?;
@@ -124,13 +133,17 @@ impl Factory for PlayerIngressFactory {
                 let sessions = gateway.ingress().sessions();
                 // 这两个内置处理者只查本地会话，因此示例为各节点独立订阅。
                 // 自定义组件可以选择 group，并自行完成目标路由或其他业务处理。
+                let capabilities = sessions.extensions();
                 let components = [
                     crate::events::player_forwarder(init.identity.clone(), sessions.clone(), None)?,
                     crate::events::value_notifier(init.identity.clone(), sessions, None)?,
                 ];
                 let mut subscriptions = Vec::new();
                 for component in components {
-                    subscriptions.push(bus.subscribe(component).await?);
+                    subscriptions.push(
+                        bus.subscribe(component.with_extensions(capabilities.clone()))
+                            .await?,
+                    );
                 }
                 for subscription in subscriptions {
                     let tasks = gateway.tasks();

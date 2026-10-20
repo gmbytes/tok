@@ -9,10 +9,12 @@ pub use error::{ErrorCode, GatewayError, Result};
 pub use tok_rpc::protocol::client::v1 as protocol;
 
 pub mod codec;
+mod handle;
 pub mod player;
 pub mod rpc;
 pub mod scene;
 pub mod security;
 mod server;
+pub use handle::{Handle, Phase, Snapshot};
 pub mod transport;
 pub use server::{Gateway, GatewayConfig, GatewayIngress, GatewayTask};

@@ -1,6 +1,6 @@
 # 服务与处理链方向校正实施计划
 
-本计划替代旧的阶段零至八推进顺序，是当前重构与实施的唯一批次入口。P1 已提交为 `f54b545`，文档校准为 `2552274`；P2 公共工厂与生命周期已提交为 `c6ffdc3`；P3 统一入口已实施，P4–P7 尚未实施。旧阶段与验收见[实施历史](implementation-history.md)，代码现状见[实现状态](status.md)。
+本计划替代旧的阶段零至八推进顺序，是当前重构与实施的唯一批次入口。P1 已提交为 `f54b545`，文档校准为 `2552274`；P2 公共工厂与生命周期已提交为 `c6ffdc3`；P3 统一入口已提交为 `368fc74`；P4 gateway 扩展已实施、尚未提交，下一步为 P5，P5–P7 尚未实施。旧阶段与验收见[实施历史](implementation-history.md)，代码现状见[实现状态](status.md)。
 
 目标：框架提供“服务 = 状态 + 入口路由 + 处理链”，处理链由中间件与 handler 组成；tok-gateway 成为共同设施的内置扩展，tok crate 保持门面与应用组装入口。[总体设计](design.md)规定边界，[服务运行模型](service-runtime.md)规定目标契约。
 
@@ -11,8 +11,8 @@
 | P1 | 验证统一执行抽象 | 已确认的设计 | 已完成最小模型验收 |
 | P2 | 下沉服务构建与运行设施 | P1 契约成立 | 已实施，验收见下文 |
 | P3 | 统一 RPC 与事件执行入口 | P1、P2 | 已实施，验收见下文 |
-| P4 | gateway 迁移为服务扩展 | P2、P3 | 未实施，下一步 |
-| P5 | 实现传输 topic 路由 | P3 统一事件契约 | 未实施 |
+| P4 | gateway 迁移为服务扩展 | P2、P3 | 已实施，验收见下文 |
+| P5 | 实现传输 topic 路由 | P3 统一事件契约 | 未实施，下一步 |
 | P6 | 动态兴趣与主题策略 | P4 生命周期、P5 路由 | 未实施 |
 | P7 | 全面迁移、旧接口清理与验收 | P1 至 P6 | 未实施 |
 
@@ -117,7 +117,7 @@ P1 上下文边界校正：移除通用 `target`；`operation` 明确为服务�
 
 全目标 Clippy、workspace rustdoc、格式、UTF-8/LF 和 84 处 Markdown 仓库内链接/锚点检查通过。events-smoke、execution-smoke、lifecycle-smoke、rpc-smoke、client-smoke、nats-smoke 六个示例通过；真实 NATS 13 项、Redis 发现 2 项及发现双进程/共享所有权/三进程交接 3 项集成均通过。外部回归串行运行，使用测试独立命名空间。
 
-本批未运行 release 构建或 Linux 本地验证，不将 Windows 结果替代 CI。P3 已完成本批验收，下一批为 P4；P4–P7 尚未实施。
+本批未运行 release 构建或 Linux 本地验证，不将 Windows 结果替代 CI。以上为 P3 验收时记录；P3 已提交，P4 当前验收另列。
 
 ## P4 gateway 迁移为服务扩展
 
@@ -132,6 +132,23 @@ P1 上下文边界校正：移除通用 `target`；`operation` 明确为服务�
 - 事件处理者与消息中间件取得同样的运行时能力；普通服务无需构造 gateway 或 session。
 
 **验收：** 游戏通过扩展完成查询、生命周期管理与业务拦截，无需复制 Gateway 循环；登录、顶号、租约失效、timer、FIFO、ACK、恢复、交接和取消回归通过。新下行在编号和编码前处理，缓存补发不再次执行 Layer。
+
+### P4 已形成的落点
+
+- Gateway::new 显式接收服务身份；new_in 从 Init 继承身份、服务句柄和扩展。构造闭包完成所有配置后统一 initialize，避免提前注册 RPC 持有旧 manager 配置。
+- gateway::Handle、SessionManager 和 SessionHandle 提供各自范围的快照、取消、停止及结束等待。Gateway 完整等待包含 ingress.finish，tasks().wait_finished 仅代表任务范围。
+- Pipeline 使用共同 Request / Tower Layer，覆盖业务准入、FIFO 内请求/事件/timer 执行与新下行。上下文包含实际 gateway、manager、session 能力及作用域状态；不开放内部状态锁。
+- 准入绑定当前连接代次，重连/顶号使旧等待失效；已经执行的任务继续按原预算收束。新下行异步 Layer 位于编号、编码和缓存之前，最终重验绑定及主题，补发不重复执行 Layer。
+- session::extension::Factory 显式定义初始化、快照、校验和恢复；同步生命周期观察回调在框架锁外执行。跨网关快照必须携带扩展种类与正文，提交前校验，提交后按新身份恢复；恢复失败释放目标所有权，不复活源会话。
+- demo 安装同一个观察 Layer 和显式快照的会话统计扩展；指南、生命周期与执行示例迁移至真实 API。客户端 Frame 仍为 v3，未发布的内部 HandoffSnapshot v1 增加必需扩展字段。
+
+### P4 验收记录（2026-10-20 Windows）
+
+工作区 226 项测试通过（含 11 项指南示例及 2 项编译失败文档测试）。新增覆盖三层能力和生命周期查询、请求/事件/timer 共用 Layer、下行改写与补发不重复执行、等待准入时顶号/重连、等待下行时退出主题、初始化失败释放所有权、扩展状态迁移与失败边界、完整网关退出等待。原有 FIFO、timer、续租、ACK、同网关恢复和跨网关交接回归通过。
+
+全目标 Clippy、workspace rustdoc、格式、UTF-8/LF 及仓库内文档链接检查通过。events-smoke、execution-smoke、lifecycle-smoke、rpc-smoke、client-smoke、nats-smoke 通过；真实 NATS 13 项、Redis 发现 2 项及发现双进程/共享所有权/三进程交接 3 项集成通过。外部回归串行运行，demo 实际安装观察 Layer 和可交接的会话统计扩展。
+
+P4 尚未提交。未运行 release 构建或 Linux 本地验证。下一批为 P5 传输 topic 路由，P6 动态兴趣及 P7 整体组装仍未实施。
 
 ## P5 实现传输 topic 路由
 
