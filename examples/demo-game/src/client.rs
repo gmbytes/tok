@@ -23,6 +23,7 @@ pub async fn smoke(address: std::net::SocketAddr) -> Result<(), Error> {
                 content: Some(Content::Login(protocol::LoginRequest {
                     request_id: 1,
                     credential: "demo:42".into(),
+                    resume_token: String::new(),
                 })),
             },
         )
@@ -91,8 +92,48 @@ pub async fn smoke(address: std::net::SocketAddr) -> Result<(), Error> {
         &v1::StartProductionRequest {},
     )
     .await?;
+    // 短线期间生产 timer 继续运行；新连接恢复原会话及下行位置。
+    drop(stream);
+    tokio::time::sleep(Duration::from_millis(80)).await;
+    stream = TcpStream::connect(address).await?;
+    codec
+        .write(
+            &mut stream,
+            &Frame {
+                version: VERSION,
+                content: Some(Content::Resume(protocol::ResumeRequest {
+                    request_id: 1,
+                    resume_token: login.resume_token.clone(),
+                    ack_seq: server_seq,
+                })),
+            },
+        )
+        .await?;
+    let resumed = codec
+        .read(&mut stream)
+        .await?
+        .ok_or_else(|| std::io::Error::other("恢复前连接结束"))?;
+    let Some(Content::Resumed(resumed)) = resumed.content else {
+        return Err(std::io::Error::other("未收到恢复回应").into());
+    };
+    if resumed.error_code != 0
+        || resumed.session_id != login.session_id
+        || resumed.epoch != login.epoch
+    {
+        return Err(std::io::Error::other("原会话恢复失败").into());
+    }
+    let recovered = codec
+        .read(&mut stream)
+        .await?
+        .ok_or_else(|| std::io::Error::other("恢复期间连接结束"))?;
+    let Some(Content::Recovered(recovered)) = recovered.content else {
+        return Err(std::io::Error::other("缺少恢复完成标记").into());
+    };
+    if recovered.through_seq != server_seq {
+        return Err(std::io::Error::other("恢复序号不一致").into());
+    }
     tokio::time::timeout(Duration::from_secs(3), async {
-        let mut request_id = 7;
+        let mut request_id = resumed.last_request_id.max(6) + 1;
         loop {
             let state = call::<_, v1::GetPlayerResponse>(
                 &mut stream,

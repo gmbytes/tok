@@ -68,9 +68,16 @@ impl GatewayIngress for PlayerIngress {
         let authenticator = self.authenticator.clone();
         let sessions = self.sessions.clone();
         Box::pin(async move {
-            super::connection::connection(stream, config, codec, authenticator, sessions, shutdown)
-                .await
-                .map_err(std::io::Error::other)
+            super::connection::serve_connection(
+                stream,
+                config,
+                codec,
+                authenticator,
+                sessions,
+                shutdown,
+            )
+            .await
+            .map_err(std::io::Error::other)
         })
     }
     fn stop(&self) {
@@ -79,7 +86,7 @@ impl GatewayIngress for PlayerIngress {
     fn finish(&self) -> GatewayTask {
         let sessions = self.sessions.clone();
         Box::pin(async move {
-            sessions.release_all().await;
+            sessions.release_all_ownership().await;
             Ok(())
         })
     }

@@ -12,11 +12,16 @@ message Frame {
     Notify notify = 6;
     ControlError error = 7;
     Ack ack = 8;
+    ResumeRequest resume = 9;
+    ResumeResponse resumed = 10;
+    RecoveryComplete recovered = 11;
   }
 }
 message LoginRequest {
   uint64 request_id = 1;
   string credential = 2;
+  // 快速重登凭证，与 credential 二选一；创建新逻辑会话。
+  string resume_token = 3;
 }
 message LoginResponse {
   uint64 request_id = 1;
@@ -24,6 +29,27 @@ message LoginResponse {
   string player_id = 3;
   string session_id = 4;
   uint64 epoch = 5;
+  string resume_token = 6;
+  uint64 resume_token_ttl_ms = 7;
+}
+// 新连接恢复原逻辑会话，不重新执行业务。
+message ResumeRequest {
+  uint64 request_id = 1;
+  string resume_token = 2;
+  uint64 ack_seq = 3;
+}
+message ResumeResponse {
+  uint64 request_id = 1;
+  uint32 error_code = 2;
+  string player_id = 3;
+  string session_id = 4;
+  uint64 epoch = 5;
+  // 网关已见过的最大业务请求 ID；新请求必须更大，不能重发未知结果请求。
+  uint64 last_request_id = 6;
+}
+// 在此标记之前完成按原序号补发；其后恢复普通交互。
+message RecoveryComplete {
+  uint64 through_seq = 1;
 }
 message BusinessRequest {
   uint64 request_id = 1;

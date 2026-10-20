@@ -11,13 +11,15 @@
 
 workspace 启用 `missing_docs = "deny"`，对外公开的模块、类型、字段、枚举变体和方法缺少文档注释时，编译与常规检查会失败。仅 protobuf 自动生成模块豁免；手写代码必须维护文档注释，rustdoc 同时检查文档链接和标记语法。
 
+所有库、二进制及构建脚本的非测试代码启用 `clippy::unwrap_used`、`clippy::expect_used` 的 deny 检查。能传播的错误使用 `?` 或显式分支；确需保留的断言必须在局部通过 `#[expect(..., reason = "具体原因")]` 说明成立前提和失败处理，测试代码不受此限制。`unwrap_or`、`unwrap_or_else` 等不触发 panic 的默认值操作不属于该检查。
+
 项目命令使用 [just](https://just.systems/)，在仓库根目录执行 `just` 查看可用任务。
 
 ## 工程结构
 
 框架采用 Cargo workspace，库位于 `crates/`，具体游戏组装最终二进制。`examples/demo-game` 展示游戏协议、服务配置和内存服务目录。
 
-当前已提供配置校验、内存目录、Redis 开发发现与变更订阅、bid 路由、内存与 Redis session 所有权、protobuf 生成、服务生命周期、可观测组件及共享内部 gRPC 端点。PlayerGateway 提供 TCP 登录、认证扩展点、有界串行 session、timer 调度、统一下行序号、累计 ACK 和有界内存缓存。客户端 Frame 已升级为版本 2，旧版须同步升级；断线仍立即关闭 session 并清理 timer 与缓存。示例支持玩家状态读写、player 调用 guild 及计时更新状态；按 Ctrl+C 优雅退出。断线恢复、跨网关交接、Kubernetes 发现和 NATS 消费按后续批次推进。
+当前已提供配置校验、内存目录、Redis 开发发现与变更订阅、bid 路由、内存与 Redis session 所有权、protobuf 生成、服务生命周期、可观测组件及共享内部 gRPC 端点。PlayerGateway 提供 TCP 登录、认证扩展点、有界串行 session、timer 调度、统一下行序号、累计 ACK 和有界内存缓存。客户端 Frame 已升级为版本 3，旧版须同步升级；已支持同网关 token 恢复、有序补发与快速重登，默认断线宽限期 30 秒，期间继续驱动 timer。示例支持玩家状态读写、player 调用 guild 及计时更新状态；按 Ctrl+C 优雅退出。跨网关交接、Kubernetes 发现和 NATS 消费按后续批次推进。
 
 网关共用 `Gateway` 运行框架，接入组件负责具体业务语义。当前 `PlayerIngress` 实现 TCP 登录和串行 session，Scene 接入尚未实现；`PlayerGateway` 保留为兼容包装。`player/`、`scene/` 分别组织玩家和场景组件，`transport/`、`security/`、`codec/` 提供传输、安全与编解码适配。示例通过可选的 `factory = "player-ingress"` 选择网关工厂，服务名可自行命名。
 

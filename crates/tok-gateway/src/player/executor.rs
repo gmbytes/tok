@@ -34,9 +34,10 @@ impl From<LogicalMessage> for PlayerReply {
 /// 所有玩家执行来源应进入 session 队列后使用的执行扩展点。
 pub trait PlayerExecutor: Send + Sync {
     /// 使用 session 身份执行请求，不能从消息正文选择其他玩家。
-    fn execute(&self, identity: SessionIdentity, request: LogicalMessage) -> PlayerTask<'_>;
+    fn execute_request(&self, identity: SessionIdentity, request: LogicalMessage)
+    -> PlayerTask<'_>;
     /// 执行内部 timer；序号由 session 独立分配，不占用客户端请求序列。默认拒绝未支持的计时调用。
-    fn timer(
+    fn execute_timer(
         &self,
         _identity: SessionIdentity,
         _request_id: u64,
@@ -104,10 +105,14 @@ impl RpcPlayerExecutor {
 }
 
 impl PlayerExecutor for RpcPlayerExecutor {
-    fn execute(&self, identity: SessionIdentity, request: LogicalMessage) -> PlayerTask<'_> {
+    fn execute_request(
+        &self,
+        identity: SessionIdentity,
+        request: LogicalMessage,
+    ) -> PlayerTask<'_> {
         self.call(identity, request, None)
     }
-    fn timer(
+    fn execute_timer(
         &self,
         identity: SessionIdentity,
         request_id: u64,

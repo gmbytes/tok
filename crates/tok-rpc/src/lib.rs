@@ -4,6 +4,8 @@
 //! [`RpcClients`] 复用有界 Channel 缓存，每次调用有超时且不添加重试层。
 //! [`HandlerRegistry`] 将游戏 protobuf 消息注册为强类型业务处理函数。
 
+#![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
+
 mod client;
 mod endpoint;
 mod handler;

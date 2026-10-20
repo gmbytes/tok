@@ -8,6 +8,10 @@ use std::{
 };
 
 /// 每个顶层游戏消息必须有一个同名、正数且唯一的 ID，零只用于未指定值。
+#[expect(
+    clippy::expect_used,
+    reason = "writeln 只写入 String，格式参数仅为 String 和 i32，不存在返回 fmt::Error 的写入或自定义格式化路径"
+)]
 pub fn generate(messages: &[String], values: &[(String, i32)]) -> io::Result<String> {
     let invalid = |reason: String| io::Error::new(io::ErrorKind::InvalidData, reason);
     let mut expected = BTreeMap::new();
@@ -39,6 +43,8 @@ pub fn generate(messages: &[String], values: &[(String, i32)]) -> io::Result<Str
         if message.starts_with(|ch: char| ch.is_ascii_digit()) {
             message.insert(0, '_');
         }
+        // String 的 fmt::Write 不返回写入错误；这里也没有自定义 Display 实现。
+        // 内存分配失败不会通过 fmt::Result 返回，不能用此 Result 将其作为普通 I/O 错误处理。
         writeln!(
             output,
             "impl super::GameMessage for {message} {{ const MESSAGE_ID: u32 = {number}; }}"

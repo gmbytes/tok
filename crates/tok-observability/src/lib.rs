@@ -1,5 +1,7 @@
 //! 进程级可观测初始化。库只埋点，游戏入口初始化一次并在服务退出后关闭。
 
+#![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
+
 mod json;
 mod sampling;
 pub use sampling::{ForceTraceRule, SamplingConfig, TraceControl};

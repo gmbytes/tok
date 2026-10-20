@@ -25,8 +25,24 @@ const PRODUCTION_OUTPUT: i64 = 1;
 /// 模拟游戏存储的有界内存状态，多个 player 请求共享，不创建常驻 player 对象。
 pub struct State {
     capacity: usize,
-    values: Mutex<BTreeMap<u64, i64>>,
+    values: Mutex<BTreeMap<u64, PlayerState>>,
 }
+#[derive(Clone, Copy, Default)]
+struct PlayerState {
+    value: i64,
+    production_due: Option<i64>,
+}
+
+fn production_spec(due_at_ms: i64) -> TimerSpec {
+    TimerSpec {
+        timer_id: "production".into(),
+        message_id: ProductionFinished::MESSAGE_ID,
+        body: ProductionFinished {}.encode_to_vec(),
+        due_at_ms,
+        interval_ms: None,
+    }
+}
+
 impl State {
     /// 创建具有指定记录上限的示例存储，capacity 必须大于零。
     pub fn new(capacity: usize) -> Result<Self, tok::core::Error> {
@@ -58,7 +74,7 @@ pub fn handlers(
     directory: Arc<dyn ServiceDirectory>,
 ) -> Result<HandlerRegistry, tok::rpc::Error> {
     let mut registry = HandlerRegistry::new();
-    registry.register(
+    registry.register_with_timers(
         GetPlayerRequest::MESSAGE_ID,
         GetPlayerResponse::MESSAGE_ID,
         {
@@ -67,14 +83,26 @@ pub fn handlers(
                 let state = state.clone();
                 async move {
                     let player_id = player_id(&context)?;
-                    let value = state
+                    let stored = state
                         .values
                         .lock()
                         .map_err(|_| Status::internal("示例存储锁不可用"))?
                         .get(&player_id)
                         .copied()
-                        .unwrap_or(0);
-                    Ok(GetPlayerResponse { player_id, value })
+                        .unwrap_or_default();
+                    Ok(HandlerReply {
+                        message: GetPlayerResponse {
+                            player_id,
+                            value: stored.value,
+                        },
+                        timers: Some(TimerUpdate::ReplaceAll(
+                            stored
+                                .production_due
+                                .into_iter()
+                                .map(production_spec)
+                                .collect(),
+                        )),
+                    })
                 }
             }
         },
@@ -95,7 +123,7 @@ pub fn handlers(
                     if !values.contains_key(&player_id) && values.len() >= state.capacity {
                         return Err(Status::resource_exhausted("示例存储容量已满"));
                     }
-                    values.insert(player_id, request.value);
+                    values.entry(player_id).or_default().value = request.value;
                     Ok(SetPlayerResponse {
                         player_id,
                         value: request.value,
@@ -107,26 +135,34 @@ pub fn handlers(
     registry.register_with_timers(
         StartProductionRequest::MESSAGE_ID,
         StartProductionResponse::MESSAGE_ID,
-        |context, _request: StartProductionRequest| async move {
-            player_id(&context)?;
-            let now = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map_err(|_| Status::internal("系统时钟无效"))?
-                .as_millis() as i64;
-            let update = TimerUpdate::Patch {
-                upsert: vec![TimerSpec {
-                    timer_id: "production".into(),
-                    message_id: ProductionFinished::MESSAGE_ID,
-                    body: ProductionFinished {}.encode_to_vec(),
-                    due_at_ms: now + PRODUCTION_TIME_MS,
-                    interval_ms: None,
-                }],
-                cancel: vec![],
-            };
-            Ok(HandlerReply {
-                message: StartProductionResponse {},
-                timers: Some(update),
-            })
+        {
+            let state = state.clone();
+            move |context, _request: StartProductionRequest| {
+                let state = state.clone();
+                async move {
+                    let id = player_id(&context)?;
+                    let now = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .map_err(|_| Status::internal("系统时钟无效"))?
+                        .as_millis() as i64;
+                    let due = now + PRODUCTION_TIME_MS;
+                    let mut values = state
+                        .values
+                        .lock()
+                        .map_err(|_| Status::internal("示例存储锁不可用"))?;
+                    if !values.contains_key(&id) && values.len() >= state.capacity {
+                        return Err(Status::resource_exhausted("示例存储容量已满"));
+                    }
+                    values.entry(id).or_default().production_due = Some(due);
+                    Ok(HandlerReply {
+                        message: StartProductionResponse {},
+                        timers: Some(TimerUpdate::Patch {
+                            upsert: vec![production_spec(due)],
+                            cancel: vec![],
+                        }),
+                    })
+                }
+            }
         },
     )?;
     registry.register_timer(
@@ -142,13 +178,20 @@ pub fn handlers(
                 if !values.contains_key(&id) && values.len() >= state.capacity {
                     return Err(Status::resource_exhausted("示例存储容量已满"));
                 }
-                let value = values
-                    .get(&id)
-                    .copied()
-                    .unwrap_or(0)
+                let scheduled = context
+                    .timer
+                    .as_ref()
+                    .ok_or_else(|| Status::invalid_argument("缺少内部计时来源"))?
+                    .scheduled_at_ms;
+                let stored = values.entry(id).or_default();
+                if stored.production_due != Some(scheduled) {
+                    return Ok(None);
+                }
+                stored.value = stored
+                    .value
                     .checked_add(PRODUCTION_OUTPUT)
                     .ok_or_else(|| Status::out_of_range("示例计时数值溢出"))?;
-                values.insert(id, value);
+                stored.production_due = None;
                 Ok(None)
             }
         },

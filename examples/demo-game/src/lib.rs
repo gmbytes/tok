@@ -1,5 +1,7 @@
 //! 示例游戏自己的协议和业务模块，框架 crate 不依赖这些模块。
 
+#![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
+
 pub mod client;
 pub mod gateway;
 pub mod guild;
@@ -38,7 +40,9 @@ pub fn application(config: AppConfig) -> Result<Application, Error> {
         )?),
         tok::OwnershipBackend::Redis => {
             Arc::new(tok::infra::ownership::redis::RedisOwnership::new(
-                config.redis_ownership.clone().expect("配置已校验"),
+                config.redis_ownership.clone().ok_or_else(|| {
+                    tok::core::Error::InvalidConfig("Redis 所有权缺少 redis_ownership 配置".into())
+                })?,
             )?)
         }
     };
@@ -47,7 +51,9 @@ pub fn application(config: AppConfig) -> Result<Application, Error> {
             .endpoints
             .iter()
             .find(|entry| entry.name == service.endpoint)
-            .expect("端点已校验");
+            .ok_or_else(|| {
+                tok::core::Error::InvalidConfig(format!("服务端点未配置：{}", service.endpoint))
+            })?;
         match service.factory_name() {
             "player-ingress" => {
                 if endpoint.protocol != "tcp"

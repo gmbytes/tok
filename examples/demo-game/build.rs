@@ -1,5 +1,7 @@
 //! 从示例游戏 protobuf 定义生成游戏消息代码。
 
+#![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
+
 #[path = "build/message_ids.rs"]
 mod message_ids;
 

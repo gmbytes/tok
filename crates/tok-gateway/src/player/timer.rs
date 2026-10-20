@@ -4,7 +4,7 @@ use super::session::Job;
 use crate::{ErrorCode, Result};
 use std::{
     collections::{BTreeMap, BTreeSet},
-    sync::Mutex,
+    sync::{Mutex, MutexGuard},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tok_core::{TimerSpec, TimerTrigger, TimerUpdate};
@@ -15,7 +15,7 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 
 #[derive(Clone)]
-pub(super) struct Ticket {
+pub(super) struct TimerTicket {
     timer_id: String,
     version: u64,
     scheduled_at_ms: i64,
@@ -24,8 +24,9 @@ pub(super) struct Ticket {
 struct Entry {
     spec: TimerSpec,
     version: u64,
-    pending: bool,
-    next_at_ms: i64,
+    // 本次触发已排队或正在执行，期间不再产生同一 timer 的触发。
+    tick_pending: bool,
+    scheduled_at_ms: i64,
     deadline: Instant,
 }
 #[derive(Default)]
@@ -36,46 +37,50 @@ struct State {
 
 // 会话建立时把 UTC 与单调时钟对齐；等待和实际时刻均沿此基准推进，避免墙钟跳变重放。
 struct Clock {
-    utc_ms: i64,
-    instant: Instant,
+    base_utc_ms: i64,
+    base_instant: Instant,
 }
 impl Clock {
     fn new() -> Self {
         Self {
-            utc_ms: SystemTime::now()
+            base_utc_ms: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_millis()
                 .min(i64::MAX as u128) as i64,
-            instant: Instant::now(),
+            base_instant: Instant::now(),
         }
     }
     fn now_ms(&self) -> i64 {
-        self.utc_ms
-            .saturating_add(self.instant.elapsed().as_millis().min(i64::MAX as u128) as i64)
+        self.base_utc_ms.saturating_add(
+            self.base_instant
+                .elapsed()
+                .as_millis()
+                .min(i64::MAX as u128) as i64,
+        )
     }
-    fn deadline(&self, utc_ms: i64) -> Option<Instant> {
-        self.instant.checked_add(Duration::from_millis(
-            utc_ms.saturating_sub(self.utc_ms).max(0) as u64,
+    fn deadline(&self, target_utc_ms: i64) -> Option<Instant> {
+        self.base_instant.checked_add(Duration::from_millis(
+            target_utc_ms.saturating_sub(self.base_utc_ms).max(0) as u64,
         ))
     }
 }
 
-pub(super) struct Timers {
+pub(super) struct TimerScheduler {
     state: Mutex<State>,
     changed: Notify,
     clock: Clock,
-    max_count: usize,
-    max_bytes: usize,
+    max_timers: usize,
+    max_timer_bytes: usize,
 }
-impl Timers {
-    pub(super) fn new(max_count: usize, max_bytes: usize) -> Self {
+impl TimerScheduler {
+    pub(super) fn new(max_timers: usize, max_timer_bytes: usize) -> Self {
         Self {
             state: Mutex::new(State::default()),
             changed: Notify::new(),
             clock: Clock::new(),
-            max_count,
-            max_bytes,
+            max_timers,
+            max_timer_bytes,
         }
     }
     pub(super) fn apply(&self, update: TimerUpdate) -> Result<()> {
@@ -85,7 +90,7 @@ impl Timers {
             TimerUpdate::ReplaceAll(specs) => (BTreeMap::new(), specs, Vec::new()),
             TimerUpdate::Patch { upsert, cancel } => (state.entries.clone(), upsert, cancel),
         };
-        if upsert.len() > self.max_count || cancel.len() > self.max_count {
+        if upsert.len() > self.max_timers || cancel.len() > self.max_timers {
             return Err(ErrorCode::CapacityExceeded.into());
         }
         let mut ids = BTreeSet::new();
@@ -107,10 +112,10 @@ impl Timers {
             entries.insert(
                 spec.timer_id.clone(),
                 Entry {
-                    next_at_ms: spec.due_at_ms,
+                    scheduled_at_ms: spec.due_at_ms,
                     spec,
                     version,
-                    pending: false,
+                    tick_pending: false,
                     deadline,
                 },
             );
@@ -125,7 +130,8 @@ impl Timers {
             sum.checked_add(entry.spec.timer_id.len())?
                 .checked_add(entry.spec.body.len())
         });
-        if entries.len() > self.max_count || bytes.is_none_or(|bytes| bytes > self.max_bytes) {
+        if entries.len() > self.max_timers || bytes.is_none_or(|bytes| bytes > self.max_timer_bytes)
+        {
             return Err(ErrorCode::CapacityExceeded.into());
         }
         state.entries = entries;
@@ -134,24 +140,22 @@ impl Timers {
         self.changed.notify_one();
         Ok(())
     }
-    pub(super) fn is_current(&self, ticket: &Ticket) -> bool {
-        self.state
-            .lock()
-            .expect("计时集合锁不可用")
+    pub(super) fn is_current(&self, ticket: &TimerTicket) -> bool {
+        self.lock_state()
             .entries
             .get(&ticket.timer_id)
             .is_some_and(|entry| {
                 entry.version == ticket.version
-                    && entry.pending
-                    && entry.next_at_ms == ticket.scheduled_at_ms
+                    && entry.tick_pending
+                    && entry.scheduled_at_ms == ticket.scheduled_at_ms
             })
     }
-    pub(super) fn prepare(&self, ticket: &Ticket) -> Option<(TimerSpec, TimerTrigger)> {
-        let state = self.state.lock().expect("计时集合锁不可用");
+    pub(super) fn prepare(&self, ticket: &TimerTicket) -> Option<(TimerSpec, TimerTrigger)> {
+        let state = self.lock_state();
         let entry = state.entries.get(&ticket.timer_id)?;
         if entry.version != ticket.version
-            || !entry.pending
-            || entry.next_at_ms != ticket.scheduled_at_ms
+            || !entry.tick_pending
+            || entry.scheduled_at_ms != ticket.scheduled_at_ms
         {
             return None;
         }
@@ -164,8 +168,8 @@ impl Timers {
             },
         ))
     }
-    pub(super) fn finish(&self, ticket: &Ticket) {
-        let mut state = self.state.lock().expect("计时集合锁不可用");
+    pub(super) fn complete_tick(&self, ticket: &TimerTicket) {
+        let mut state = self.lock_state();
         let Some(entry) = state.entries.get_mut(&ticket.timer_id) else {
             return;
         };
@@ -174,16 +178,18 @@ impl Timers {
         }
         let next = entry.spec.interval_ms.and_then(|period| {
             let now = self.clock.now_ms();
-            let steps =
-                (i128::from(now) - i128::from(entry.next_at_ms)).max(0) / i128::from(period) + 1;
+            let steps = (i128::from(now) - i128::from(entry.scheduled_at_ms)).max(0)
+                / i128::from(period)
+                + 1;
             let next =
-                i64::try_from(i128::from(entry.next_at_ms) + steps * i128::from(period)).ok()?;
+                i64::try_from(i128::from(entry.scheduled_at_ms) + steps * i128::from(period))
+                    .ok()?;
             Some((next, self.clock.deadline(next)?))
         });
         if let Some((next, deadline)) = next {
-            entry.next_at_ms = next;
+            entry.scheduled_at_ms = next;
             entry.deadline = deadline;
-            entry.pending = false;
+            entry.tick_pending = false;
         } else {
             state.entries.remove(&ticket.timer_id);
         }
@@ -194,12 +200,10 @@ impl Timers {
         loop {
             let changed = self.changed.notified();
             let deadline = self
-                .state
-                .lock()
-                .expect("计时集合锁不可用")
+                .lock_state()
                 .entries
                 .values()
-                .filter(|entry| !entry.pending)
+                .filter(|entry| !entry.tick_pending)
                 .map(|entry| entry.deadline)
                 .min();
             let waiting = async {
@@ -211,21 +215,34 @@ impl Timers {
             tokio::select! { biased; _ = cancel.cancelled() => return, _ = changed => continue, _ = waiting => {} }
             // 满队列只等待一个可取消的容量许可，不丢触发，不自旋，也不创建无限后台任务。
             let permit = tokio::select! { biased; _ = cancel.cancelled() => return, _ = self.changed.notified() => continue, permit = queue.reserve() => match permit { Ok(permit) => permit, Err(_) => return } };
-            let mut state = self.state.lock().expect("计时集合锁不可用");
+            let mut state = self.lock_state();
             let next = state
                 .entries
                 .values_mut()
-                .filter(|entry| !entry.pending && entry.deadline <= Instant::now())
+                .filter(|entry| !entry.tick_pending && entry.deadline <= Instant::now())
                 .min_by_key(|entry| entry.deadline);
             if let Some(entry) = next {
-                entry.pending = true;
-                permit.send(Job::Timer(Ticket {
+                entry.tick_pending = true;
+                permit.send(Job::Timer(TimerTicket {
                     timer_id: entry.spec.timer_id.clone(),
                     version: entry.version,
-                    scheduled_at_ms: entry.next_at_ms,
+                    scheduled_at_ms: entry.scheduled_at_ms,
                 }));
             }
         }
+    }
+
+    // 锁中毒说明持锁路径已 panic，timer 的版本及 tick_pending 状态可能只更新了一部分。
+    // 不能把它当作“无有效 timer”继续运行；主动 panic 交给 Gateway 的 JoinSet 监督，
+    // 由既有后台任务崩溃流程失效入口、停止服务并收束所有权，而不恢复未知状态。
+    #[expect(
+        clippy::expect_used,
+        reason = "timer 锁中毒后状态完整性未知，必须让受监督任务失败并触发网关清理"
+    )]
+    fn lock_state(&self) -> MutexGuard<'_, State> {
+        self.state
+            .lock()
+            .expect("timer 锁已中毒，停止受监督的调度任务")
     }
 }
 fn valid_id(id: &str) -> bool {
@@ -236,6 +253,22 @@ fn valid_id(id: &str) -> bool {
 mod tests {
     use super::*;
     use std::sync::Arc;
+
+    #[tokio::test]
+    async fn poisoned_state_stops_the_scheduler_instead_of_treating_it_as_empty() {
+        let timers = Arc::new(TimerScheduler::new(4, 1024));
+        let poisoned = timers.clone();
+        let poisoner = tokio::spawn(async move {
+            let _guard = poisoned.state.lock().unwrap();
+            panic!("模拟持锁路径崩溃");
+        });
+        assert!(poisoner.await.unwrap_err().is_panic());
+        let (sender, _receiver) = mpsc::channel(1);
+        let worker = tokio::spawn(async move {
+            timers.run(sender, CancellationToken::new()).await;
+        });
+        assert!(worker.await.unwrap_err().is_panic());
+    }
 
     fn spec(id: &str, due: i64, period: Option<u64>) -> TimerSpec {
         TimerSpec {
@@ -251,7 +284,7 @@ mod tests {
             tokio::task::yield_now().await;
         }
     }
-    async fn ticket(queue: &mut mpsc::Receiver<Job>) -> Ticket {
+    async fn ticket(queue: &mut mpsc::Receiver<Job>) -> TimerTicket {
         match queue.recv().await.unwrap() {
             Job::Timer(ticket) => ticket,
             _ => panic!("预期计时任务"),
@@ -260,7 +293,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn replacing_and_cancelling_invalidates_queued_versions() {
-        let timers = Arc::new(Timers::new(4, 1024));
+        let timers = Arc::new(TimerScheduler::new(4, 1024));
         let (sender, mut queue) = mpsc::channel(4);
         let cancel = CancellationToken::new();
         let worker = {
@@ -280,7 +313,7 @@ mod tests {
             .unwrap();
         let current = ticket(&mut queue).await;
         assert!(timers.prepare(&old).is_none());
-        timers.finish(&old);
+        timers.complete_tick(&old);
         assert!(timers.prepare(&current).is_some());
         timers
             .apply(TimerUpdate::Patch {
@@ -301,7 +334,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn busy_periods_merge_and_keep_original_time_base() {
-        let timers = Arc::new(Timers::new(4, 1024));
+        let timers = Arc::new(TimerScheduler::new(4, 1024));
         let epoch = timers.clock.now_ms();
         let (sender, mut queue) = mpsc::channel(4);
         let cancel = CancellationToken::new();
@@ -325,7 +358,7 @@ mod tests {
         let (_, trigger) = timers.prepare(&first).unwrap();
         assert_eq!(trigger.scheduled_at_ms, epoch + 1000);
         assert_eq!(trigger.fired_at_ms, epoch + 4500);
-        timers.finish(&first);
+        timers.complete_tick(&first);
         settle().await;
         tokio::time::advance(Duration::from_millis(499)).await;
         settle().await;
@@ -339,7 +372,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn queue_pressure_does_not_lose_or_duplicate_due_timers() {
-        let timers = Arc::new(Timers::new(4, 1024));
+        let timers = Arc::new(TimerScheduler::new(4, 1024));
         let (sender, mut queue) = mpsc::channel(1);
         let cancel = CancellationToken::new();
         timers
@@ -358,8 +391,8 @@ mod tests {
         let first = ticket(&mut queue).await;
         let second = ticket(&mut queue).await;
         assert_ne!(first.timer_id, second.timer_id);
-        timers.finish(&first);
-        timers.finish(&second);
+        timers.complete_tick(&first);
+        timers.complete_tick(&second);
         settle().await;
         assert!(queue.try_recv().is_err());
         assert!(timers.state.lock().unwrap().entries.is_empty());
@@ -369,7 +402,7 @@ mod tests {
 
     #[test]
     fn invalid_or_oversized_updates_leave_the_entire_set_unchanged() {
-        let timers = Timers::new(2, 12);
+        let timers = TimerScheduler::new(2, 12);
         timers
             .apply(TimerUpdate::ReplaceAll(vec![spec("old", 0, None)]))
             .unwrap();

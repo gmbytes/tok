@@ -1,5 +1,7 @@
 //! 事件类型与投递策略。NATS 后端及同步本地分发器尚未实现。
 
+#![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
+
 pub mod local;
 pub mod nats;
 

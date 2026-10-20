@@ -6,7 +6,7 @@ use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 /// 客户端协议的当前版本。
-pub const VERSION: u32 = 2;
+pub const VERSION: u32 = 3;
 
 /// 有长度上限和整帧期限的 TCP 编解码器，不能取消半帧读取后继续复用连接。
 #[derive(Debug, Clone)]
@@ -35,14 +35,14 @@ impl FrameCodec {
             let count = reader
                 .read(&mut length[..1])
                 .await
-                .map_err(|_| ErrorCode::InvalidRequest)?;
+                .map_err(|_| ErrorCode::SessionClosed)?;
             if count == 0 {
                 return Ok(None);
             }
             reader
                 .read_exact(&mut length[1..])
                 .await
-                .map_err(|_| ErrorCode::InvalidRequest)?;
+                .map_err(|_| ErrorCode::SessionClosed)?;
             let size = u32::from_be_bytes(length) as usize;
             if size == 0 {
                 return Err(ErrorCode::InvalidRequest.into());
@@ -54,7 +54,7 @@ impl FrameCodec {
             reader
                 .read_exact(&mut body)
                 .await
-                .map_err(|_| ErrorCode::InvalidRequest)?;
+                .map_err(|_| ErrorCode::SessionClosed)?;
             let frame = Frame::decode(body.as_slice()).map_err(|_| ErrorCode::InvalidRequest)?;
             if frame.version != VERSION || frame.content.is_none() {
                 return Err(ErrorCode::InvalidRequest.into());

@@ -1,3 +1,4 @@
+#![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
 #![doc = include_str!("../docs/guide.md")]
 
 pub mod config;

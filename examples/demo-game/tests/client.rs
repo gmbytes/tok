@@ -67,6 +67,7 @@ async fn client_to_rpc_reads_writes_queries_guild_and_maps_errors() {
                 content: Some(Content::Login(protocol::LoginRequest {
                     request_id: 1,
                     credential: "demo:00042".into(),
+                    resume_token: String::new(),
                 })),
             },
         )

@@ -3,7 +3,7 @@
 use serde::Deserialize;
 use tok_core::{Error, Result};
 
-/// Player 接入组件的 TCP、串行 session 与租约参数；尚不启用断线恢复。
+/// Player 接入组件的 TCP、串行 session、租约与同网关恢复参数。
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct PlayerConfig {
@@ -37,6 +37,12 @@ pub struct PlayerConfig {
     pub replay_capacity: usize,
     /// 每个 session 的编码下行正文总字节上限，不小于 max_frame_size。
     pub replay_max_bytes: usize,
+    /// 断线后保留 session、租约、timer 与缓存的时长；零表示立即关闭，单位毫秒。
+    pub disconnect_grace_ms: u64,
+    /// 恢复凭证的身份有效期，独立于会话宽限期，单位毫秒。
+    pub resume_token_ttl_ms: u64,
+    /// 网关最多保留的有效恢复凭证数；满时新玩家登录返回 CapacityExceeded。
+    pub max_resume_tokens: usize,
 }
 
 impl Default for PlayerConfig {
@@ -57,6 +63,9 @@ impl Default for PlayerConfig {
             replay_ttl_ms: 30_000,
             replay_capacity: 256,
             replay_max_bytes: 4_194_304,
+            disconnect_grace_ms: 30_000,
+            resume_token_ttl_ms: 3_600_000,
+            max_resume_tokens: 16_384,
         }
     }
 }
@@ -78,6 +87,7 @@ impl PlayerConfig {
             self.outbound_capacity,
             self.max_timers,
             self.replay_capacity,
+            self.max_resume_tokens,
         ]
         .iter()
         .any(|value| *value == 0 || *value > 65_536)
@@ -94,9 +104,11 @@ impl PlayerConfig {
                 self.ownership_ttl_ms,
                 self.renew_interval_ms,
                 self.replay_ttl_ms,
+                self.resume_token_ttl_ms,
             ]
             .iter()
             .any(|value| *value == 0 || *value > 86_400_000)
+            || self.disconnect_grace_ms > 86_400_000
             || self.ownership_ttl_ms <= self.rpc_timeout_ms * 2 + self.renew_interval_ms
         {
             return Err(Error::InvalidConfig(

@@ -1,5 +1,5 @@
 use super::*;
-use crate::player::outbound::Outbound;
+use crate::player::channel::Outbound;
 use crate::player::{PlayerReply, PlayerTask};
 use std::sync::atomic::AtomicUsize;
 use tok_core::{TimerSpec, TimerTrigger, TimerUpdate};
@@ -20,7 +20,11 @@ struct Executor {
     block_timer: AtomicBool,
 }
 impl PlayerExecutor for Executor {
-    fn execute(&self, _identity: SessionIdentity, request: LogicalMessage) -> PlayerTask<'_> {
+    fn execute_request(
+        &self,
+        _identity: SessionIdentity,
+        request: LogicalMessage,
+    ) -> PlayerTask<'_> {
         Box::pin(async move {
             self.events
                 .send(Event::Request(request.message_id))
@@ -41,7 +45,7 @@ impl PlayerExecutor for Executor {
             })
         })
     }
-    fn timer(
+    fn execute_timer(
         &self,
         identity: SessionIdentity,
         _request_id: u64,
@@ -72,10 +76,11 @@ struct Fixture {
     handle: SessionHandle,
     executor: Arc<Executor>,
     events: mpsc::UnboundedReceiver<Event>,
-    outbound: mpsc::Receiver<Outbound>,
+    channel: mpsc::Receiver<Outbound>,
     ownership: Arc<MemoryOwnership>,
     task: Option<tokio::task::JoinHandle<()>>,
     due: i64,
+    connection: ConnectionBinding,
 }
 impl Fixture {
     async fn new() -> Self {
@@ -94,20 +99,26 @@ impl Fixture {
             .await
             .unwrap();
         let (queue, receiver) = mpsc::channel(2);
-        let (outbound, mut outgoing) = mpsc::channel(8);
-        let active = Arc::new(Active {
+        let (channel, mut outgoing) = mpsc::channel(8);
+        let cancel = CancellationToken::new();
+        let active = Arc::new(SessionState {
             ownership: lease,
-            cancel: CancellationToken::new(),
+            cancel: cancel.clone(),
             completion: Completion {
                 done: AtomicBool::new(false),
                 notify: Notify::new(),
             },
-            queue,
-            outbound: Downlink::new(outbound, &PlayerConfig::default()),
+            job_sender: queue,
+            channel: Arc::new(SessionChannel::new(
+                channel,
+                &PlayerConfig::default(),
+                cancel,
+            )),
+            resume_token: String::new(),
         });
-        active
-            .outbound
-            .start(crate::protocol::Frame {
+        let connection = active
+            .channel
+            .complete_login(crate::protocol::Frame {
                 version: crate::codec::VERSION,
                 content: Some(crate::protocol::frame::Content::LoggedIn(
                     crate::protocol::LoginResponse::default(),
@@ -136,7 +147,7 @@ impl Fixture {
             failures: AtomicUsize::new(0),
             block_timer: AtomicBool::new(false),
         });
-        let task = tokio::spawn(actor(
+        let task = tokio::spawn(session_task(
             active.clone(),
             receiver,
             Arc::new(PlayerConfig::default()),
@@ -147,10 +158,11 @@ impl Fixture {
             handle: SessionHandle(active),
             executor,
             events: receiver_events,
-            outbound: outgoing,
+            channel: outgoing,
             ownership,
             task: Some(task),
             due,
+            connection,
         }
     }
     fn request(&self, id: u64, message: u32) -> PendingResponse {
@@ -179,6 +191,19 @@ impl Fixture {
         self.handle.close();
         self.task.take().unwrap().await.unwrap();
     }
+}
+
+#[tokio::test(start_paused = true)]
+async fn disconnected_session_keeps_timers_and_ownership_during_grace() {
+    let mut f = Fixture::new().await;
+    f.install().await;
+    f.handle.0.channel.detach(&f.connection);
+    tokio::time::advance(Duration::from_secs(1)).await;
+    let trigger = f.trigger().await;
+    assert_eq!(trigger.scheduled_at_ms, f.due);
+    assert!(!f.handle.cancellation().is_cancelled());
+    assert!(f.ownership.lookup("42").await.unwrap().is_some());
+    f.close().await;
 }
 impl Drop for Fixture {
     fn drop(&mut self) {
@@ -213,7 +238,7 @@ async fn timers_share_fifo_and_do_not_consume_client_request_ids() {
     assert!(trigger.fired_at_ms >= f.due + 2000);
     settle().await;
     assert!(f.events.try_recv().is_err());
-    assert!(f.outbound.try_recv().is_err());
+    assert!(f.channel.try_recv().is_err());
     assert_eq!(f.request(4, 4).await.error_code, 0);
     f.close().await;
 }
@@ -260,7 +285,7 @@ async fn failed_tick_is_not_retried_and_next_tick_can_cancel_itself() {
     tokio::time::advance(Duration::from_secs(3)).await;
     settle().await;
     assert!(f.events.try_recv().is_err());
-    assert!(f.outbound.try_recv().is_err());
+    assert!(f.channel.try_recv().is_err());
     f.close().await;
 }
 

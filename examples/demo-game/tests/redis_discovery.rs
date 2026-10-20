@@ -61,7 +61,7 @@ fn config(path: &Path, namespace: &str, url: &str, node: &str, port: u16, gatewa
         }
     }
     if gateway {
-        source.push_str(&format!("[redis_ownership]\nurl='{url}'\nnamespace='{namespace}'\noperation_timeout_ms=300\n[player_gateway]\nrpc_timeout_ms=500\nownership_ttl_ms=1800\nrenew_interval_ms=200\n"));
+        source.push_str(&format!("[redis_ownership]\nurl='{url}'\nnamespace='{namespace}'\noperation_timeout_ms=300\n[player_gateway]\nrpc_timeout_ms=500\nownership_ttl_ms=1800\nrenew_interval_ms=200\ndisconnect_grace_ms=250\n"));
     }
     std::fs::write(path, source).unwrap();
 }
@@ -182,6 +182,7 @@ async fn login(port: u16) -> (tokio::net::TcpStream, LoginResponse) {
                 content: Some(Content::Login(LoginRequest {
                     request_id: 1,
                     credential: "demo:42".into(),
+                    resume_token: String::new(),
                 })),
             },
         )

@@ -67,7 +67,11 @@ impl Drop for Inflight {
 }
 struct Executor(Arc<Tracker>);
 impl PlayerExecutor for Executor {
-    fn execute(&self, identity: SessionIdentity, request: LogicalMessage) -> PlayerTask<'_> {
+    fn execute_request(
+        &self,
+        identity: SessionIdentity,
+        request: LogicalMessage,
+    ) -> PlayerTask<'_> {
         Box::pin(async move {
             self.0.calls.fetch_add(1, Ordering::SeqCst);
             assert_ne!(request.message_id, 666, "测试 session 任务崩溃");
@@ -304,6 +308,7 @@ impl Client {
         self.send(Content::Login(protocol::LoginRequest {
             request_id: id,
             credential: credential.into(),
+            resume_token: String::new(),
         }))
         .await;
         match self.read().await {
@@ -318,6 +323,30 @@ impl Client {
             body: body.to_vec(),
         }))
         .await;
+    }
+    async fn resume(&mut self, id: u64, token: &str, ack_seq: u64) -> protocol::ResumeResponse {
+        self.send(Content::Resume(protocol::ResumeRequest {
+            request_id: id,
+            resume_token: token.into(),
+            ack_seq,
+        }))
+        .await;
+        let Content::Resumed(response) = self.read().await else {
+            panic!("缺少恢复回应");
+        };
+        response
+    }
+    async fn fast_login(&mut self, id: u64, token: &str) -> protocol::LoginResponse {
+        self.send(Content::Login(protocol::LoginRequest {
+            request_id: id,
+            credential: String::new(),
+            resume_token: token.into(),
+        }))
+        .await;
+        let Content::LoggedIn(response) = self.read().await else {
+            panic!("缺少快速重登回应");
+        };
+        response
     }
     async fn read(&mut self) -> Content {
         self.codec
@@ -337,6 +366,7 @@ impl Client {
 }
 fn config() -> PlayerConfig {
     PlayerConfig {
+        disconnect_grace_ms: 0,
         max_sessions: 8,
         max_connections: 8,
         rpc_timeout_ms: 1000,
@@ -345,6 +375,230 @@ fn config() -> PlayerConfig {
         io_timeout_ms: 3000,
         ..PlayerConfig::default()
     }
+}
+
+#[tokio::test]
+async fn reconnect_replays_inflight_result_without_reexecution_and_preserves_request_progress() {
+    let mut fixture = Fixture::new(PlayerConfig {
+        disconnect_grace_ms: 2000,
+        ..config()
+    })
+    .await;
+    let mut first = fixture.connect().await;
+    let login = first.login(1, "1").await;
+    assert_eq!(login.resume_token.len(), 64);
+    first.request(2, 1, b"block").await;
+    fixture.started().await;
+    let handle = fixture.sessions.session("1").unwrap().unwrap();
+    drop(first);
+    handle
+        .notify(LogicalMessage {
+            kind: MessageKind::Notify,
+            message_id: 90,
+            request_id: 0,
+            server_seq: None,
+            error_code: 0,
+            body: vec![9],
+        })
+        .unwrap();
+    fixture.tracker.permits.add_permits(1);
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while handle.replay_after(0).unwrap().unwrap().through_seq != 2 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(fixture.ownership.lookup("1").await.unwrap().is_some());
+    let mut second = fixture.connect().await;
+    let resumed = second.resume(1, &login.resume_token, 0).await;
+    assert_eq!(resumed.error_code, 0);
+    assert_eq!(resumed.session_id, login.session_id);
+    assert_eq!(resumed.epoch, login.epoch);
+    assert_eq!(resumed.last_request_id, 2);
+    let Content::Notify(notify) = second.read().await else {
+        panic!()
+    };
+    assert_eq!(notify.server_seq, 1);
+    let response = second.response().await;
+    assert_eq!(response.server_seq, 2);
+    assert_eq!(response.request_id, 2);
+    assert_eq!(response.body, b"1");
+    let Content::Recovered(done) = second.read().await else {
+        panic!("缺少恢复完成标记");
+    };
+    assert_eq!(done.through_seq, 2);
+    second
+        .send(Content::Ack(protocol::Ack { ack_seq: 2 }))
+        .await;
+    second.request(2, 1, b"ok").await;
+    let repeated = second.response().await;
+    assert_eq!(repeated.error_code, ErrorCode::InvalidRequest as u32);
+    assert_eq!(repeated.server_seq, 3);
+    assert_eq!(fixture.tracker.calls.load(Ordering::SeqCst), 1);
+    second.request(3, 1, b"ok").await;
+    assert_eq!(second.response().await.server_seq, 4);
+    assert_eq!(fixture.tracker.calls.load(Ordering::SeqCst), 2);
+    fixture.finish().await;
+}
+
+#[tokio::test]
+async fn recovery_takes_over_live_connection_and_rejects_invalid_confirmation_without_takeover() {
+    let fixture = Fixture::new(PlayerConfig {
+        disconnect_grace_ms: 2000,
+        ..config()
+    })
+    .await;
+    let mut first = fixture.connect().await;
+    let login = first.login(1, "1").await;
+    first.request(2, 1, b"ok").await;
+    assert_eq!(first.response().await.server_seq, 1);
+    let mut second = fixture.connect().await;
+    assert_eq!(
+        second.resume(1, &login.resume_token, 999).await.error_code,
+        ErrorCode::InvalidRequest as u32
+    );
+    first.request(3, 1, b"ok").await;
+    assert_eq!(first.response().await.server_seq, 2);
+    assert_eq!(second.resume(2, &login.resume_token, 2).await.error_code, 0);
+    let Content::Recovered(done) = second.read().await else {
+        panic!()
+    };
+    assert_eq!(done.through_seq, 2);
+    assert!(first.codec.read(&mut first.stream).await.unwrap().is_none());
+    drop(first);
+    second.request(4, 1, b"ok").await;
+    assert_eq!(second.response().await.server_seq, 3);
+    assert_eq!(
+        fixture
+            .sessions
+            .session("1")
+            .unwrap()
+            .unwrap()
+            .identity()
+            .session_id,
+        login.session_id
+    );
+    fixture.finish().await;
+}
+
+#[tokio::test]
+async fn grace_expiry_keeps_valid_identity_token_for_fast_login_and_resets_sequence() {
+    let fixture = Fixture::new(PlayerConfig {
+        disconnect_grace_ms: 40,
+        resume_token_ttl_ms: 5000,
+        ..config()
+    })
+    .await;
+    let mut first = fixture.connect().await;
+    let login = first.login(1, "1").await;
+    let old = fixture.sessions.session("1").unwrap().unwrap();
+    drop(first);
+    fixture.released("1").await;
+    assert!(old.cancellation().is_cancelled());
+    let mut second = fixture.connect().await;
+    assert_eq!(
+        second.resume(1, &login.resume_token, 0).await.error_code,
+        ErrorCode::ResumeUnavailable as u32
+    );
+    let fresh = second.fast_login(2, &login.resume_token).await;
+    assert_eq!(fresh.error_code, 0);
+    assert_ne!(fresh.session_id, login.session_id);
+    assert!(fresh.epoch > login.epoch);
+    assert_ne!(fresh.resume_token, login.resume_token);
+    second.request(3, 1, b"ok").await;
+    assert_eq!(second.response().await.server_seq, 1);
+    let mut rejected = fixture.connect().await;
+    assert_eq!(
+        rejected.resume(1, &login.resume_token, 0).await.error_code,
+        ErrorCode::AuthenticationFailed as u32
+    );
+    fixture.finish().await;
+}
+
+#[tokio::test]
+async fn cache_gap_requires_fast_login_and_never_silently_skips_messages() {
+    let fixture = Fixture::new(PlayerConfig {
+        disconnect_grace_ms: 2000,
+        replay_capacity: 1,
+        ..config()
+    })
+    .await;
+    let mut first = fixture.connect().await;
+    let login = first.login(1, "1").await;
+    let handle = fixture.sessions.session("1").unwrap().unwrap();
+    drop(first);
+    for _ in 0..2 {
+        handle
+            .notify(LogicalMessage {
+                kind: MessageKind::Notify,
+                message_id: 90,
+                request_id: 0,
+                server_seq: None,
+                error_code: 0,
+                body: vec![],
+            })
+            .unwrap();
+    }
+    let mut second = fixture.connect().await;
+    assert_eq!(
+        second.resume(1, &login.resume_token, 0).await.error_code,
+        ErrorCode::ResumeUnavailable as u32
+    );
+    assert!(!handle.cancellation().is_cancelled());
+    assert_eq!(
+        second.fast_login(2, &login.resume_token).await.error_code,
+        0
+    );
+    assert!(handle.cancellation().is_cancelled());
+    second.request(3, 1, b"ok").await;
+    assert_eq!(second.response().await.server_seq, 1);
+    assert_eq!(fixture.tracker.calls.load(Ordering::SeqCst), 1);
+    fixture.finish().await;
+}
+
+#[tokio::test]
+async fn invalid_token_cannot_restore_or_fast_login_and_offline_lease_loss_stops_recovery() {
+    let fixture = Fixture::new(PlayerConfig {
+        disconnect_grace_ms: 2000,
+        ..config()
+    })
+    .await;
+    let mut first = fixture.connect().await;
+    let login = first.login(1, "1").await;
+    let handle = fixture.sessions.session("1").unwrap().unwrap();
+    drop(first);
+    let lease = fixture.ownership.lookup("1").await.unwrap().unwrap();
+    fixture
+        .ownership
+        .acquire(
+            "1".into(),
+            "foreign".into(),
+            SessionOwner {
+                node_id: "other".into(),
+                service_name: "gateway".into(),
+            },
+            Some(lease.identity.epoch),
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+    let mut second = fixture.connect().await;
+    assert_eq!(
+        second.resume(1, &"0".repeat(64), 0).await.error_code,
+        ErrorCode::AuthenticationFailed as u32
+    );
+    assert_eq!(
+        second.fast_login(2, &"0".repeat(64)).await.error_code,
+        ErrorCode::AuthenticationFailed as u32
+    );
+    assert_eq!(
+        second.resume(3, &login.resume_token, 0).await.error_code,
+        ErrorCode::ResumeUnavailable as u32
+    );
+    assert!(handle.cancellation().is_cancelled());
+    assert_eq!(fixture.tracker.calls.load(Ordering::SeqCst), 0);
+    fixture.finish().await;
 }
 
 #[tokio::test]
@@ -626,6 +880,7 @@ async fn duplicate_login_waits_for_old_call_and_invalidates_old_handle() {
         .send(Content::Login(protocol::LoginRequest {
             request_id: 1,
             credential: "0001".into(),
+            resume_token: String::new(),
         }))
         .await;
     assert!(first.codec.read(&mut first.stream).await.unwrap().is_none());
@@ -802,13 +1057,14 @@ async fn malformed_frames_are_rejected_before_business_execution() {
                 .is_none()
         );
     }
-    for version in [1, 99] {
+    for version in [1, 2, 99] {
         let mut client = fixture.connect().await;
         let body = Frame {
             version,
             content: Some(Content::Login(protocol::LoginRequest {
                 request_id: 1,
                 credential: "1".into(),
+                resume_token: String::new(),
             })),
         }
         .encode_to_vec();
@@ -829,8 +1085,31 @@ async fn malformed_frames_are_rejected_before_business_execution() {
     let Content::Error(error) = partial.read().await else {
         panic!("缺少半帧错误");
     };
-    assert_eq!(error.error_code, ErrorCode::InvalidRequest as u32);
+    assert_eq!(error.error_code, ErrorCode::SessionClosed as u32);
     assert_eq!(fixture.tracker.calls.load(Ordering::SeqCst), 0);
+    fixture.finish().await;
+}
+
+#[tokio::test]
+async fn truncated_transport_frame_does_not_destroy_the_recoverable_session() {
+    let fixture = Fixture::new(PlayerConfig {
+        disconnect_grace_ms: 2000,
+        ..config()
+    })
+    .await;
+    let mut first = fixture.connect().await;
+    let login = first.login(1, "1").await;
+    first.stream.write_all(&[0, 0]).await.unwrap();
+    first.stream.shutdown().await.unwrap();
+    let Content::Error(error) = first.read().await else {
+        panic!()
+    };
+    assert_eq!(error.error_code, ErrorCode::SessionClosed as u32);
+    let mut second = fixture.connect().await;
+    assert_eq!(second.resume(1, &login.resume_token, 0).await.error_code, 0);
+    assert!(matches!(second.read().await, Content::Recovered(_)));
+    second.request(2, 1, b"ok").await;
+    assert_eq!(second.response().await.server_seq, 1);
     fixture.finish().await;
 }
 

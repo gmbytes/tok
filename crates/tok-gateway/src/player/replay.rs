@@ -1,4 +1,4 @@
-//! 每个逻辑会话的有界下行字节缓存与连续范围查询；尚不提供断线恢复。
+//! 每个逻辑会话的有界下行字节缓存与连续范围查询，由连接恢复流程按原字节补发。
 
 use super::PlayerConfig;
 use crate::{ErrorCode, Result};
@@ -7,7 +7,7 @@ use tokio::time::Instant;
 
 /// 某次查询时连续完整的下行快照，仅含原始 protobuf Frame 正文。
 ///
-/// 查询不会确认消息或触发发送；连接重绑定与恢复流程尚未实现。
+/// 单独查询不会确认消息或触发发送，连接恢复流程使用此快照保持补发顺序。
 #[derive(Debug)]
 pub struct ReplayBatch {
     /// 本快照包含的最大发布序号；frames 为空时也保留查询时的位置。
@@ -18,18 +18,21 @@ pub struct ReplayBatch {
 
 struct Entry {
     seq: u64,
-    published: Instant,
+    published_at: Instant,
     body: Arc<[u8]>,
 }
 
 pub(super) struct ReplayCache {
     entries: VecDeque<Entry>,
-    bytes: usize,
-    high: u64,
-    ack: u64,
-    floor: u64,
+    cached_bytes: usize,
+    // 已发布的最大下行序号；淘汰缓存不会回退。
+    published_seq: u64,
+    // 客户端累计确认位置。
+    acknowledged_seq: u64,
+    // 可查询补发的最小确认位置；更早的位置已有消息缺失。
+    replay_floor_seq: u64,
     ttl: Duration,
-    capacity: usize,
+    max_entries: usize,
     max_bytes: usize,
 }
 
@@ -37,75 +40,80 @@ impl ReplayCache {
     pub(super) fn new(config: &PlayerConfig) -> Self {
         Self {
             entries: VecDeque::new(),
-            bytes: 0,
-            high: 0,
-            ack: 0,
-            floor: 0,
+            cached_bytes: 0,
+            published_seq: 0,
+            acknowledged_seq: 0,
+            replay_floor_seq: 0,
             ttl: Duration::from_millis(config.replay_ttl_ms),
-            capacity: config.replay_capacity,
+            max_entries: config.replay_capacity,
             max_bytes: config.replay_max_bytes,
         }
     }
 
-    pub(super) fn next(&self) -> Result<u64> {
-        self.high
+    // 只读取候选序号；消息通过 push 发布后才推进计数。
+    pub(super) fn next_seq(&self) -> Result<u64> {
+        self.published_seq
             .checked_add(1)
             .ok_or(ErrorCode::SessionClosed.into())
     }
 
-    fn pop(&mut self) {
+    pub(super) fn last_published_seq(&self) -> u64 {
+        self.published_seq
+    }
+
+    fn evict_oldest(&mut self) {
         if let Some(entry) = self.entries.pop_front() {
-            self.bytes -= entry.body.len();
-            self.floor = entry.seq;
+            self.cached_bytes -= entry.body.len();
+            self.replay_floor_seq = entry.seq;
         }
     }
 
-    fn expire(&mut self) {
+    fn evict_expired(&mut self) {
         let now = Instant::now();
         while self
             .entries
             .front()
-            .is_some_and(|entry| now.duration_since(entry.published) >= self.ttl)
+            .is_some_and(|entry| now.duration_since(entry.published_at) >= self.ttl)
         {
-            self.pop();
+            self.evict_oldest();
         }
     }
 
     pub(super) fn push(&mut self, seq: u64, body: Arc<[u8]>) {
-        self.expire();
-        self.high = seq;
-        self.bytes += body.len();
+        self.evict_expired();
+        self.published_seq = seq;
+        self.cached_bytes += body.len();
         self.entries.push_back(Entry {
             seq,
-            published: Instant::now(),
+            published_at: Instant::now(),
             body,
         });
-        while self.entries.len() > self.capacity || self.bytes > self.max_bytes {
-            self.pop();
+        while self.entries.len() > self.max_entries || self.cached_bytes > self.max_bytes {
+            self.evict_oldest();
         }
     }
 
     pub(super) fn acknowledge(&mut self, seq: u64) -> Result<()> {
-        self.expire();
-        if seq > self.high {
+        self.evict_expired();
+        if seq > self.published_seq {
             return Err(ErrorCode::InvalidRequest.into());
         }
-        if seq > self.ack {
-            self.ack = seq;
+        if seq > self.acknowledged_seq {
+            self.acknowledged_seq = seq;
             while self.entries.front().is_some_and(|entry| entry.seq <= seq) {
-                self.pop();
+                self.evict_oldest();
             }
         }
         Ok(())
     }
 
-    pub(super) fn after(&mut self, seq: u64) -> Option<ReplayBatch> {
-        self.expire();
-        if seq < self.floor || seq > self.high {
+    pub(super) fn replay_after(&mut self, seq: u64) -> Option<ReplayBatch> {
+        self.evict_expired();
+        if seq < self.replay_floor_seq || seq > self.published_seq {
             return None;
         }
         Some(ReplayBatch {
-            through_seq: self.high,
+            through_seq: self.published_seq,
             frames: self
                 .entries
                 .iter()
@@ -117,8 +125,8 @@ impl ReplayCache {
 
     pub(super) fn clear(&mut self) {
         self.entries.clear();
-        self.bytes = 0;
-        self.floor = self.high;
+        self.cached_bytes = 0;
+        self.replay_floor_seq = self.published_seq;
     }
 }
 

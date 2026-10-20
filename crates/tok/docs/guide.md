@@ -243,7 +243,7 @@ RPC 超时不表示远端 handler 已停止或写入已回滚。时间检查通�
 `just ownership-test` 显式验证真实 Redis 竞争、完整身份校验、过期、重启代次、2^53 相邻整数和计数器耗尽。
 `just ownership-smoke` 启动独立游戏及两个网关进程，验证竞争拒绝、释放后登录、租约丢失关闭、崩溃后过期和旧代次失效。
 测试使用 TOK_TEST_REDIS_URL，默认本机 6379；常规测试不依赖 Redis。
-timer、消息恢复、跨网关交接和请求级 LockBackend 实现仍按后续阶段推进。
+timer 与同网关恢复已接通；跨网关交接和请求级 LockBackend 实现仍按后续阶段推进。
 
 ## Redis 多进程开发发现
 
@@ -331,8 +331,8 @@ Redis 发现只解决服务定位。玩家状态仍在进程内存，session 所
 运行 `just run` 可持续监听本地客户端端口 `127.0.0.1:7000`。
 示例凭据为 `demo:<正整数玩家 ID>`，如 `demo:42`；该认证器仅供本地开发，状态保存在有界内存中。
 
-客户端使用四字节大端长度前缀与 protobuf [`gateway::protocol::Frame`]，版本为 2。
-protobuf 命名空间仍为 `tok.client.v1`，帧版本由 `VERSION` 决定；旧版本 1 客户端须同步升级，服务端拒绝旧帧版本。
+客户端使用四字节大端长度前缀与 protobuf [`gateway::protocol::Frame`]，版本为 3。
+protobuf 命名空间仍为 `tok.client.v1`，帧版本由 `VERSION` 决定；旧版本 1、2 客户端须同步升级，服务端拒绝旧帧版本。
 登录和业务请求的 `request_id` 必须非零，并在同一连接上严格递增。
 下面示例登录后读取玩家状态；示例游戏的读取消息 ID 为 1，空正文是合法的默认 protobuf 请求。
 
@@ -351,6 +351,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         content: Some(Content::Login(LoginRequest {
             request_id: 1,
             credential: "demo:42".into(),
+            resume_token: String::new(),
         })),
     }).await?;
     let login = codec.read(&mut connection).await?.ok_or("连接已关闭")?;
@@ -391,6 +392,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 网关工厂先绑定 TCP 监听，再把监听及服务退出 token 交给 `serve` 的受监督任务。
 客户端正文不提供 session 身份；示例 player 从可信的调用上下文读取玩家 ID。
 
+player 内部按职责组织会话通信与执行：
+
+| 名称 | 职责 |
+| --- | --- |
+| `SessionHandle` | 向逻辑会话提交业务、发布通知及请求关闭 |
+| `BoundSession` | 携带连接代次的操作入口，校验连接是否仍然有效 |
+| `SessionChannel` | 管理连接绑定、请求准入、下行发布、确认与断线恢复 |
+| `ReplayCache` | 保存已编码下行消息，查询可连续补发的范围 |
+| `ReplayPlan` | 由连接写循环执行恢复响应、补发及恢复完成标记 |
+| `ResumeTokens` | 签发并验证恢复凭证，关联可信玩家和逻辑会话 |
+| `TimerScheduler` | 调度 timer 并将到期任务送入会话队列 |
+
+通信状态位于 `player::channel`，恢复凭证位于 `player::resume_token`。
+原模块路径 `player::outbound`、`player::resume` 已相应调整。
+
 [`gateway::player::PlayerConfig`] 对连接数、会话数、请求队列、下行队列、包长及期限提供有界默认值。
 TOML 的可选 `[player_gateway]` 节可覆盖参数，未知字段和非法容量会使配置校验失败：
 
@@ -411,18 +427,21 @@ max_timer_bytes = 1048576
 replay_ttl_ms = 30000
 replay_capacity = 256
 replay_max_bytes = 4194304
+disconnect_grace_ms = 30000
+resume_token_ttl_ms = 3600000
+max_resume_tokens = 16384
 ```
 
 同一玩家的业务请求顺序执行，不同玩家可以并发。队列满立即返回错误，RPC 超时不重试。
 通过 `gateway.ingress().sessions()` 获取 [`gateway::player::SessionManager`]，可查询当前
 [`gateway::player::SessionHandle`]；`notify` 与响应共用有界下行队列，不调用 player。
-下行队列满会关闭连接，避免慢客户端无限积压。框架错误见 [`gateway::ErrorCode`]，业务响应的非零错误码保留原值，
+下行队列满会断开慢连接并进入宽限期，后续消息继续进入有界缓存。框架错误见 [`gateway::ErrorCode`]，业务响应的非零错误码保留原值，
 游戏可通过 [`gateway::player::RpcErrorMapper`] 自定义 tonic 状态映射。
 
 重复登录使用新连接：先关闭旧入口，等待当前执行结束或达到执行期限，再条件释放所有权并建立新的 session_id 和 epoch。
-旧队列不再执行，外部网关持有的所有权直接拒绝。连接断开即关闭 session；退出时等待在途执行并条件释放所有权。
+旧队列不再执行，外部网关持有的所有权直接拒绝。连接断开后默认保留 session 30 秒，期间继续 timer 与续租；到期收束在途执行并条件释放所有权。显式关闭、非法协议、所有权失效和网关退出仍终止 session。
 当前没有心跳，完整帧读取期限包含等待首字节的空闲时间，默认空闲 15 秒会断开。
-已支持 RPC 返回的 timer 更新、统一下行序号、累计 ACK 与内存缓存；断线宽限期、真正补发和恢复仍按后续步骤实现。
+已支持 timer 更新、下行序号、ACK、有界缓存与同网关恢复；跨网关交接仍待后续实施。
 
 ### 下行序号、确认与缓存
 
@@ -440,7 +459,7 @@ ACK 不使用 `request_id`，不进入 player 队列，不触发 RPC。零值、
 下行先编码并缓存再提交发送队列，缓存和 writer 共享最终正文，包含版本和序号，不含 TCP 长度前缀或加密封装。
 超大回应在缓存前转换为空正文的 `FrameTooLarge` 回应，使用原请求消息 ID；
 超大通知直接返回 `FrameTooLarge`，不消耗序号，也不因此关闭 session。
-发布成功表示进入缓存和发送队列，不表示客户端已收到或处理。
+发布成功表示缓存接收；连接正常时同时提交发送队列，断线或补发期间只进入缓存，不表示客户端已收到或处理。
 
 缓存按单会话的时间、条数和编码字节上限淘汰最旧记录，允许淘汰未确认消息；时间使用单调时钟。
 `replay_capacity` 上限 65536，`replay_ttl_ms` 上限 86400000，`replay_max_bytes` 上限 64 MiB 且不得小于 `max_frame_size`。
@@ -453,8 +472,42 @@ ACK 不使用 `request_id`，不进入 player 队列，不触发 RPC。零值、
 查询不发送、不确认消息；调用方持有快照会延长对应字节的生命期，应及时释放。
 `try_request` 的独立回应只交给调用方，仍无下行序号，也不自动写入客户端缓存。
 
-本步断线仍立即关闭 session 并清理 timer 与缓存，新登录重新从序号 1 开始。
-尚未提供 Resume 请求、token、宽限期或对外 `ResumeUnavailable` 流程；查询缓存不代表已经支持重连。
+### 同网关断线恢复
+
+成功登录的 `LoginResponse` 包含 `resume_token` 和 `resume_token_ttl_ms`。
+当前 token 是两个随机 UUID v4 组成的 64 字符不透明凭证，仅在签发网关的有界内存中验证，关联可信玩家及原 session；
+不写 Redis，不记录日志，不支持跨网关验证。网关重启后凭证失效，客户端重新鉴权。
+凭证默认有效 1 小时，宽限期默认 30 秒，两者独立；恢复不延长凭证期限。
+有效凭证表满时新玩家登录返回 `CapacityExceeded`，不淘汰其他玩家的有效凭证；过期记录在签发及验证时回收。
+同一玩家新登录轮换凭证并撤销旧凭证；仍在线的 session 不因凭证到期主动退出。
+
+EOF、帧 I/O 超时、传输失败或下行队列满时，session 在服务器观察到断线后进入宽限期。
+已排队和在途调用继续收束，timer 与租约续期继续；回应、通知进入原下行缓存。
+`disconnect_grace_ms=0` 保留立即关闭行为，最大 86400000；
+`resume_token_ttl_ms` 为正且不超过 86400000，`max_resume_tokens` 为正且不超过 65536。
+宽限期由 session 的受监督 future 计时，不为每次断线创建任务；到期停止新业务、收束调用并条件释放所有权。
+
+客户端暂停新业务，在新连接发送 `ResumeRequest { request_id, resume_token, ack_seq }`。
+原会话、租约及缓存范围仍有效时，先收到成功 `ResumeResponse`，随后按原字节和序号补发，最后收到
+`RecoveryComplete { through_seq }`。保持原 `session_id`、epoch 和序列，不执行普通登录或重试 player RPC。
+新绑定失效旧连接；请求、ACK、读侧回应及晚到清理都比较连接代次，旧连接退出不能断开新连接。
+
+补发由连接写循环执行，读循环仍处理 ACK；新下行先缓存再按序追上，不越过恢复完成标记。
+客户端收到标记后恢复业务，提前提交得到 `InvalidState`。
+整个补发受 `io_timeout_ms` 限制；中途缓存出现缺口时返回 `ControlError(ResumeUnavailable)` 并断开新连接，不能宣告成功。
+`ResumeResponse.last_request_id` 是网关已见过的最大业务请求 ID（包含队列拒绝）。
+客户端保留自己的计数，新请求必须大于本地已发送最大值和服务端值，不重发未知结果请求。
+在途调用可能在恢复完成标记之后才产生回应，仍通过原 `request_id` 与下行序列接续。
+
+token 有效而会话过期或缓存不完整时，`ResumeResponse.error_code` 返回 `ResumeUnavailable`。
+客户端可在同一未绑定连接发送 `LoginRequest { resume_token, credential: 空 }` 快速重登，绕过游戏认证器；
+两种凭证必须二选一。快速重登建立新 session、epoch 和 token，下行从 1 开始，并重新请求完整业务状态。
+新登录后旧 token 撤销；伪造、过期或其他网关签发的凭证返回 `AuthenticationFailed`，须普通鉴权。
+
+框架不固定游戏初始化消息。快速重登后的状态请求应返回完整状态与 `TimerUpdate::ReplaceAll`，重建 timer 集合；
+demo 的 `GetPlayer` 从服务端保存的生产截止时间重建 timer，已完成任务不会重复结算。
+同网关恢复复用原 timer 集合，不重新安装。`just client-smoke` 包含断线期间生产、恢复原会话及状态校验。
+
 
 ## 玩家 timer
 
@@ -511,12 +564,13 @@ session 建立时对齐 UTC 与单调时钟，此后按同一基准等待，墙�
 周期错过的时刻不逐次追赶，完成后按原基准计算下一个未来时刻；一次性 timer 触发后移除。
 timer 失败或超时只记录本次失败，不重试；周期的后续触发独立进行。
 
-自定义 [`gateway::player::PlayerExecutor`] 的 `execute` 返回 [`gateway::player::PlayerReply`]，
-普通 `LogicalMessage` 可通过 `.into()` 转换；需要计时执行时实现 `timer` 方法。
-`timer` 的关联序号由 session 独立生成，不消耗客户端 request_id；计时结果可继续返回更新，不产生客户端回应。
+自定义 [`gateway::player::PlayerExecutor`] 的 `execute_request` 返回 [`gateway::player::PlayerReply`]，
+普通 `LogicalMessage` 可通过 `.into()` 转换；需要计时执行时实现 `execute_timer` 方法。
+原 `execute`、`timer` 方法已分别改为上述名称，自定义实现需同步调整。
+`execute_timer` 的关联序号由 session 独立生成，不消耗客户端 request_id；计时结果可继续返回更新，不产生客户端回应。
 示例 `START_PRODUCTION` 发起生产，由服务端安装一次性 timer；内部 `FINISH_PRODUCTION` 按固定规则更新玩家状态。
 请求中没有 timer 配置或产出参数，`just client-smoke` 验证完整 TCP 与 RPC 链路。
-当前由业务响应安装 spec，未增加隐式的 player 登录调用。断线仍立即关闭 session 并清理 timer；断线期间继续运行需后续恢复步骤支持。
+当前由业务响应安装 spec，未增加隐式的 player 登录调用。断线宽限期内 timer 继续运行；到期、显式关闭或租约失效时清理。快速重登通过游戏初始化请求重新安装完整集合。
 
 ## 统一 Gateway 与接入组件
 
@@ -579,7 +633,7 @@ Scene 目前仅预留模块，不套用 Player 的串行与所有权语义。
 | [`observability`] | 日志、指标与追踪 |
 
 目前示例监听共享内部 gRPC 和客户端 TCP 端点，已接通注入认证、有界串行 session、状态读写及服务组合。
-Redis 开发发现、session 所有权、timer 调度、下行序号与 ACK 缓存已接通；恢复、跨网关交接和 NATS 尚未接通。
+Redis 开发发现、session 所有权、timer 调度、下行序号、ACK 缓存与同网关恢复已接通；跨网关交接和 NATS 尚未接通。
 配置端点地址本身不启动监听，内部端点需显式注册 RpcEndpoint，TCP 由网关工厂绑定。
 Kubernetes 配置可校验，运行该发现后端仍会明确报错。
 游戏业务协议和 handler 由游戏定义，框架组件不反向依赖具体游戏。

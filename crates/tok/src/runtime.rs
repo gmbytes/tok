@@ -132,7 +132,9 @@ impl Application {
         let directory = MemoryDirectory::default();
         let redis = if config.discovery == DiscoveryBackend::Redis {
             Some(RedisDirectory::new(
-                config.redis_discovery.clone().expect("配置已校验"),
+                config.redis_discovery.clone().ok_or_else(|| {
+                    tok_core::Error::InvalidConfig("Redis 发现缺少 redis_discovery 配置".into())
+                })?,
                 &config.node_id,
             )?)
         } else {
@@ -272,12 +274,13 @@ impl Application {
             for (name, endpoint) in std::mem::take(&mut self.rpc_endpoints) {
                 let readiness = endpoint.readiness();
                 registered.rpc_readiness.push(readiness);
-                let address = self.config.endpoints.iter().find(|entry| entry.name == name).expect("注册时已校验端点").address;
+                let address = self.config.endpoints.iter().find(|entry| entry.name == name)
+                    .ok_or_else(|| tok_core::Error::InvalidConfig(format!("RPC 端点未配置：{name}")))?.address;
                 let endpoint_name = format!("rpc-endpoint:{name}");
                 let task = tokio::select! {
                     biased;
                     signal = &mut shutdown => return signal.map_err(RuntimeError::Signal),
-                    result = tasks.join_next(), if !tasks.is_empty() => return Err(unexpected(result.expect("服务任务集合非空"))),
+                    result = tasks.join_next(), if !tasks.is_empty() => return Err(unexpected(result)),
                     result = tokio::time::timeout(self.startup_timeout, endpoint.bind(address, token.child_token())) => {
                         result.map_err(|_| RuntimeError::StartTimeout(endpoint_name.clone()))?
                             .map_err(|source| RuntimeError::Start { service_name: endpoint_name.clone(), source: Box::new(source) })?
@@ -286,15 +289,18 @@ impl Application {
                 tasks.spawn(async move { (endpoint_name, task.await.map_err(|source| Box::new(source) as ServiceError)) });
             }
             for service in self.config.service_descriptors()? {
-                let binding = self.config.services.iter().find(|entry| entry.service_name == service.service_name).expect("服务来自配置");
-                let listen_address = self.config.endpoints.iter().find(|entry| entry.name == binding.endpoint).expect("端点已验证").address;
+                let binding = self.config.services.iter().find(|entry| entry.service_name == service.service_name)
+                    .ok_or_else(|| tok_core::Error::InvalidConfig(format!("服务未配置：{}", service.service_name)))?;
+                let listen_address = self.config.endpoints.iter().find(|entry| entry.name == binding.endpoint)
+                    .ok_or_else(|| tok_core::Error::InvalidConfig(format!("服务端点未配置：{}", binding.endpoint)))?.address;
                 let context = ServiceContext {
                     listen_address,
                     service: service.clone(),
                     directory: self.service_directory.clone(),
                     shutdown: token.child_token(),
                 };
-                let factory = self.factories[binding.factory_name()].clone();
+                let factory = self.factories.get(binding.factory_name())
+                    .ok_or_else(|| RuntimeError::MissingFactory(binding.factory_name().into()))?.clone();
                 let mut starting = JoinSet::new();
                 let started = std::time::Instant::now();
                 let span = tracing::info_span!("service_start", node_id = %self.config.node_id, service_name = %service.service_name);
@@ -302,10 +308,13 @@ impl Application {
                 let task = tokio::select! {
                     biased;
                     signal = &mut shutdown => return signal.map_err(RuntimeError::Signal),
-                    result = tasks.join_next(), if !tasks.is_empty() => return Err(unexpected(result.expect("服务任务集合非空"))),
+                    result = tasks.join_next(), if !tasks.is_empty() => return Err(unexpected(result)),
                     result = tokio::time::timeout(self.startup_timeout, starting.join_next()) => {
                         result.map_err(|_| RuntimeError::StartTimeout(service.service_name.clone()))?
-                            .expect("存在一个初始化任务")
+                            .ok_or_else(|| RuntimeError::Start {
+                                service_name: service.service_name.clone(),
+                                source: std::io::Error::other("初始化任务集合意外为空").into(),
+                            })?
                             .map_err(RuntimeError::Task)?
                             .map_err(|source| RuntimeError::Start { service_name: service.service_name.clone(), source })?
                     }
@@ -317,7 +326,7 @@ impl Application {
                 let publication = tokio::select! {
                     biased;
                     signal = &mut shutdown => return signal.map_err(RuntimeError::Signal),
-                    result = tasks.join_next(), if !tasks.is_empty() => return Err(unexpected(result.expect("任务非空"))),
+                    result = tasks.join_next(), if !tasks.is_empty() => return Err(unexpected(result)),
                     result = self.registry.register(service.clone()) => result,
                 };
                 if let Err(error) = publication {
@@ -336,7 +345,7 @@ impl Application {
             tokio::select! {
                 biased;
                 signal = &mut shutdown => signal.map_err(RuntimeError::Signal),
-                result = tasks.join_next() => Err(unexpected(result.expect("至少配置一个服务"))),
+                result = tasks.join_next() => Err(unexpected(result)),
             }
         }.await;
 
@@ -394,14 +403,17 @@ impl Application {
     }
 }
 
-fn unexpected(result: Result<(String, Result<(), ServiceError>), JoinError>) -> RuntimeError {
+type ServiceCompletion = Result<(String, Result<(), ServiceError>), JoinError>;
+
+fn unexpected(result: Option<ServiceCompletion>) -> RuntimeError {
     match result {
-        Ok((service_name, Ok(()))) => RuntimeError::UnexpectedExit(service_name),
-        Ok((service_name, Err(source))) => RuntimeError::Run {
+        Some(Ok((service_name, Ok(())))) => RuntimeError::UnexpectedExit(service_name),
+        Some(Ok((service_name, Err(source)))) => RuntimeError::Run {
             service_name,
             source,
         },
-        Err(error) => RuntimeError::Task(error),
+        Some(Err(error)) => RuntimeError::Task(error),
+        None => RuntimeError::UnexpectedExit("运行时任务集合".into()),
     }
 }
 

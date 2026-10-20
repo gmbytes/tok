@@ -1,12 +1,13 @@
 //! Player 接入的 TCP 协议处理、登录认证与玩家 session 绑定。
 
 use super::ingress::MAX_CREDENTIAL_BYTES;
+use super::session::BoundSession;
 use crate::{
     ErrorCode, GatewayError, Result,
     codec::{FrameCodec, VERSION},
     player::{
-        Authenticator, PlayerConfig, SessionHandle, SessionManager,
-        outbound::{self, Outbound, Sender},
+        AuthenticatedPlayer, Authenticator, PlayerConfig, SessionManager,
+        channel::{self, Outbound, OutboundSender},
     },
     protocol::{self, Frame, frame::Content},
 };
@@ -22,16 +23,24 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 
 #[derive(Default)]
-struct Binding(Mutex<Option<SessionHandle>>);
-impl Drop for Binding {
+// 连接任务退出时解除本代绑定；session 是否保留由通信通道的宽限期决定。
+struct ConnectionGuard(Mutex<Option<BoundSession>>);
+impl ConnectionGuard {
+    fn close_session(&self) {
+        if let Ok(Some(binding)) = self.0.lock().as_deref() {
+            binding.close_session();
+        }
+    }
+}
+impl Drop for ConnectionGuard {
     fn drop(&mut self) {
         if let Ok(Some(session)) = self.0.get_mut() {
-            session.close();
+            session.detach();
         }
     }
 }
 
-pub(super) async fn connection(
+pub(super) async fn serve_connection(
     stream: TcpStream,
     config: Arc<PlayerConfig>,
     codec: FrameCodec,
@@ -42,10 +51,10 @@ pub(super) async fn connection(
     stream.set_nodelay(true).map_err(|_| ErrorCode::Internal)?;
     let (mut reader, mut writer) = stream.into_split();
     let (sender, mut outgoing) = mpsc::channel(config.outbound_capacity);
-    let binding = Arc::new(Binding::default());
+    let binding = Arc::new(ConnectionGuard::default());
     let writing = async {
-        while let Some(outbound) = outgoing.recv().await {
-            match outbound {
+        while let Some(channel) = outgoing.recv().await {
+            match channel {
                 Outbound::Frame(frame, written) => {
                     codec.write(&mut writer, &frame).await?;
                     if let Some(written) = written {
@@ -53,11 +62,37 @@ pub(super) async fn connection(
                     }
                 }
                 Outbound::Encoded(body) => codec.write_body(&mut writer, &body).await?,
+                Outbound::Replay(recovery) => {
+                    let result = tokio::time::timeout(
+                        Duration::from_millis(config.io_timeout_ms),
+                        recovery.write_to(&codec, &mut writer),
+                    )
+                    .await
+                    .map_err(|_| GatewayError::from(ErrorCode::Timeout))
+                    .and_then(|result| result);
+                    if let Err(error) = result {
+                        if error.code == ErrorCode::ResumeUnavailable {
+                            codec
+                                .write(
+                                    &mut writer,
+                                    &Frame {
+                                        version: VERSION,
+                                        content: Some(Content::Error(protocol::ControlError {
+                                            request_id: 0,
+                                            error_code: error.code as u32,
+                                        })),
+                                    },
+                                )
+                                .await?;
+                        }
+                        return Err(error);
+                    }
+                }
             }
         }
         Ok(())
     };
-    let reading = read_connection(
+    let reading = handle_frames(
         &mut reader,
         &config,
         &codec,
@@ -70,7 +105,7 @@ pub(super) async fn connection(
 }
 
 // 将内容包装为协议帧并非阻塞入队，实际 socket 写入由连接写循环负责。
-fn enqueue_content(sender: &Sender, content: Content) -> Result<()> {
+fn enqueue_content(sender: &OutboundSender, content: Content) -> Result<()> {
     sender
         .try_send(Outbound::Frame(
             Frame {
@@ -82,7 +117,8 @@ fn enqueue_content(sender: &Sender, content: Content) -> Result<()> {
         .map_err(|_| ErrorCode::SessionClosed.into())
 }
 
-async fn close_with_error(sender: &Sender, code: ErrorCode, timeout: Duration) {
+// 发送错误并有限等待本地写入；关闭连接由调用方返回和守卫清理完成。
+async fn send_error(sender: &OutboundSender, code: ErrorCode, timeout: Duration) {
     let (written, completed) = oneshot::channel();
     let frame = Frame {
         version: VERSION,
@@ -99,19 +135,19 @@ async fn close_with_error(sender: &Sender, code: ErrorCode, timeout: Duration) {
     }
 }
 
-async fn read_connection(
+async fn handle_frames(
     reader: &mut tokio::net::tcp::OwnedReadHalf,
     config: &PlayerConfig,
     codec: &FrameCodec,
     authenticator: Arc<dyn Authenticator>,
     sessions: SessionManager,
-    sender: Sender,
-    binding: Arc<Binding>,
+    sender: OutboundSender,
+    binding: Arc<ConnectionGuard>,
 ) -> Result<()> {
-    let mut session: Option<SessionHandle> = None;
+    let mut session: Option<BoundSession> = None;
     let mut last_request_id = 0;
     loop {
-        let cancellation = session.as_ref().map(SessionHandle::cancellation);
+        let cancellation = session.as_ref().map(BoundSession::cancellation);
         let lost_session = async {
             if let Some(cancellation) = cancellation {
                 cancellation.cancelled().await;
@@ -124,12 +160,15 @@ async fn read_connection(
             Ok(Some(frame)) => frame,
             Ok(None) => return Ok(()),
             Err(error) => {
-                close_with_error(
+                send_error(
                     &sender,
                     error.code,
                     Duration::from_millis(config.io_timeout_ms),
                 )
                 .await;
+                if !matches!(error.code, ErrorCode::Timeout | ErrorCode::SessionClosed) {
+                    binding.close_session();
+                }
                 return Err(error);
             }
         };
@@ -139,8 +178,11 @@ async fn read_connection(
                     Some(ErrorCode::InvalidRequest)
                 } else if session.is_some() {
                     Some(ErrorCode::InvalidState)
-                } else if login.credential.is_empty()
-                    || login.credential.len() > MAX_CREDENTIAL_BYTES
+                } else if (login.resume_token.is_empty()
+                    && (login.credential.is_empty()
+                        || login.credential.len() > MAX_CREDENTIAL_BYTES))
+                    || (!login.resume_token.is_empty()
+                        && (!login.credential.is_empty() || login.resume_token.len() != 64))
                 {
                     Some(ErrorCode::AuthenticationFailed)
                 } else {
@@ -149,6 +191,10 @@ async fn read_connection(
                 last_request_id = last_request_id.max(login.request_id);
                 let authenticated = if let Some(code) = error {
                     Err(GatewayError::from(code))
+                } else if !login.resume_token.is_empty() {
+                    sessions
+                        .authenticate_resume_token(&login.resume_token)
+                        .map(|player_id| AuthenticatedPlayer { player_id })
                 } else {
                     match tokio::time::timeout(
                         Duration::from_millis(config.auth_timeout_ms),
@@ -164,7 +210,9 @@ async fn read_connection(
                     Ok(player)
                         if !player.player_id.trim().is_empty() && player.player_id.len() <= 256 =>
                     {
-                        sessions.open(player.player_id, sender.clone()).await
+                        sessions
+                            .create_session(player.player_id, sender.clone())
+                            .await
                     }
                     Ok(_) => Err(ErrorCode::AuthenticationFailed.into()),
                     Err(error) => Err(error),
@@ -172,19 +220,28 @@ async fn read_connection(
                 let response = match opened {
                     Ok(opened) => {
                         let identity = opened.identity().clone();
-                        *binding.0.lock().map_err(|_| ErrorCode::Internal)? = Some(opened.clone());
                         let response = protocol::LoginResponse {
                             request_id: login.request_id,
                             error_code: 0,
                             player_id: identity.player_id,
                             session_id: identity.session_id,
                             epoch: identity.epoch,
+                            resume_token: opened.resume_token().to_owned(),
+                            resume_token_ttl_ms: config.resume_token_ttl_ms,
                         };
-                        opened.start(Frame {
+                        let attached = match opened.complete_login(Frame {
                             version: VERSION,
                             content: Some(Content::LoggedIn(response)),
-                        })?;
-                        session = Some(opened);
+                        }) {
+                            Ok(attached) => attached,
+                            Err(error) => {
+                                opened.close();
+                                return Err(error);
+                            }
+                        };
+                        *binding.0.lock().map_err(|_| ErrorCode::Internal)? =
+                            Some(attached.clone());
+                        session = Some(attached);
                         continue;
                     }
                     Err(error) => protocol::LoginResponse {
@@ -192,10 +249,43 @@ async fn read_connection(
                         error_code: error.code as u32,
                         player_id: String::new(),
                         session_id: String::new(),
-                        epoch: 0,
+                        ..Default::default()
                     },
                 };
                 enqueue_content(&sender, Content::LoggedIn(response))?;
+            }
+            Content::Resume(resume) => {
+                let result = if resume.request_id == 0 || resume.request_id <= last_request_id {
+                    Err(ErrorCode::InvalidRequest.into())
+                } else if session.is_some() {
+                    Err(ErrorCode::InvalidState.into())
+                } else {
+                    sessions
+                        .resume_session(
+                            &resume.resume_token,
+                            resume.ack_seq,
+                            resume.request_id,
+                            sender.clone(),
+                        )
+                        .await
+                };
+                last_request_id = last_request_id.max(resume.request_id);
+                match result {
+                    Ok(attached) => {
+                        last_request_id = last_request_id.max(attached.last_request_id()?);
+                        *binding.0.lock().map_err(|_| ErrorCode::Internal)? =
+                            Some(attached.clone());
+                        session = Some(attached);
+                    }
+                    Err(error) => enqueue_content(
+                        &sender,
+                        Content::Resumed(protocol::ResumeResponse {
+                            request_id: resume.request_id,
+                            error_code: error.code as u32,
+                            ..Default::default()
+                        }),
+                    )?,
+                }
             }
             Content::Request(request) => {
                 let request = LogicalMessage {
@@ -219,8 +309,10 @@ async fn read_connection(
                 last_request_id = last_request_id.max(request.request_id);
                 if let Err(error) = result {
                     if let Some(session) = &session {
-                        session
-                            .respond(outbound::failed(&request, error.code), request.message_id)?;
+                        session.publish_response(
+                            channel::error_response(&request, error.code),
+                            request.message_id,
+                        )?;
                     } else {
                         enqueue_content(
                             &sender,
@@ -238,22 +330,24 @@ async fn read_connection(
                     .ok_or_else(|| GatewayError::from(ErrorCode::Unauthenticated))
                     .and_then(|session| session.acknowledge(ack.ack_seq));
                 if let Err(error) = result {
-                    close_with_error(
+                    send_error(
                         &sender,
                         error.code,
                         Duration::from_millis(config.io_timeout_ms),
                     )
                     .await;
+                    binding.close_session();
                     return Err(error);
                 }
             }
             _ => {
-                close_with_error(
+                send_error(
                     &sender,
                     ErrorCode::InvalidState,
                     Duration::from_millis(config.io_timeout_ms),
                 )
                 .await;
+                binding.close_session();
                 return Err(ErrorCode::InvalidState.into());
             }
         }

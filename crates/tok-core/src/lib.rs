@@ -1,5 +1,7 @@
 //! 框架共享类型，不依赖具体游戏业务或基础设施实现。
 
+#![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
+
 pub mod coordination;
 pub mod discovery;
 pub mod error;

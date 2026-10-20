@@ -32,6 +32,8 @@ pub enum ErrorCode {
     SessionReplaced = 12,
     /// session 目录容量不足。
     CapacityExceeded = 13,
+    /// 凭证有效，但原会话已过期、已丢失或缓存不完整，须快速重登。
+    ResumeUnavailable = 14,
 }
 
 /// 网关控制错误，只携带有限错误码，避免泄漏凭证。

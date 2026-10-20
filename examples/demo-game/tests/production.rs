@@ -63,6 +63,26 @@ async fn production_rules_are_not_taken_from_client_timer_or_reward_fields() {
     assert_eq!(spec.interval_ms, None);
     assert!(spec.body.is_empty());
     assert!((before + 50..=after + 50).contains(&spec.due_at_ms));
+    // 快速重登的新 session 通过状态请求重新取得服务端保存的完整 timer 集合。
+    let mut reloaded = context.clone();
+    reloaded.session.as_mut().unwrap().session_id = "new-session".into();
+    let initialized = registry
+        .call(
+            reloaded,
+            Payload {
+                message_id: v1::GetPlayerRequest::MESSAGE_ID,
+                body: vec![],
+            },
+        )
+        .await
+        .unwrap();
+    let TimerUpdate::ReplaceAll(restored) = decode_update(initialized.timers.unwrap()).unwrap()
+    else {
+        panic!("初始化应返回全量计时集合");
+    };
+    assert_eq!(restored.len(), 1);
+    assert_eq!(restored[0].due_at_ms, spec.due_at_ms);
+    assert_eq!(restored[0].timer_id, spec.timer_id);
     let finish = Payload {
         message_id: v1::ProductionFinished::MESSAGE_ID,
         body: vec![8, 127],
