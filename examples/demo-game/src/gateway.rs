@@ -134,9 +134,17 @@ impl Factory for PlayerIngressFactory {
                 // 这两个内置处理者只查本地会话，因此示例为各节点独立订阅。
                 // 自定义组件可以选择 group，并自行完成目标路由或其他业务处理。
                 let capabilities = sessions.extensions();
+                let topics = tok::events::TopicFilter::Exact(tok::events::Topic::named(
+                    crate::events::TOPIC,
+                )?);
                 let components = [
-                    crate::events::player_forwarder(init.identity.clone(), sessions.clone(), None)?,
-                    crate::events::value_notifier(init.identity.clone(), sessions, None)?,
+                    crate::events::player_forwarder(
+                        init.identity.clone(),
+                        sessions.clone(),
+                        topics.clone(),
+                        None,
+                    )?,
+                    crate::events::value_notifier(init.identity.clone(), sessions, topics, None)?,
                 ];
                 let mut subscriptions = Vec::new();
                 for component in components {

@@ -8,11 +8,13 @@ mod message;
 pub mod nats;
 mod registry;
 mod subscriber;
+mod topic;
 
 pub use contract::{Envelope, Event, EventId, TraceContext, validate_name};
 pub use message::Message;
 pub use registry::{Callback, DispatchError, Handler, Input, Outcome, Registry, Task, handler};
 pub use subscriber::Subscriber;
+pub use topic::{Topic, TopicFilter};
 
 /// 通用服务器事件的投递策略，与业务目标和处理方式无关。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

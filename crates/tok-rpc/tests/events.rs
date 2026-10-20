@@ -19,6 +19,9 @@ struct Update {
 }
 impl Event for Update {
     const NAME: &'static str = "test.update.v1";
+    fn topic(&self) -> Result<tok_events::Topic, tok_events::Error> {
+        tok_events::Topic::named("realm:42")
+    }
 }
 #[tokio::test]
 async fn event_handlers_are_inaccessible_to_requests_and_timers_and_require_session_identity() {
@@ -29,6 +32,7 @@ async fn event_handlers_are_inaccessible_to_requests_and_timers_and_require_sess
         .register_event::<Update, _>(move |request| {
             let context = request.input.state;
             let id = &request.input.event.event_id;
+            assert_eq!(request.input.event.topic.as_str(), Some("realm:42"));
             let event = &request.input.event.payload;
             let seen = Arc::clone(&seen);
             Box::pin(async move {
@@ -79,6 +83,7 @@ async fn event_handlers_are_inaccessible_to_requests_and_timers_and_require_sess
     };
     use prost::Message;
     let event = tok_events::Message {
+        topic: tok_events::Topic::named("realm:42").unwrap(),
         event_id: EventId::new("operation-1").unwrap(),
         event_type: Update::NAME.into(),
         body: Update { value: 7 }.encode_to_vec(),

@@ -428,4 +428,16 @@ Core NATS、JetStream、网关事件入口、主题订阅、离线加载及交�
 
 全目标 Clippy、workspace rustdoc、格式、UTF-8/LF 及仓库内文档链接检查通过。events-smoke、execution-smoke、lifecycle-smoke、rpc-smoke、client-smoke、nats-smoke 通过；真实 NATS 13 项、Redis 发现 2 项及发现双进程/共享所有权/三进程交接 3 项集成通过。外部回归串行运行，demo 实际安装观察 Layer 和可交接的会话统计扩展。
 
-P4 尚未提交。未运行 release 构建或 Linux 本地验证。下一批为 P5 传输 topic 路由，P6 动态兴趣及 P7 整体组装仍未实施。
+P4 已提交为 `e8dda17`。未运行 release 构建或 Linux 本地验证。下一批为 P5 传输 topic 路由，P6 动态兴趣及 P7 整体组装仍未实施。
+
+## P5 传输 topic 路由（2026-10-20 Windows）
+
+以 P4 提交 `e8dda17` 为基线，Topic / TopicFilter 将路由范围与事件类型、消费组分开；NATS 适配集中编码并核对 topic 与 subject，内部 RPC 保留同一主题。内置投递回调可读取完整 Envelope，demo 显式订阅固定区服主题，不改变客户端 Frame 或会话动态兴趣。
+
+### P5 当前实现验收（2026-10-20 Windows）
+
+工作区 230 项测试通过（含 11 项指南示例及 2 项编译失败文档测试）。新增验证默认/具名主题区分、Unicode 与长度边界、无效线协议 topic、本地与远程解码保留 topic、子事件不继承父事件路由；既有 RPC 事件测试增加具名主题端到端断言。另验证类型化事件篡改主题、无效派生路由以及正文/路由不一致在进入业务前被拒绝。
+
+真实 NATS 14 项专项通过（tok-events 13 项及双网关 1 项），覆盖固定/所有主题兴趣、环境和类型隔离、同组分担与跨组独立，以及 subject/正文主题或类型伪造。events-smoke、rpc-smoke、client-smoke、nats-smoke 通过。全目标 Clippy、workspace rustdoc、11 项指南文档测试、格式、UTF-8/LF 和 81 处仓库内文档链接/锚点检查通过。
+
+以上为事件契约决定路由的 Topic API 验证；P5 尚未提交。本批未重复运行 Redis 专项、release 或 Linux 本地验证。动态会话兴趣、引用合并与自动主题策略仍留在 P6。

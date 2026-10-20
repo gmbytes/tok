@@ -157,6 +157,7 @@ async fn trace_context_is_propagated_across_the_network_call() {
             &target,
             call,
             &tok_events::Message {
+                topic: Default::default(),
                 event_id: tok_events::EventId::generate(),
                 event_type: "test.trace".into(),
                 body: vec![],

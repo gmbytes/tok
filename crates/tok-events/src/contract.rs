@@ -4,6 +4,12 @@ use crate::{DeliveryPolicy, Error};
 pub trait Event: Send + Sync + 'static {
     /// 稳定事件名，使用 ASCII 字母、数字、点、短横线和下划线，最长 128 字节。
     const NAME: &'static str;
+    /// 事件自身决定的路由主题；默认位于当前 namespace 的全局作用域。
+    /// 可覆盖为固定主题，或根据 channel_id / realm_id 等字段计算；不决定消费组。
+    /// 必须是无 I/O、无副作用的确定性计算，构造、编码和解码校验可重复调用。
+    fn topic(&self) -> Result<crate::Topic, Error> {
+        Ok(crate::Topic::default())
+    }
     /// 跨节点投递策略；Core NATS 当前只接受 Immediate。
     const DELIVERY: DeliveryPolicy = DeliveryPolicy::Immediate;
 }
@@ -107,6 +113,8 @@ impl TraceContext {
 /// 修改公开字段后须重新 validate；发布适配在编码和发送前重新校验。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Envelope<E> {
+    /// 发布与订阅共同选择的路由主题，默认作用域不代表所有主题。
+    pub topic: crate::Topic,
     /// 同一次事件的稳定 ID；重复发送时保持不变。
     pub event_id: EventId,
     /// 强类型业务载荷；投递策略由 E 声明。
@@ -115,9 +123,10 @@ pub struct Envelope<E> {
     pub trace_context: TraceContext,
 }
 impl<E: Event> Envelope<E> {
-    /// 使用既有 ID 创建事件，检查事件名；默认不携带追踪头。
+    /// 使用既有 ID 创建事件，检查事件名；按事件契约取得 topic，默认不携带追踪头。
     pub fn new(event_id: EventId, payload: E) -> Result<Self, Error> {
         let envelope = Self {
+            topic: payload.topic()?,
             event_id,
             payload,
             trace_context: TraceContext::default(),
@@ -128,6 +137,9 @@ impl<E: Event> Envelope<E> {
     /// 校验名称和有界追踪头；载荷编码及线协议大小限制由 Message 和传输适配处理。
     pub fn validate(&self) -> Result<(), Error> {
         validate_name(E::NAME)?;
+        if self.topic != self.payload.topic()? {
+            return Err(Error::InvalidInput("事件 topic 与正文路由契约不匹配"));
+        }
         self.trace_context.validate()
     }
 }

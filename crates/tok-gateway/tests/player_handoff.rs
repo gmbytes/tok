@@ -439,6 +439,7 @@ async fn handoff_replays_original_response_preserves_identity_and_runs_timer_onc
     let event = tok_gateway::player::events::Delivery {
         target: tok_gateway::player::events::Target::Topic("guild:7".into()),
         action: tok_gateway::player::events::Action::Forward(Arc::new(tok_events::Message {
+            topic: Default::default(),
             event_id: tok_events::EventId::generate(),
             event_type: "test.handoff".into(),
             body: vec![],
@@ -633,6 +634,7 @@ async fn cancelled_snapshot_cannot_commit_and_old_session_can_resume() {
     assert_eq!(
         source
             .post_event(Arc::new(tok_events::Message {
+                topic: Default::default(),
                 event_id: tok_events::EventId::generate(),
                 event_type: "test.freeze".into(),
                 body: vec![],

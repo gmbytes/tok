@@ -1,4 +1,4 @@
-//! Core NATS 通用服务器事件；按事件类型订阅，可显式使用 group 分担消费。
+//! Core NATS 通用服务器事件；按 topic 与事件类型订阅，可显式使用 group 分担消费。
 
 use crate::{Error, Handler, Message};
 use async_nats::{Client, Subscriber};
@@ -21,13 +21,13 @@ pub struct Config {
     pub operation_timeout_ms: u64,
     /// 单条事件正文与 NATS 追踪头的总字节上限，不超过 1 MiB。
     pub max_message_bytes: usize,
-    /// 每个事件类型订阅的待处理条数；慢消费者停用本连接的消费任务，发布仍可使用。
+    /// 每个 topic/事件类型订阅的待处理条数；慢消费者停用本连接的消费任务，发布仍可使用。
     pub subscription_capacity: usize,
     /// 客户端命令缓冲和同时发布操作各自的容量上限。
     pub client_capacity: usize,
-    /// 连接上活动的事件类型订阅总数上限，包含不同 group 的独立订阅。
+    /// 连接上活动的 topic/事件类型订阅总数上限，包含不同 group 的独立订阅。
     pub max_subscriptions: usize,
-    /// 订阅缓冲预算，按 类型数 × subscription_capacity × max_message_bytes 预留。
+    /// 订阅缓冲预算，按 topic/类型兴趣数 × subscription_capacity × max_message_bytes 预留。
     /// 约束配置范围内消息的正文缓冲，不包含 SDK 元数据、临时编码及无效超大输入。
     pub max_buffer_bytes: usize,
     /// 串行 handler 的等待期限；超时结果未知，不重试，单位毫秒。
@@ -164,8 +164,30 @@ impl Bus {
         }
         Ok(())
     }
-    fn subject(&self, event_type: &str) -> String {
-        format!("tok.events.{}.{}", self.config.namespace, event_type)
+    fn subject(&self, topic: &crate::Topic, event_type: &str) -> String {
+        let token = match topic.as_str() {
+            None => "d".to_owned(),
+            Some(name) => {
+                // 每个 UTF-8 字节编码为两个十六进制字符；单 token、无碰撞且不含通配符。
+                const HEX: &[u8; 16] = b"0123456789abcdef";
+                let mut encoded = String::with_capacity(1 + name.len() * 2);
+                encoded.push('n');
+                for byte in name.bytes() {
+                    encoded.push(char::from(HEX[usize::from(byte >> 4)]));
+                    encoded.push(char::from(HEX[usize::from(byte & 15)]));
+                }
+                encoded
+            }
+        };
+        format!("tok.events.{}.{token}.{event_type}", self.config.namespace)
+    }
+    fn interest(&self, topics: &crate::TopicFilter, event_type: &str) -> String {
+        match topics {
+            crate::TopicFilter::Exact(topic) => self.subject(topic, event_type),
+            crate::TopicFilter::All => {
+                format!("tok.events.{}.*.{event_type}", self.config.namespace)
+            }
+        }
     }
     // async-nats 0.50 的 flush 只等待本地写出。仅在订阅初始化时通过临时 inbox
     // 自回环确认该连接的订阅命令已被 broker 处理；不逐条确认发布，也不等待业务处理。
@@ -246,7 +268,11 @@ impl Bus {
                 headers.insert("tracestate", value.as_str());
             }
             self.client
-                .publish_with_headers(self.subject(&message.event_type), headers, bytes.into())
+                .publish_with_headers(
+                    self.subject(&message.topic, &message.event_type),
+                    headers,
+                    bytes.into(),
+                )
                 .await
                 .map_err(|_| Error::Unavailable("NATS 发布失败"))
         })
@@ -255,7 +281,7 @@ impl Bus {
         operation.done = result.is_ok();
         result
     }
-    /// 安装独立订阅组件，按其处理者声明的事件类型与消费组建立订阅。
+    /// 安装独立订阅组件，按其声明的 topic、处理者事件类型与消费组建立订阅。
     /// 返回前确认该连接上的订阅命令已被 broker 处理，不等待 handler 执行。
     /// 相同 group 的实例分担匹配事件，不提供 bid 路由或业务去重。
     pub async fn subscribe(&self, subscriber: crate::Subscriber) -> Result<Subscription, Error> {
@@ -264,6 +290,7 @@ impl Bus {
             extensions,
             handler,
             group,
+            topics,
         } = subscriber;
         let group = group.as_deref();
         self.healthy()?;
@@ -302,7 +329,7 @@ impl Bus {
         let mut subscribers = SelectAll::new();
         tokio::time::timeout(self.config.timeout(), async {
             for name in names {
-                let subject = self.subject(name);
+                let subject = self.interest(&topics, name);
                 let subscriber = if let Some(group) = group {
                     self.client.queue_subscribe(subject, group.to_owned()).await
                 } else {
@@ -318,6 +345,7 @@ impl Bus {
         Ok(Subscription {
             service,
             extensions,
+            topics,
             bus: self.clone(),
             subscribers,
             handler,
@@ -339,6 +367,7 @@ pub struct Subscription {
     service: tok_core::service::Identity,
     extensions: tok_core::execution::Extensions,
     bus: Bus,
+    topics: crate::TopicFilter,
     subscribers: SelectAll<Subscriber>,
     handler: Arc<dyn Handler>,
     _permit: tokio::sync::OwnedSemaphorePermit,
@@ -380,8 +409,8 @@ impl Subscription {
                         Ok(message) => message,
                         Err(_) => { tracing::error!("拒绝无效的 NATS 事件，不重试"); continue; }
                     };
-                    if message.event_type.is_empty() || self.bus.subject(&message.event_type) != wire_subject {
-                        tracing::error!("事件正文类型与订阅 subject 不匹配"); continue;
+                    if !self.topics.matches(&message.topic) || self.bus.subject(&message.topic, &message.event_type) != wire_subject {
+                        tracing::error!("事件正文 topic/类型与订阅 subject 不匹配"); continue;
                     }
                     message.trace_context = trace;
                     let message = Arc::new(message);

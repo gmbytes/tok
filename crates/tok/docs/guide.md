@@ -11,7 +11,7 @@ tok 是实验性的 Rust 游戏服务器框架。游戏通过本 crate 组装组
 | 服务与处理链共同构建 | Factory / Supervisor 与 gateway 作用域能力已接通 | P1–P4 已实施，P7 汇总应用装配 |
 | 消息、事件、timer 共用上下文与 Layer | RPC 及 gateway 的准入、请求、事件、timer、新下行均使用共同协议 | P3/P4 已实施 |
 | 本地与远程共用事件接口 | 同一 Registry、Envelope 与类型化 Tower 链；解码器显式安装 | P3 已实施 |
-| topic 参与传输并动态聚合 | join_topic / leave_topic 为同步本地成员操作 | P5/P6 待实施 |
+| topic 参与传输并动态聚合 | Topic / TopicFilter 参与 NATS 路由；join_topic / leave_topic 仍是本地成员操作 | P5 已实施，P6 动态兴趣待实施 |
 | 生命周期、查询和状态扩展 | gateway、管理器、会话快照与结束等待，显式状态工厂及交接适配 | P4 已实施 |
 
 下文示例保持可编译，不使用尚未提供的统一 Builder 或异步主题接口。实际迁移后再按对应批次替换示例；不靠兼容别名长期维护两套模型。
@@ -950,11 +950,11 @@ ID 限制为 1 到 128 个可打印 ASCII 非空白字节，追踪头每字段�
 
 ## Core NATS 即时事件
 
-本节介绍当前固定类型订阅 API。topic 暂仅用于本地会话筛选，本地与远程注册表及 gateway/session 处理链已接通；动态聊天/区服订阅仍待按 P5/P6 实施，不能按已实现能力使用。
+本节介绍当前按 topic 和类型建立的固定兴趣订阅。P5 已接通传输路由，本地与远程注册表及 gateway/session 处理链沿用共同协议；会话成员驱动的动态聊天/区服订阅仍待 P6。
 
 任何服务都可以使用 [`events::nats::Bus::publish_event`] 发布，用 [`events::Registry`] 订阅自己关心的类型。
 目标由业务正文表达，订阅者自行解释；总线不要求 player、session 或 RPC。
-每个 Registry 对一种类型注册一个异步处理函数，未注册类型忽略；多个服务可以分别订阅同一种事件。
+每个 Registry 可对一种类型有序注册多个处理函数；多个服务可以分别订阅同一种事件。
 处理函数可捕获状态与发布连接，也可以实现 [`events::Handler`] 自定义分发。
 
 ```rust,no_run
@@ -964,10 +964,17 @@ use tokio_util::sync::CancellationToken;
 
 #[derive(Clone, PartialEq, prost::Message)]
 struct GuildChanged { #[prost(uint64, tag = "1")] guild_id: u64 }
-impl Event for GuildChanged { const NAME: &'static str = "game.guild.changed.v1"; }
+impl Event for GuildChanged {
+    const NAME: &'static str = "game.guild.changed.v1";
+    // 这类事件固定属于 realm:42，发布者不再额外填写。
+    fn topic(&self) -> Result<events::Topic, events::Error> {
+        events::Topic::named("realm:42")
+    }
+}
 
 # async fn example(stop: CancellationToken) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 let bus = events::nats::Bus::connect(events::nats::Config::default()).await?;
+let topic = events::Topic::named("realm:42")?;
 let mut handlers = events::Registry::new(16)?;
 handlers.register::<GuildChanged, _>(|request| Box::pin(async move {
     let event = &request.input.event.payload;
@@ -976,7 +983,10 @@ handlers.register::<GuildChanged, _>(|request| Box::pin(async move {
     Ok(events::Outcome::Handled)
 }))?;
 handlers.enable_protobuf::<GuildChanged>()?;
-let subscription = bus.subscribe(tok::events::Subscriber::new(tok::core::service::Identity { node_id: "node-a".into(), service_name: "guild".into() }, Arc::new(handlers), None)?).await?;
+let subscription = bus.subscribe(events::Subscriber::new(
+    tok::core::service::Identity { node_id: "node-a".into(), service_name: "guild".into() },
+    Arc::new(handlers), events::TopicFilter::Exact(topic.clone()), None,
+)?).await?;
 bus.publish_event(Envelope::new(EventId::generate(), GuildChanged { guild_id: 7 })?).await?;
 // 将此 future 交给服务运行时监督；生产代码不能遗留脱管任务。
 subscription.run(stop).await?;
@@ -984,18 +994,23 @@ subscription.run(stop).await?;
 # }
 ```
 
-订阅的 subject 为 `tok.events.<namespace>.<event_type>`，从 Handler::event_types 声明的类型集合构造，不订阅无关事件。
-`Subscriber::new(identity, handler, None)` 组装独立接收的组件；`Some("mail.reward")` 让同名 group 内的实例分担同类事件。
-不同 group 分别得到一份；group 属于订阅配置，不属于 Event，不从服务名推导，也不提供 bid 归属路由、持久化或去重。
+事件通过 `Event::topic(&self)` 决定路由，默认返回 `Topic::default()`：普通全局事件只需声明 NAME，不必填写额外 topic。可覆盖为固定主题，或根据事件的 channel_id / realm_id 字段计算具名主题。该方法必须是无 I/O、无副作用的确定性计算。
+
+`Envelope::new` 从事件取得 topic；没有发布时覆盖 topic 的接口。修改公开正文或 topic 后，validate / 编码会再次核对；Registry 远程解码也在进入处理链前核对正文的路由契约。Message 是未解码的表示，仅能检查主题格式；自定义原始 Handler 若绕过 Registry，需要自己验证正文契约。本地 dispatch 读取相同的 Envelope.topic，是显式调用，不模拟 broker 过滤或消费组。
+
+`Subscriber::new(identity, handler, TopicFilter::Exact(topic), None)` 只订阅该 topic 与 Handler::event_types 声明的类型；`Some("mail.reward")` 让同名 group 的匹配实例分担事件。`TopicFilter::All` 是显式的所有 topic 兴趣，仍只接收声明的事件类型及当前 namespace。默认兴趣与 All 不同，具名 `"default"` 也与默认作用域不同；通配兴趣不能作为发布主题。
+
+Topic::named 接受最多 256 个 UTF-8 字节，允许点、冒号、斜线及 Unicode，拒绝空名、空白、控制字符和 `*` / `>`。名称不作大小写或 Unicode 归一化。NATS 适配器集中生成 `tok.events.<namespace>.<topic-token>.<event_type>`：默认 token 为 d，具名 token 为 n 加原始 UTF-8 的小写十六进制；All 在该位置使用单 token 通配符。业务不拼接 subject，接收时核对正文 topic、事件类型与规范 subject，拒绝伪造或非规范编码。
+不同 group 分别得到一份。group 属于订阅配置，不属于 Event，不从服务名推导；全局路由也不意味着每个实例都要执行业务。消费组不提供 bid 归属路由、持久化或去重。
 按 bid 持有状态的服务仍需自行路由到对应实例。group 属于每个订阅组件的组装选择，网关不固定消费策略。仅查询本地会话的组件在多网关部署中需要各节点独立接收；若采用同组消费，组件必须保证事件能够路由到目标会话所在节点。
 
 克隆 Bus 共享连接、发布容量与订阅预算；同一连接可建立多个逻辑订阅。每个订阅串行等待 handler，不新增并发工作池。
-仅保证同类型订阅内的接收顺序；跨类型、跨发布者及 group 不提供全局执行顺序。session FIFO 按实际准入顺序串行，不承担跨订阅排序。
+仅保证具体 topic 兴趣/类型订阅内的接收顺序；跨类型、跨发布者及 group 不提供全局执行顺序。session FIFO 按实际准入顺序串行，不承担跨订阅排序。
 handler 有有限等待期限，退出或超时会取消在途 future，已产生的副作用不回滚、不重试。
 取消、退出或丢弃一个订阅只退订自身，不关闭共享连接；Bus::close 由连接持有者显式调用。
 断线、发布入队失败或取消会保守停用连接；SDK 报告慢消费者时停止本连接上的所有消费任务并上报，发布仍可使用。需要消费故障隔离时使用独立 Bus。
 
-回调收到 `Request<Input<...>>`，包含当前状态借用、强类型 Envelope 及执行上下文；原始编码可用 `context.extensions().get::<Arc<Message>>()` 取得。转发直接共享原始 Message，不重新编码，也不重新采集追踪头。
+回调收到 `Request<Input<...>>`，包含当前状态借用、强类型 Envelope 及执行上下文；路由主题可从 `request.input.event.topic` 读取，原始编码可用 `context.extensions().get::<Arc<Message>>()` 取得。转发直接共享原始 Message，不重新编码，也不重新采集追踪头。
 `Outcome` 区分 Ignored、Handled、Rejected、Partial，表示当前 handler 阶段的处理结果；日志/指标另列错误与超时。
 网关可把 deliver 的 Report 转为 Outcome，Handled 只表示完成本地准入，不表示后续 player 执行完成。
 内部 Executor::execute_event 只返回可选 TimerUpdate，类型上不包含客户端回应；业务执行结果由会话处理，不返回 NATS 发布者。
@@ -1007,7 +1022,7 @@ Core NATS 拒绝 Persistent，不静默降级；JetStream、离线加载和去�
 
 ### 游戏自定义网关处理
 
-以下是当前闭包捕获句柄的组装方式；共同事件上下文和 gateway/session 处理链均已接通，动态传输主题与兴趣聚合留在 P5/P6，不代表仅捕获 SessionManager 已满足完整目标。
+以下是当前闭包捕获句柄的组装方式；共同事件上下文和 gateway/session 处理链均已接通，会话动态兴趣聚合留在 P6，不代表仅捕获 SessionManager 已满足完整目标。
 
 [`events::Subscriber`] 将 Handler 与可选 group 组合为独立订阅组件；同一网关可安装多个组件，各自选择类型、消费组和处理行为。
 [`gateway::player::events::forward`] 提供基本的玩家转发处理者，游戏负责从强类型正文选择 Target，原始事件进入 session FIFO。

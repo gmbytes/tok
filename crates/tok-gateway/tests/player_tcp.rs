@@ -209,6 +209,7 @@ impl Fixture {
                             service_name: "events".into(),
                         },
                         Arc::new(game_subscriber(gateway.ingress().sessions())),
+                        tok_events::TopicFilter::Exact(tok_events::Topic::default()),
                         None,
                     )
                     .unwrap(),
@@ -1469,6 +1470,7 @@ fn event_message(
                 body: body.to_vec(),
             },
             TestKind::Forward => Action::Forward(Arc::new(tok_events::Message {
+                topic: Default::default(),
                 event_id: tok_events::EventId::generate(),
                 event_type: "test.event".into(),
                 body: body.to_vec(),
@@ -1859,7 +1861,7 @@ async fn built_in_event_handlers_and_custom_components_compose_independently() {
         Arc::new(forward::<GameEvent, _>(fixture.sessions.clone(), |_| Ok(Target::All)).unwrap());
     let notifying = Arc::new(
         notify::<GameEvent, _>(fixture.sessions.clone(), 12, |event| {
-            Ok((Target::All, event.body.clone()))
+            Ok((Target::All, event.payload.body.clone()))
         })
         .unwrap(),
     );
@@ -1870,6 +1872,7 @@ async fn built_in_event_handlers_and_custom_components_compose_independently() {
                 service_name: "events".into(),
             },
             Arc::clone(&forwarding) as Arc<dyn Handler>,
+            tok_events::TopicFilter::Exact(tok_events::Topic::default()),
             Some("game.forward"),
         )
         .unwrap(),
@@ -1879,6 +1882,7 @@ async fn built_in_event_handlers_and_custom_components_compose_independently() {
                 service_name: "events".into(),
             },
             Arc::clone(&notifying) as Arc<dyn Handler>,
+            tok_events::TopicFilter::Exact(tok_events::Topic::default()),
             None,
         )
         .unwrap(),
@@ -1946,6 +1950,7 @@ async fn built_in_event_handlers_and_custom_components_compose_independently() {
             service_name: "events".into(),
         },
         Arc::new(custom),
+        tok_events::TopicFilter::Exact(tok_events::Topic::default()),
         Some("game.custom"),
     )
     .unwrap();

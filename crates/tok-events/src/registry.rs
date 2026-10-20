@@ -219,11 +219,14 @@ impl<C: Send, O, F> Registry<C, O, F> {
         entry.decoder = Some(|message| {
             let payload = E::decode(message.body.as_slice())
                 .map_err(|_| Error::InvalidInput("事件正文解码失败"))?;
-            Ok(Box::new(Envelope {
+            let envelope = Envelope {
+                topic: message.topic.clone(),
                 event_id: message.event_id.clone(),
                 payload,
                 trace_context: message.trace_context.clone(),
-            }))
+            };
+            envelope.validate()?;
+            Ok(Box::new(envelope))
         });
         Ok(())
     }

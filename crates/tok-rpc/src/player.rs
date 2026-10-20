@@ -51,6 +51,7 @@ impl Client {
             .map_err(|_| Status::invalid_argument("事件参数无效"))?;
         let request_id = context.request_id;
         let request = Request::new(proto::EventRequest {
+            topic: event.topic.as_str().map(str::to_owned),
             context: Some(call::encode_context(context)),
             event_id: event.event_id.to_string(),
             event_type: event.event_type.clone(),

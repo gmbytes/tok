@@ -2,9 +2,11 @@ use crate::{DeliveryPolicy, Envelope, Error, Event, EventId, TraceContext, valid
 use prost::Message as _;
 use tok_proto::internal::v1::EventEnvelope;
 
-/// 服务器事件的正文与来源，不携带客户端请求或网关路由信息。
+/// 服务器事件的正文与来源，携带通用 topic，不解释客户端请求或玩家归属。
 #[derive(Clone, Debug)]
 pub struct Message {
+    /// 业务路由主题，不等同于正文中的目标身份。
+    pub topic: crate::Topic,
     /// 同一次发布的稳定 ID，不隐含框架去重。
     pub event_id: EventId,
     /// 显式事件名称。
@@ -39,6 +41,7 @@ impl Message {
             envelope.trace_context.clone()
         };
         let result = Self {
+            topic: envelope.topic.clone(),
             event_id: envelope.event_id.clone(),
             event_type: E::NAME.into(),
             body: envelope.payload.encode_to_vec(),
@@ -52,6 +55,7 @@ impl Message {
         self.validate(max_bytes)?;
         let wire = EventEnvelope {
             version: 1,
+            topic: self.topic.as_str().map(str::to_owned),
             event_id: self.event_id.to_string(),
             event_type: self.event_type.clone(),
             body: self.body.clone(),
@@ -71,6 +75,7 @@ impl Message {
             return Err(Error::InvalidInput("事件版本无效"));
         }
         let result = Self {
+            topic: crate::Topic::from_wire(wire.topic)?,
             event_id: EventId::new(wire.event_id)?,
             event_type: wire.event_type,
             body: wire.body,

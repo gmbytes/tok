@@ -1,6 +1,6 @@
 # 当前实现状态
 
-核对日期：2026-10-20。P1 基线为 `f54b545`，文档基线为 `2552274`；P2 已提交为 `c6ffdc3`，P3 已提交为 `368fc74`；P4 已完成 gateway/session 扩展，尚未提交。本页描述代码现状，目标设计见[总体设计](design.md)与[服务运行模型](service-runtime.md)，迁移顺序见[实施计划](implementation-plan.md)。
+核对日期：2026-10-20。P1 基线为 `f54b545`，文档基线为 `2552274`；P2 已提交为 `c6ffdc3`，P3 已提交为 `368fc74`；P4 已提交为 `e8dda17`；P5 已完成传输 topic 路由，尚未提交。本页描述代码现状，目标设计见[总体设计](design.md)与[服务运行模型](service-runtime.md)，迁移顺序见[实施计划](implementation-plan.md)。
 
 ## 已实现与本轮缺口
 
@@ -10,17 +10,17 @@
 | 执行模型 | P1 提供 [execution::Context](../crates/tok-core/src/execution/context.rs) 与 [tok-service](../crates/tok-service/src/lib.rs) 类型化执行 Layer，RPC、事件及 RPC timer 路由已接入 | P4 已迁移 gateway/session 业务入口和扩展；动态兴趣仍待 P6 |
 | RPC | [tok-rpc](../crates/tok-rpc/src/lib.rs) 提供共享端点、强类型分发、请求锁、追踪、无自动重试客户端 | 方法、事件与 timer 使用共同 Request / Layer；网关准入及新下行链已由 P4 接入 |
 | 本地事件 | [Registry](../crates/tok-events/src/registry.rs) 按类型及稳定名有序多处理者，本地可跨 await 借用状态，远程显式解码后执行同一链 | 完整服务装配便捷入口在 P7 收敛 |
-| NATS | [Bus](../crates/tok-events/src/nats.rs) 按固定事件类型订阅，组件选择 group，串行处理及容量/期限有界 | topic 进入路由，订阅描述支持固定与动态兴趣；共同处理核心已接通 |
+| NATS | [Bus](../crates/tok-events/src/nats.rs) 按 topic/事件类型订阅，组件选择 Exact / All 兴趣及 group，串行处理及容量/期限有界 | 固定兴趣已接通；会话动态兴趣待 P6 |
 | gateway | [Gateway](../crates/tok-gateway/src/server.rs) 复用通用 Supervisor 管理后台任务，连接使用独立容量并纳入结束等待，Ingress 提供认证和 session 管理 | P4 已提供完整网关范围句柄、快照与状态扩展，消息 Layer 使用通用执行协议 |
 | session | 串行请求、timer 与内部事件，完整身份、所有权续租、下行序列、ACK 缓存、恢复与交接 | P4 已接入共同上下文和处理链、生命周期回调及显式扩展快照；保留现有协议边界 |
-| topic | [主题索引](../crates/tok-gateway/src/player/session/subscriptions.rs) 按本地会话成员筛选，支持加入/退出及交接恢复 | 尚无 NATS topic 路由、成员引用合并订阅、聊天/区服自动订阅策略 |
+| topic | [主题索引](../crates/tok-gateway/src/player/session/subscriptions.rs) 按本地会话成员筛选，支持加入/退出及交接恢复 | P5 已提供 NATS topic 路由，尚无成员引用合并订阅、聊天/区服自动订阅策略 |
 | 发现与协调 | Memory / Redis 发现、session 所有权及请求级锁；路由读取本地目录 | 本轮沿用既有语义；Redis Cluster 客户端仍待实现 |
 | 可观测 | tracing、动态过滤、Prometheus、OTLP、RPC/NATS 追踪传播 | 在统一执行入口复用现有设施，维持有限指标标签 |
 | 工程 | 九个框架 crate（含 P1 新增 tok-service）、demo、TOML、protobuf 构建期生成、rustdoc、just、Windows/Linux CI、LF 检查 | 持续验证迁移，不先增加没有实现用途的 crate 或配置 |
 
 ## 容易混淆的现状
 
-当前 NATS subject 是 `tok.events.<namespace>.<event_type>`。没有为每个 player_id 建立订阅，但无 group 示例会把该事件类型送到各网关后本地筛选。当前 Target::Topic、join_topic / leave_topic 仅维护本地成员，不改变 NATS 订阅。
+当前 NATS subject 是 `tok.events.<namespace>.<topic-token>.<event_type>`，topic-token 由适配器安全编码。Event::topic 默认全局，可固定或根据事件字段派生；Envelope 自动取得并校验主题。Subscriber 显式选择 Exact 或 All 兴趣及可选 group，没有默认按 player_id 建立订阅。demo 各网关独立订阅固定 `realm:demo`；当前 Target::Topic、join_topic / leave_topic 仍仅维护本地成员，不自动改变 NATS 订阅，动态聚合属于 P6。
 
 Envelope<E> 是强类型事件封装，Message 是带编码正文的运行时表示，EventEnvelope 是 protobuf 网络封装。本地 dispatch 接收带执行上下文的 Envelope 借用，远程解码后进入同一处理表。
 
@@ -46,7 +46,7 @@ Memory 只用于单进程协调；多进程可选择 Redis。租约与 RPC 的�
 
 P1 上下文边界校正：移除通用 `target`；`operation` 明确为服务内稳定入口标识，`service` 只标识当前执行服务。实体身份按需通过类型化输入/扩展提供；路由输入、选定端点及熔断状态分离，契约见[服务运行模型](service-runtime.md#操作身份路由与熔断边界)。通用路由器和熔断器尚未实施，不引入通用路由器或熔断器。
 
-P1 执行原型已经提供，不代表全部运行模型统一。P2 命名已收敛为 application 应用组装、lifecycle::Builder 服务构建、Init 初始化参数和 Gateway::tasks 通用句柄；通用工厂与任务生命周期已区分 task 任务范围和 lifecycle 消费式服务编排；P3 已接通 RPC/事件/timer 共同执行链，gateway 扩展已由 P4 完成，传输路由、动态订阅和完整组装属于 P5–P7 的工作。JetStream、离线玩家加载、跨节点去重辅助、通用玩家归属中继、Kubernetes 发现与部署、生产安全、Redis Cluster 和 Scene 接入属于后续范围。配置可校验或模块已预留不等于后端可运行。
+P1 执行原型已经提供，不代表全部运行模型统一。P2 命名已收敛为 application 应用组装、lifecycle::Builder 服务构建、Init 初始化参数和 Gateway::tasks 通用句柄；通用工厂与任务生命周期已区分 task 任务范围和 lifecycle 消费式服务编排；P3 已接通 RPC/事件/timer 共同执行链，gateway 扩展已由 P4 完成，P5 已完成传输路由，动态订阅和完整组装属于 P6/P7 的工作。JetStream、离线玩家加载、跨节点去重辅助、通用玩家归属中继、Kubernetes 发现与部署、生产安全、Redis Cluster 和 Scene 接入属于后续范围。配置可校验或模块已预留不等于后端可运行。
 
 ## 验证记录与复现
 
@@ -76,4 +76,12 @@ P1 提交时已通过 187 项工作区测试（其中新增 11 项原型测试�
 
 全目标 Clippy、workspace rustdoc、格式、UTF-8/LF 及仓库内文档链接检查通过。events-smoke、execution-smoke、lifecycle-smoke、rpc-smoke、client-smoke、nats-smoke 通过；真实 NATS 13 项、Redis 发现 2 项及发现双进程/共享所有权/三进程交接 3 项集成通过。外部回归串行运行，demo 实际安装观察 Layer 和可交接的会话统计扩展。
 
-P4 尚未提交。未运行 release 构建或 Linux 本地验证。下一批为 P5 传输 topic 路由，P6 动态兴趣及 P7 整体组装仍未实施。
+P4 已提交为 `e8dda17`。未运行 release 构建或 Linux 本地验证。下一批为 P5 传输 topic 路由，P6 动态兴趣及 P7 整体组装仍未实施。
+
+### P5 当前实现验收（2026-10-20 Windows）
+
+工作区 230 项测试通过（含 11 项指南示例及 2 项编译失败文档测试）。新增验证默认/具名主题区分、Unicode 与长度边界、无效线协议 topic、本地与远程解码保留 topic、子事件不继承父事件路由；既有 RPC 事件测试增加具名主题端到端断言。另验证类型化事件篡改主题、无效派生路由以及正文/路由不一致在进入业务前被拒绝。
+
+真实 NATS 14 项专项通过（tok-events 13 项及双网关 1 项），覆盖固定/所有主题兴趣、环境和类型隔离、同组分担与跨组独立，以及 subject/正文主题或类型伪造。events-smoke、rpc-smoke、client-smoke、nats-smoke 通过。全目标 Clippy、workspace rustdoc、11 项指南文档测试、格式、UTF-8/LF 和 81 处仓库内文档链接/锚点检查通过。
+
+以上为事件契约决定路由的 Topic API 验证；P5 尚未提交。本批未重复运行 Redis 专项、release 或 Linux 本地验证。动态会话兴趣、引用合并与自动主题策略仍留在 P6。

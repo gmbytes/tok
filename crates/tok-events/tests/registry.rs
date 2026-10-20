@@ -265,6 +265,7 @@ async fn subscriber_requires_its_own_identity_and_exposes_only_explicit_remote_c
                 service_name: "guild".into()
             },
             Arc::clone(&handler) as Arc<dyn Handler>,
+            tok_events::TopicFilter::Exact(tok_events::Topic::default()),
             None
         )
         .is_err()
@@ -276,8 +277,102 @@ async fn subscriber_requires_its_own_identity_and_exposes_only_explicit_remote_c
                 service_name: "guild".into()
             },
             handler,
+            tok_events::TopicFilter::Exact(tok_events::Topic::default()),
             Some("bad..group")
         )
         .is_err()
     );
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
+struct Routed {
+    #[prost(int64, tag = "1")]
+    value: i64,
+    #[prost(string, optional, tag = "2")]
+    route: Option<String>,
+}
+impl Event for Routed {
+    const NAME: &'static str = "test.routed.v1";
+    fn topic(&self) -> Result<tok_events::Topic, tok_events::Error> {
+        self.route.as_ref().map_or_else(
+            || Ok(tok_events::Topic::default()),
+            tok_events::Topic::named,
+        )
+    }
+}
+#[tokio::test]
+async fn local_and_remote_paths_expose_the_same_topic_without_inheriting_parent_topic() {
+    let mut handlers: Registry<Vec<tok_events::Topic>> = Registry::new(1).unwrap();
+    handlers
+        .register::<Routed, _>(|request| {
+            Box::pin(async move {
+                tokio::task::yield_now().await;
+                request.input.state.push(request.input.event.topic.clone());
+                Ok(Outcome::Handled)
+            })
+        })
+        .unwrap();
+    handlers.enable_protobuf::<Routed>().unwrap();
+    let topic = tok_events::Topic::named("chat:7/测试").unwrap();
+    let envelope = Envelope::new(
+        EventId::generate(),
+        Routed {
+            value: 3,
+            route: Some("chat:7/测试".into()),
+        },
+    )
+    .unwrap();
+    let message = Arc::new(Message::new(&envelope).unwrap());
+    let mut seen = vec![];
+    handlers
+        .dispatch(&mut seen, support::request(&envelope))
+        .await
+        .unwrap();
+    handlers
+        .receive(&mut seen, support::request(Arc::clone(&message)))
+        .await
+        .unwrap();
+    let child = Envelope::new(
+        EventId::generate(),
+        Routed {
+            value: 1,
+            route: None,
+        },
+    )
+    .unwrap();
+    let mut context = support::context();
+    context.extensions_mut().insert(message);
+    handlers
+        .dispatch(&mut seen, tok_service::Request::new(context, &child))
+        .await
+        .unwrap();
+    assert_eq!(
+        seen,
+        vec![topic.clone(), topic, tok_events::Topic::default()]
+    );
+}
+
+#[tokio::test]
+async fn decoded_route_must_match_event_fields_before_any_handler_runs() {
+    let mut handlers: Registry<()> = Registry::new(1).unwrap();
+    handlers
+        .register::<Routed, _>(|_| Box::pin(async { panic!("错误路由不能进入业务") }))
+        .unwrap();
+    handlers.enable_protobuf::<Routed>().unwrap();
+    let envelope = Envelope::new(
+        EventId::generate(),
+        Routed {
+            value: 1,
+            route: Some("chat:7".into()),
+        },
+    )
+    .unwrap();
+    let mut message = Message::new(&envelope).unwrap();
+    message.topic = tok_events::Topic::named("chat:8").unwrap();
+    assert!(matches!(
+        handlers
+            .receive(&mut (), support::request(Arc::new(message)))
+            .await,
+        Err(tok_events::DispatchError::Invalid(_))
+    ));
 }

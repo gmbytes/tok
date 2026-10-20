@@ -71,7 +71,7 @@ ExecutionContext 的公共部分包含服务/操作身份、可信来源、目�
 
 Event 定义稳定事件契约；Envelope<E> 表达强类型事件；Message 表达编码后的通用表示；EventEnvelope 定义网络封装。目标是本地和远程使用同一封装、处理表和上下文，远程 codec 属于适配，本地 Rust 事件无需为未使用的远程路径实现 protobuf。
 
-topic 是业务发布订阅路由，事件类型定义正文和 handler，group 决定匹配实例间如何分担。本地 Target 决定收到事件后实际投递哪些会话，不与传输路由强行合并。目标 NATS subject 包含 namespace、topic 和事件类型，业务不直接拼接 subject。
+topic 是业务发布订阅路由，Event::topic 默认全局，可由事件契约固定或根据正文派生；事件类型定义正文和 handler，group 则属于订阅组件，决定匹配实例间如何分担。本地 Target 决定收到事件后实际投递哪些会话，不与传输路由强行合并。P5 的 NATS subject 已包含 namespace、安全编码的 topic 和事件类型，业务不直接拼接 subject。
 
 订阅支持固定兴趣、会话动态兴趣和可信身份策略（如区服主题）。网关按组件、topic、事件类型和 group 合并兴趣，多个玩家共享订阅；首个需求建立，最后一个动态需求退出时释放，固定兴趣单独计数。加入等待就绪、失败回滚、退出重验、旧会话清理和交接的完整边界见[服务运行模型](service-runtime.md#订阅组件与动态兴趣)。
 

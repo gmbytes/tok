@@ -70,3 +70,73 @@ fn typed_constructor_rejects_oversized_protobuf_payloads() {
         Err(tok_events::Error::InvalidInput(_))
     ));
 }
+
+#[test]
+fn topic_round_trip_distinguishes_default_from_named_and_rejects_bad_wire_names() {
+    let default = Message::new(&envelope()).unwrap();
+    let routed = |route: &str| {
+        Message::new(
+            &Envelope::new(
+                EventId::generate(),
+                Routed {
+                    value: 7,
+                    route: Some(route.into()),
+                },
+            )
+            .unwrap(),
+        )
+        .unwrap()
+    };
+    let named = routed("default");
+    assert_ne!(default.topic, named.topic);
+    for original in [default, named, routed("聊天/区服:42.a")] {
+        let bytes = original.encode(4096).unwrap();
+        assert_eq!(Message::decode(&bytes, 4096).unwrap().topic, original.topic);
+        for bad in ["", "room.*", "room.>", "a b", "a\n", "\0", &"a".repeat(257)] {
+            let mut wire =
+                tok_proto::internal::v1::EventEnvelope::decode(bytes.as_slice()).unwrap();
+            wire.topic = Some(bad.to_owned());
+            assert!(
+                Message::decode(&wire.encode_to_vec(), 4096).is_err(),
+                "{bad:?}"
+            );
+        }
+    }
+    assert!(tok_events::Topic::named("界".repeat(86)).is_err());
+    assert!(tok_events::Topic::named("a".repeat(256)).is_ok());
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
+struct Routed {
+    #[prost(int64, tag = "1")]
+    value: i64,
+    #[prost(string, optional, tag = "2")]
+    route: Option<String>,
+}
+impl Event for Routed {
+    const NAME: &'static str = "test.routed.v1";
+    fn topic(&self) -> Result<tok_events::Topic, tok_events::Error> {
+        self.route.as_ref().map_or_else(
+            || Ok(tok_events::Topic::default()),
+            tok_events::Topic::named,
+        )
+    }
+}
+
+#[test]
+fn typed_events_reject_routes_that_disagree_with_the_event_contract() {
+    let mut global = envelope();
+    global.topic = tok_events::Topic::named("other").unwrap();
+    assert!(global.validate().is_err());
+    assert!(Message::new(&global).is_err());
+    assert!(
+        Envelope::new(
+            EventId::generate(),
+            Routed {
+                value: 1,
+                route: Some("*".into())
+            }
+        )
+        .is_err()
+    );
+}

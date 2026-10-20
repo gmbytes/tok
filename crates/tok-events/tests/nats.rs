@@ -77,6 +77,7 @@ async fn groups_share_within_each_group_and_independent_subscribers_receive_ever
                         service_name: "events".into(),
                     },
                     Arc::<Capture>::clone(&a),
+                    tok_events::TopicFilter::Exact(tok_events::Topic::default()),
                     Some("mail.reward"),
                 )
                 .unwrap(),
@@ -93,6 +94,7 @@ async fn groups_share_within_each_group_and_independent_subscribers_receive_ever
                         service_name: "events".into(),
                     },
                     Arc::<Capture>::clone(&b),
+                    tok_events::TopicFilter::Exact(tok_events::Topic::default()),
                     Some("mail.reward"),
                 )
                 .unwrap(),
@@ -109,6 +111,7 @@ async fn groups_share_within_each_group_and_independent_subscribers_receive_ever
                         service_name: "events".into(),
                     },
                     Arc::<Capture>::clone(&c),
+                    tok_events::TopicFilter::Exact(tok_events::Topic::default()),
                     Some("statistics"),
                 )
                 .unwrap(),
@@ -125,6 +128,7 @@ async fn groups_share_within_each_group_and_independent_subscribers_receive_ever
                         service_name: "events".into(),
                     },
                     Arc::<Capture>::clone(&d),
+                    tok_events::TopicFilter::Exact(tok_events::Topic::default()),
                     None,
                 )
                 .unwrap(),
@@ -202,6 +206,7 @@ async fn subject_interest_filters_unrelated_traffic_and_rejects_forged_body_type
                     service_name: "events".into(),
                 },
                 Arc::new(Interest(Recorded::NAME, Arc::clone(&capture))),
+                tok_events::TopicFilter::Exact(tok_events::Topic::default()),
                 None,
             )
             .unwrap(),
@@ -216,7 +221,7 @@ async fn subject_interest_filters_unrelated_traffic_and_rejects_forged_body_type
     assert!(capture.0.lock().unwrap().is_empty());
     let raw = async_nats::connect(config.url.as_str()).await.unwrap();
     raw.publish(
-        format!("tok.events.{}.{}", config.namespace, Recorded::NAME),
+        format!("tok.events.{}.d.{}", config.namespace, Recorded::NAME),
         message().encode(4096).unwrap().into(),
     )
     .await
@@ -261,6 +266,7 @@ async fn subscription_buffer_reservations_are_bounded_and_returned_on_drop() {
                     service_name: "events".into(),
                 },
                 Arc::new(Capture::default()),
+                tok_events::TopicFilter::Exact(tok_events::Topic::default()),
                 None,
             )
             .unwrap(),
@@ -275,6 +281,7 @@ async fn subscription_buffer_reservations_are_bounded_and_returned_on_drop() {
                     service_name: "events".into()
                 },
                 Arc::new(Capture::default()),
+                tok_events::TopicFilter::Exact(tok_events::Topic::default()),
                 Some("other")
             )
             .unwrap()
@@ -291,6 +298,7 @@ async fn subscription_buffer_reservations_are_bounded_and_returned_on_drop() {
                     service_name: "events".into(),
                 },
                 Arc::new(Capture::default()),
+                tok_events::TopicFilter::Exact(tok_events::Topic::default()),
                 Some("other"),
             )
             .unwrap(),
@@ -341,6 +349,7 @@ async fn handler_timeout_does_not_retry_or_block_later_events() {
                     service_name: "events".into(),
                 },
                 Arc::new(handlers),
+                tok_events::TopicFilter::Exact(tok_events::Topic::default()),
                 None,
             )
             .unwrap(),
@@ -429,6 +438,7 @@ async fn ordinary_service_can_subscribe_handle_and_publish_another_event() {
                         service_name: "events".into(),
                     },
                     Arc::new(handlers),
+                    tok_events::TopicFilter::Exact(tok_events::Topic::default()),
                     None,
                 )
                 .unwrap(),
@@ -446,6 +456,7 @@ async fn ordinary_service_can_subscribe_handle_and_publish_another_event() {
                         service_name: "events".into(),
                     },
                     Arc::new(audit_handlers),
+                    tok_events::TopicFilter::Exact(tok_events::Topic::default()),
                     None,
                 )
                 .unwrap(),
@@ -498,6 +509,7 @@ async fn shutdown_cancels_inflight_async_handler() {
                         service_name: "events".into(),
                     },
                     Arc::new(handlers),
+                    tok_events::TopicFilter::Exact(tok_events::Topic::default()),
                     None,
                 )
                 .unwrap(),
@@ -548,6 +560,7 @@ async fn independent_subscriptions_receive_same_event_and_namespaces_are_isolate
                     service_name: "events".into(),
                 },
                 Arc::<Capture>::clone(&ca),
+                tok_events::TopicFilter::Exact(tok_events::Topic::default()),
                 None,
             )
             .unwrap(),
@@ -562,6 +575,7 @@ async fn independent_subscriptions_receive_same_event_and_namespaces_are_isolate
                     service_name: "events".into()
                 },
                 Arc::new(Capture::default()),
+                tok_events::TopicFilter::Exact(tok_events::Topic::default()),
                 None
             )
             .unwrap()
@@ -579,6 +593,7 @@ async fn independent_subscriptions_receive_same_event_and_namespaces_are_isolate
                         service_name: "events".into(),
                     },
                     Arc::<Capture>::clone(&cb),
+                    tok_events::TopicFilter::Exact(tok_events::Topic::default()),
                     None,
                 )
                 .unwrap(),
@@ -595,6 +610,7 @@ async fn independent_subscriptions_receive_same_event_and_namespaces_are_isolate
                         service_name: "events".into(),
                     },
                     Arc::<Capture>::clone(&cc),
+                    tok_events::TopicFilter::Exact(tok_events::Topic::default()),
                     None,
                 )
                 .unwrap(),
@@ -644,6 +660,7 @@ async fn invalid_and_oversized_packets_do_not_reach_sink_or_stop_later_events() 
                     service_name: "events".into(),
                 },
                 Arc::<Capture>::clone(&capture),
+                tok_events::TopicFilter::Exact(tok_events::Topic::default()),
                 None,
             )
             .unwrap(),
@@ -653,7 +670,7 @@ async fn invalid_and_oversized_packets_do_not_reach_sink_or_stop_later_events() 
         .run(stop.clone()),
     );
     let raw = async_nats::connect(config.url.as_str()).await.unwrap();
-    let subject = format!("tok.events.{}.{}", config.namespace, Changed::NAME);
+    let subject = format!("tok.events.{}.d.{}", config.namespace, Changed::NAME);
     raw.publish(subject.clone(), vec![255].into())
         .await
         .unwrap();
@@ -717,6 +734,7 @@ async fn dropping_consumer_future_keeps_shared_connection_usable() {
                     service_name: "events".into(),
                 },
                 Arc::new(Capture::default()),
+                tok_events::TopicFilter::Exact(tok_events::Topic::default()),
                 None,
             )
             .unwrap(),
@@ -747,6 +765,7 @@ async fn subscription_overflow_is_reported_without_disabling_publishing() {
                     service_name: "events".into(),
                 },
                 Arc::new(Capture::default()),
+                tok_events::TopicFilter::Exact(tok_events::Topic::default()),
                 None,
             )
             .unwrap(),
@@ -805,6 +824,7 @@ async fn transport_disconnect_fails_consumer_and_stops_new_publications() {
                     service_name: "events".into(),
                 },
                 Arc::new(Capture::default()),
+                tok_events::TopicFilter::Exact(tok_events::Topic::default()),
                 None,
             )
             .unwrap(),
@@ -932,6 +952,7 @@ async fn publishing_needs_no_reply_but_subscription_setup_requires_broker_readin
                     service_name: "events".into(),
                 },
                 Arc::new(Capture::default()),
+                tok_events::TopicFilter::Exact(tok_events::Topic::default()),
                 None,
             )
             .unwrap(),
@@ -962,6 +983,7 @@ async fn publishing_needs_no_reply_but_subscription_setup_requires_broker_readin
                     service_name: "events".into()
                 },
                 Arc::new(Capture::default()),
+                tok_events::TopicFilter::Exact(tok_events::Topic::default()),
                 None
             )
             .unwrap()
@@ -982,4 +1004,192 @@ async fn publishing_needs_no_reply_but_subscription_setup_requires_broker_readin
     drop(ready);
     stop.cancel();
     proxy.await.unwrap();
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
+struct Routed {
+    #[prost(int64, tag = "1")]
+    value: i64,
+    #[prost(string, optional, tag = "2")]
+    route: Option<String>,
+}
+impl Event for Routed {
+    const NAME: &'static str = "test.routed.v1";
+    fn topic(&self) -> Result<tok_events::Topic, tok_events::Error> {
+        self.route.as_ref().map_or_else(
+            || Ok(tok_events::Topic::default()),
+            tok_events::Topic::named,
+        )
+    }
+}
+#[tokio::test]
+#[ignore = "需要真实 NATS；通过 just nats-test 显式运行"]
+async fn topic_routes_isolate_default_named_namespaces_and_groups_and_reject_forged_routes() {
+    use prost::Message as _;
+    use tok_events::{Subscriber, Topic, TopicFilter};
+    let config = Config {
+        max_message_bytes: 4096,
+        ..config()
+    };
+    let bus = Bus::connect(config.clone()).await.unwrap();
+    let other = Bus::connect(Config {
+        namespace: format!("other-{}", config.namespace),
+        ..config.clone()
+    })
+    .await
+    .unwrap();
+    let a = Topic::named("chat:7.区服").unwrap();
+    let b = Topic::named("chat/7").unwrap();
+    let named_default = Topic::named("default").unwrap();
+    let captures: Vec<_> = (0..8).map(|_| Arc::new(Capture::default())).collect();
+    let interests = [
+        (TopicFilter::Exact(Topic::default()), None),
+        (TopicFilter::Exact(named_default.clone()), None),
+        (TopicFilter::Exact(a.clone()), None),
+        (TopicFilter::Exact(b.clone()), None),
+        (TopicFilter::All, None),
+        (TopicFilter::Exact(a.clone()), Some("workers")),
+        (TopicFilter::Exact(a.clone()), Some("workers")),
+        (TopicFilter::Exact(a.clone()), Some("audit")),
+    ];
+    let stop = CancellationToken::new();
+    let mut tasks = Vec::new();
+    for ((topics, group), capture) in interests.into_iter().zip(&captures) {
+        tasks.push(tokio::spawn(
+            bus.subscribe(
+                Subscriber::new(
+                    tok_core::service::Identity {
+                        node_id: "test".into(),
+                        service_name: "events".into(),
+                    },
+                    Arc::new(Interest(Routed::NAME, Arc::clone(capture))),
+                    topics,
+                    group,
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap()
+            .run(stop.clone()),
+        ));
+    }
+    let event = |topic: Topic, value| {
+        Envelope::new(
+            EventId::generate(),
+            Routed {
+                value,
+                route: topic.as_str().map(str::to_owned),
+            },
+        )
+        .unwrap()
+    };
+    other.publish_event(event(a.clone(), 999)).await.unwrap();
+    for topic in [Topic::default(), named_default.clone(), b.clone()] {
+        bus.publish_event(event(topic, -1)).await.unwrap();
+    }
+    for value in 0..20 {
+        bus.publish_event(event(a.clone(), value)).await.unwrap();
+    }
+    wait(&captures[0], 1).await;
+    wait(&captures[1], 1).await;
+    wait(&captures[2], 20).await;
+    wait(&captures[3], 1).await;
+    wait(&captures[4], 23).await;
+    wait(&captures[7], 20).await;
+
+    // 原始发送者恶意交换正文路由，或使用非规范 subject；All 也必须拒绝。
+    let raw = async_nats::connect(config.url.as_str()).await.unwrap();
+    let token = format!(
+        "n{}",
+        a.as_str()
+            .unwrap()
+            .as_bytes()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    );
+    let subject = format!("tok.events.{}.{token}.{}", config.namespace, Routed::NAME);
+    let forged = Message::new(&event(b.clone(), 888)).unwrap();
+    raw.publish(subject.clone(), forged.encode(4096).unwrap().into())
+        .await
+        .unwrap();
+    let correct = Message::new(&event(a.clone(), 777)).unwrap();
+    raw.publish(
+        format!("tok.events.{}.d.{}", config.namespace, Routed::NAME),
+        correct.encode(4096).unwrap().into(),
+    )
+    .await
+    .unwrap();
+    raw.publish(
+        format!("tok.events.{}.invalid.{}", config.namespace, Routed::NAME),
+        correct.encode(4096).unwrap().into(),
+    )
+    .await
+    .unwrap();
+    let mut invalid =
+        tok_proto::internal::v1::EventEnvelope::decode(correct.encode(4096).unwrap().as_slice())
+            .unwrap();
+    invalid.topic = Some(String::new());
+    raw.publish(subject.clone(), invalid.encode_to_vec().into())
+        .await
+        .unwrap();
+    let mut wrong_type = correct.clone();
+    wrong_type.event_type = Recorded::NAME.into();
+    raw.publish(subject.clone(), wrong_type.encode(4096).unwrap().into())
+        .await
+        .unwrap();
+    // 同一连接的有效尾标保证前序坏包已在每个匹配订阅中被处理。
+    raw.publish(subject, correct.encode(4096).unwrap().into())
+        .await
+        .unwrap();
+    wait(&captures[2], 21).await;
+    wait(&captures[4], 24).await;
+    wait(&captures[7], 21).await;
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while captures[5].0.lock().unwrap().len() + captures[6].0.lock().unwrap().len() < 21 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    for (capture, expected) in captures.iter().zip([1, 1, 21, 1, 24, 0, 0, 21]) {
+        let messages = capture.0.lock().unwrap();
+        if expected > 0 {
+            assert_eq!(messages.len(), expected);
+        }
+        assert!(messages.iter().all(|message| !matches!(
+            Changed::decode(message.body.as_slice()).unwrap().value,
+            888 | 999
+        )));
+    }
+    let grouped: std::collections::BTreeSet<_> = captures[5]
+        .0
+        .lock()
+        .unwrap()
+        .iter()
+        .chain(captures[6].0.lock().unwrap().iter())
+        .map(|event| event.event_id.clone())
+        .collect();
+    assert_eq!(
+        captures[5].0.lock().unwrap().len() + captures[6].0.lock().unwrap().len(),
+        21
+    );
+    assert_eq!(grouped.len(), 21);
+    assert_eq!(captures[0].0.lock().unwrap()[0].topic, Topic::default());
+    assert_eq!(captures[1].0.lock().unwrap()[0].topic, named_default);
+    assert!(
+        captures[2]
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|event| event.topic == a)
+    );
+    stop.cancel();
+    for task in tasks {
+        task.await.unwrap().unwrap();
+    }
+    raw.drain().await.unwrap();
+    other.close().await.unwrap();
+    bus.close().await.unwrap();
 }

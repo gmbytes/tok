@@ -632,6 +632,13 @@ impl proto::player_rpc_server::PlayerRpc for RpcService {
         let request = request.into_inner();
         let context = self.context(request.context, None, true)?;
         let event = tok_events::Message {
+            topic: request
+                .topic
+                .map_or_else(
+                    || Ok(tok_events::Topic::default()),
+                    tok_events::Topic::named,
+                )
+                .map_err(|_| Status::invalid_argument("事件 topic 无效"))?,
             event_id: tok_events::EventId::new(request.event_id)
                 .map_err(|_| Status::invalid_argument("事件 ID 无效"))?,
             event_type: request.event_type,

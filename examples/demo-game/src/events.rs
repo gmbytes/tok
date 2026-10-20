@@ -3,6 +3,9 @@ use crate::protocol::{GameMessage, v1};
 use prost::Message;
 use tok::events::Event;
 
+/// 本示例固定的区服主题；不按 player_id 建立订阅。
+pub const TOPIC: &str = "realm:demo";
+
 /// 可信服务端发给 player 的增量事件，示例业务不提供跨发布去重。
 #[derive(Clone, PartialEq, Message)]
 pub struct AddValue {
@@ -15,6 +18,9 @@ pub struct AddValue {
 }
 impl Event for AddValue {
     const NAME: &'static str = "demo.player.add_value.v1";
+    fn topic(&self) -> Result<tok::events::Topic, tok::events::Error> {
+        tok::events::Topic::named(TOPIC)
+    }
 }
 /// 服务器值变更事件；网关将其转换为客户端 ValueNotice。
 #[derive(Clone, PartialEq, Message)]
@@ -28,35 +34,43 @@ pub struct ValueChanged {
 }
 impl Event for ValueChanged {
     const NAME: &'static str = "demo.player.value_changed.v1";
+    fn topic(&self) -> Result<tok::events::Topic, tok::events::Error> {
+        tok::events::Topic::named(TOPIC)
+    }
 }
 
 /// 独立的玩家转发组件；消费组由部署组装显式选择。
 pub fn player_forwarder(
     identity: tok::core::service::Identity,
     sessions: tok::gateway::player::SessionManager,
+    topics: tok::events::TopicFilter,
     group: Option<&str>,
 ) -> Result<tok::events::Subscriber, tok::events::Error> {
     use tok::gateway::player::events::{Target, forward};
     let handler = forward::<AddValue, _>(sessions, |event| {
-        Ok(Target::Players(vec![event.player_id.clone()]))
+        Ok(Target::Players(vec![event.payload.player_id.clone()]))
     })?;
-    tok::events::Subscriber::new(identity, std::sync::Arc::new(handler), group)
+    tok::events::Subscriber::new(identity, std::sync::Arc::new(handler), topics, group)
 }
 
 /// 独立的通知组件；可与转发组件分别启停、选择消费组或替换处理逻辑。
 pub fn value_notifier(
     identity: tok::core::service::Identity,
     sessions: tok::gateway::player::SessionManager,
+    topics: tok::events::TopicFilter,
     group: Option<&str>,
 ) -> Result<tok::events::Subscriber, tok::events::Error> {
     use tok::gateway::player::events::{Target, notify};
     let handler = notify::<ValueChanged, _>(sessions, v1::ValueNotice::MESSAGE_ID, |event| {
         Ok((
-            Target::Players(vec![event.player_id.clone()]),
-            v1::ValueNotice { value: event.value }.encode_to_vec(),
+            Target::Players(vec![event.payload.player_id.clone()]),
+            v1::ValueNotice {
+                value: event.payload.value,
+            }
+            .encode_to_vec(),
         ))
     })?;
-    tok::events::Subscriber::new(identity, std::sync::Arc::new(handler), group)
+    tok::events::Subscriber::new(identity, std::sync::Arc::new(handler), topics, group)
 }
 
 /// 真实 TCP + NATS + RPC 验证：内部事件修改状态，广播进入客户端 Notify。

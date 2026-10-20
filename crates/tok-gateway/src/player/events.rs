@@ -74,7 +74,7 @@ impl From<Report> for tok_events::Outcome {
     }
 }
 
-/// 创建玩家事件转发处理者；目标选择由游戏定义，原始事件排入 session FIFO。
+/// 创建玩家事件转发处理者；目标选择读取完整 Envelope（包括 topic），由游戏定义，原始事件排入 session FIFO。
 ///
 /// 此内置实现仅查找本地在线会话，不加载离线玩家。订阅的 group 由外部组件组装决定；
 /// 多网关部署若使用同组消费，须另行保证消息路由到拥有目标会话的网关。
@@ -84,7 +84,7 @@ pub fn forward<E, F>(
 ) -> Result<tok_events::Registry, Error>
 where
     E: tok_events::Event + prost::Message + Default,
-    F: Fn(&E) -> Result<Target, Error> + Send + Sync + 'static,
+    F: Fn(&tok_events::Envelope<E>) -> Result<Target, Error> + Send + Sync + 'static,
 {
     let mut handlers = tok_events::Registry::new(1)?;
     handlers.register::<E, _>(move |request| {
@@ -95,7 +95,7 @@ where
             .cloned()
             .map(Ok)
             .unwrap_or_else(|| Message::new(request.input.event).map(Arc::new));
-        let target = select(&request.input.event.payload);
+        let target = select(request.input.event);
         let sessions = sessions.clone();
         Box::pin(async move {
             let report = sessions
@@ -112,7 +112,7 @@ where
     Ok(handlers)
 }
 
-/// 创建广播通知处理者；游戏将事件映射为本地目标及客户端通知正文。
+/// 创建广播通知处理者；游戏根据 Envelope 的 topic/正文映射为本地目标及客户端通知正文。
 ///
 /// 可选择全部会话、主题或指定玩家。此处理者只发送 Notify，不执行 player；
 /// 消费组由外部组件组装决定，不隐含全局广播或跨网关路由。
@@ -123,14 +123,14 @@ pub fn notify<E, F>(
 ) -> Result<tok_events::Registry, Error>
 where
     E: tok_events::Event + prost::Message + Default,
-    F: Fn(&E) -> Result<(Target, Vec<u8>), Error> + Send + Sync + 'static,
+    F: Fn(&tok_events::Envelope<E>) -> Result<(Target, Vec<u8>), Error> + Send + Sync + 'static,
 {
     if message_id == 0 {
         return Err(Error::InvalidInput("通知消息 ID 必须非零"));
     }
     let mut handlers = tok_events::Registry::new(1)?;
     handlers.register::<E, _>(move |request| {
-        let notification = map(&request.input.event.payload);
+        let notification = map(request.input.event);
         let sessions = sessions.clone();
         Box::pin(async move {
             let (target, body) = notification?;
