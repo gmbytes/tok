@@ -603,3 +603,11 @@ tok-game-rpc 调整为 tok-message，通用正文适配独立为 tok-protobuf，
 玩家结果模型、通知构造归属及请求锁泛化继续按后续计划推进；本轮不更改线协议、预算/取消、服务器事件隔离或无自动重试约束。
 
 本轮 Windows 验收：工作区 274 项测试通过、31 项外部专项按约定跳过，包含 15 项指南示例；零消息编号的 RPC 拒绝另补定向回归。全目标编译与 Clippy、workspace rustdoc、dispatch / rpc / client / application / lifecycle / execution 六项 smoke、格式、214 个文本文件 UTF-8/LF 和 82 处相对文档路径检查通过。正常依赖确认 tok-protobuf 不依赖 Tonic、生成协议或玩家，tok-grpc 不依赖消息、事件或玩家层。未运行真实 Redis/NATS、Linux 或 release 构建；随本次提交交付。
+
+## 玩家契约审查修复（2026-10-21）
+
+删除 tok-player 根 Error / Result 及 error.rs，所有权与恢复凭证分别使用 ownership::{Error, Result} 与 credentials::{Error, Result}。ownership::Owner 移除，记录、Store、自定义后端、网关和示例直接复用 core::Identity；没有旧类型兼容别名。模块公开范围和 SessionIdentity、LogicalMessage、MessageKind、TimerSpec / Trigger / Update 根导出保留。
+
+所有权配置失败统一使用 InvalidConfig，内存活动租约及登录标记容量不足使用 CapacityExceeded；网关登录映射为已有容量错误码。凭证本地失败保留安全的静态原因，非法或过期凭证仍为 None，不增加网络验签。补充普通登录、快速重登及交接的最新登录标记原子约束，修正错误码、未发布下行序号、消息正文及服务器计时需求注释，指南增加本地凭证与所有权示例。
+
+本轮 Windows 验收：工作区 279 项测试通过、31 项外部专项按约定跳过，包含 16 项指南示例；最终内存所有权定向回归通过。全目标 Clippy、workspace rustdoc、client / execution smoke、格式、213 个文本文件 UTF-8/LF、82 处相对文档路径及空白检查通过。新增回归覆盖构造配置分类、最新登录标记回收、凭证故障的安全诊断和所有权容量不足的 TCP 登录错误映射。未运行真实 Redis/NATS、Linux 或 release 构建；随本次提交交付。

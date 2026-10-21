@@ -14,7 +14,7 @@
 | lock | Key / Lease / Backend 定义请求级租约，后端在 infra、中间件在 RPC |
 | 根导出 | Extensions 是类型化能力集合，BoxFuture 是不隐含 Result 的 Send Future 别名 |
 
-锁、所有权和发现统一使用 BoxFuture，并显式保留 core::Result 或 player::Result。原 Operation 与 RegistrationTask 别名移除；根导出的 ServiceDirectory 等角色名前缀有辨识用途，继续保留。DirectoryStateUnavailable 表达目录本地状态不可用，Unsupported 表达当前组件不支持能力；错误类别按 core 声明的契约定义，不收集 Redis、RPC 或玩家业务专有错误。
+锁、所有权和发现统一使用 BoxFuture，并显式保留 core::Result 或 player::ownership::Result。原 Operation 与 RegistrationTask 别名移除；根导出的 ServiceDirectory 等角色名前缀有辨识用途，继续保留。DirectoryStateUnavailable 表达目录本地状态不可用，Unsupported 表达当前组件不支持能力；错误类别按 core 声明的契约定义，不收集 Redis、RPC 或玩家业务专有错误。
 
 此轮上下文、锁模块及 Future 别名校正随本次提交交付。客户端与内部 protobuf、Redis 键、期限、取消、追踪及租约行为均保持原语义。此前验收记录保留在实施历史和计划；本次 BoxFuture 统一已通过 40 项 infra/RPC 常规测试、12 项指南测试、全目标 Clippy 和 rustdoc；未重复其他外部专项或完整工作区测试，按用户要求未做 release 构建。
 
@@ -153,7 +153,7 @@ Client::with_endpoint_factory 接收从 ServiceDescriptor 创建 Tonic Endpoint 
 
 服务发现、请求锁和路由契约分别使用 core::discovery::{Error, Result}、core::lock::{Error, Result}、core::routing::{Error, Result}；不提供旧领域变体兼容别名。路由的 Discovery 包装保留原发现错误与错误链，Application::Error 增加 Discovery 聚合，注册、清理和故障传播均使用该类别。后端错误按相应领域映射，不返回其他领域的变体。
 
-core 根 Error / Result 已移除，参数、配置及可选能力校验由实际所属组件表达。所有权故障归 player::Error::OwnershipUnavailable；Redis 发现与锁校验使用各自领域错误，整体应用配置映射为 config::Error::Invalid。最终归属与验收见下文。
+core 根 Error / Result 已移除，参数、配置及可选能力校验由实际所属组件表达。所有权故障归 player::ownership::Error::Unavailable；Redis 发现与锁校验使用各自领域错误，整体应用配置映射为 config::Error::Invalid。最终归属与验收见下文。
 
 registry 注册错误定名为 Error<K>，运行失败定名为 DispatchError<K, E>；后者覆盖未知键、执行停止与业务处理错误，避免 HandleError 误指只有处理者内部失败。protobuf 适配与示例同步新路径，不保留 RegistrationError 旧类型。
 
@@ -163,7 +163,7 @@ registry 注册错误定名为 Error<K>，运行失败定名为 DispatchError<K,
 
 删除 tok-core/error.rs 及根 Error / Result，领域发现、锁和路由契约不变，不提供兼容类型。剩余校验能力回到所属模块：execution::ContextError 表达无效服务身份、操作名和不可表示期限；lifecycle::task::CreateError 表达无效容量和父范围退出，lifecycle::CreateError 表达服务身份及底层任务范围构造失败。构造失败与运行错误分开，组合处保留原始来源。
 
-应用配置使用 tok::config::{Error, Result}，Application 以 Configuration / Create / Discovery 聚合配置、构造和发现错误，Unsupported 表达应用尚未实现的可选能力。玩家参数、配置、可选操作、所有权和凭证错误直接归 player::Error，不再经 Core 包装；玩家接入运行参数单独使用 gateway::player::ConfigError。示例业务状态构造采用自己的标准 I/O 参数错误，不依赖框架根错误。
+应用配置使用 tok::config::{Error, Result}，Application 以 Configuration / Create / Discovery 聚合配置、构造和发现错误，Unsupported 表达应用尚未实现的可选能力。所有权和凭证错误分别归 player::ownership::Error 与 player::credentials::Error，不再经 Core 包装；玩家接入运行参数单独使用 gateway::player::ConfigError。示例业务状态构造采用自己的标准 I/O 参数错误，不依赖框架根错误。
 
 本轮 Windows 验收：工作区 273 项测试通过、31 项外部专项按约定跳过，包含 15 项指南示例。全目标编译与 Clippy、workspace rustdoc、dispatch / rpc / client / application / lifecycle / execution smoke、格式、206 个文本文件 UTF-8/LF 和 82 处文档相对路径检查通过。源码扫描确认无 core::Error、core::Result 或 Error::Core 遗留，core/error.rs 已删除；回归确认停止父范围的子范围创建失败不泄漏活动记录。未运行真实 Redis/NATS、Linux 或 release 构建；随本次提交交付。
 
@@ -176,3 +176,11 @@ tok-message 根 Registry 提供不依赖 Tonic 的非零编号注册、本地分
 本轮只校正库与命名空间边界，不宣称通用请求锁泛化、玩家结果模型及通知构造后续批次已经完成。请求锁目前保留在 message::rpc::lock，仍按现有 TTL 和执行预算约束运行。
 
 本轮 Windows 验收：工作区 274 项测试通过、31 项外部专项按约定跳过，包含 15 项指南示例；零消息编号的 RPC 拒绝另补定向回归。全目标编译与 Clippy、workspace rustdoc、dispatch / rpc / client / application / lifecycle / execution 六项 smoke、格式、214 个文本文件 UTF-8/LF 和 82 处相对文档路径检查通过。正常依赖确认 tok-protobuf 不依赖 Tonic、生成协议或玩家，tok-grpc 不依赖消息、事件或玩家层。未运行真实 Redis/NATS、Linux 或 release 构建；随本次提交交付。
+
+## 玩家契约审查修复（2026-10-21）
+
+已移除 tok-player 根 Error / Result 和重复的 ownership::Owner。ownership::{Error, Result} 与 credentials::{Error, Result} 分别表达领域故障；持有者直接使用 core::Identity。Memory 与 Redis 构造配置失败统一为 InvalidConfig，内存所有权容量不足独立为 CapacityExceeded，网关映射为已有容量错误码；凭证故障保留不含敏感值的静态原因。
+
+普通登录、快速重登、转移与释放对最新登录标记的要求已写入 trait 和指南；本地验签不授予所有权。模块与主要类型根导出布局保留，LogicalMessage / TimerSpec 注释、调用方、后端、自定义 Store 示例和指南同步修正。后续玩家结果模型、通知归属及请求锁泛化仍按原计划推进。
+
+本轮 Windows 验收：工作区 279 项测试通过、31 项外部专项按约定跳过，包含 16 项指南示例；最终内存所有权定向回归通过。全目标 Clippy、workspace rustdoc、client / execution smoke、格式、213 个文本文件 UTF-8/LF、82 处相对文档路径及空白检查通过。新增回归覆盖构造配置分类、最新登录标记回收、凭证故障的安全诊断和所有权容量不足的 TCP 登录错误映射。未运行真实 Redis/NATS、Linux 或 release 构建；随本次提交交付。

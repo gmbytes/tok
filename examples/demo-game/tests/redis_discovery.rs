@@ -6,6 +6,7 @@ use std::{
     process::{Child, Command, Stdio},
     time::Duration,
 };
+use tok::core::Identity as SessionOwner;
 use tok::{
     core::ServiceDirectory,
     gateway::{
@@ -17,7 +18,7 @@ use tok::{
         discovery::redis::{RedisDirectory, RedisDiscoveryConfig},
         ownership::redis::{RedisOwnership, RedisOwnershipConfig},
     },
-    player::ownership::{Owner as SessionOwner, Store as OwnershipStore},
+    player::ownership::Store as OwnershipStore,
 };
 use tokio_util::sync::CancellationToken;
 

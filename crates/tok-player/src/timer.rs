@@ -1,6 +1,6 @@
 //! 玩家计时需求与更新；实际调度由会话驱动。
 
-/// 玩家提供的计时需求，实际调度由 session 负责。
+/// 玩家业务处理者声明的服务器计时需求，实际调度由 session 负责，客户端不能直接提交。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TimerSpec {
     /// player 范围内稳定的 timer 标识。

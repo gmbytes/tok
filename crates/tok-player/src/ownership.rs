@@ -1,24 +1,41 @@
 //! 玩家会话驱动权的租约契约，不绑定具体存储后端。
-use crate::{Result, SessionIdentity};
+use crate::SessionIdentity;
 use std::time::Duration;
-use tok_core::BoxFuture;
+use tok_core::{BoxFuture, Identity};
 
-/// 所有权持有者，以部署节点和服务名定位。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Owner {
-    /// 持有会话所有权的部署节点。
-    pub node_id: String,
-    /// 节点内持有会话的网关服务名。
-    pub service_name: String,
+/// 会话驱动权操作或后端配置错误。
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    /// 玩家、会话、所有者身份或租约参数无效。
+    #[error("所有权参数无效：{0}")]
+    InvalidInput(String),
+    /// 后端构造配置无效，不包含连接凭据。
+    #[error("所有权配置错误：{0}")]
+    InvalidConfig(String),
+    /// 后端未实现指定的可选操作。
+    #[error("所有权后端不支持此操作：{0}")]
+    Unsupported(&'static str),
+    /// 活动租约或最新登录标记的有界容量已满。
+    #[error("所有权容量不足：{0}")]
+    CapacityExceeded(&'static str),
+    /// 后端或本地状态不可用，原因不得包含连接凭据。
+    #[error("会话所有权不可用：{0}")]
+    Unavailable(String),
+    /// 租约比较失败，或快速重登的最新登录标记不匹配。
+    #[error("会话所有权已变化或过期，或最新登录标记不匹配")]
+    Conflict,
 }
+
+/// 会话驱动权操作结果，不包含凭证签发和验证错误。
+pub type Result<T> = std::result::Result<T, Error>;
 
 /// 当前可驱动 player 的会话及其所在网关。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Record {
     /// 玩家、逻辑会话及当前所有权代次。
     pub identity: SessionIdentity,
-    /// 当前持有所有权的网关位置。
-    pub owner: Owner,
+    /// 当前持有所有权的网关服务身份，与 core::Identity 使用相同定义。
+    pub owner: Identity,
 }
 
 /// 原子获取、条件转移、续租与释放。读取所有权不等同于持有租约。
@@ -29,37 +46,44 @@ pub struct Record {
 pub trait Store: Send + Sync {
     /// 快速重登：原子检查玩家最新登录的 session_id 后建立新会话。
     /// 新登录更新此标记，交接和租约释放保留；旧凭证不能借租约过期再次进入。
+    /// 必须在同一原子操作中检查 previous.session_id、expected_epoch，并更新租约与
+    /// 最新登录标记为新 session_id；比较失败返回 Error::Conflict。
     /// 自定义后端需实现此原子操作才能支持快速重登，默认不支持。
     fn acquire_for_relogin(
         &self,
         _previous: crate::credentials::ResumeClaims,
         _session_id: String,
-        _owner: Owner,
+        _owner: Identity,
         _expected_epoch: Option<u64>,
         _ttl: Duration,
     ) -> BoxFuture<'_, Result<Record>> {
-        Box::pin(async { Err(crate::Error::Unsupported("快速重登会话代次校验")) })
+        Box::pin(async { Err(Error::Unsupported("快速重登会话代次校验")) })
     }
     /// 仅在完整旧身份匹配且租约有效时转移；保留 session_id 并增加 epoch。
+    /// 保留最新登录标记，不能使同一逻辑会话的有效凭证因网关交接而失效。
     /// 默认不支持，不能用先查询再 acquire 模拟完整身份比较。
     fn transfer(
         &self,
         _expected: Record,
-        _target: Owner,
+        _target: Identity,
         _ttl: Duration,
     ) -> BoxFuture<'_, Result<Record>> {
-        Box::pin(async { Err(crate::Error::Unsupported("所有权条件转移")) })
+        Box::pin(async { Err(Error::Unsupported("所有权条件转移")) })
     }
     /// 读取未过期的所有权；查询结果不能代替获取或续租。
     fn lookup(&self, player_id: &str) -> BoxFuture<'_, Result<Option<Record>>>;
 
     /// 没有当前所有者时 expected_epoch 应为 None；接管时必须匹配当前 epoch。
-    /// 成功时产生新的 epoch，调用方决定恢复原 session_id 或建立新会话。
+    /// 成功时原子写入租约、产生新的 epoch，并将玩家最新登录标记设为 session_id。
+    /// 该标记使其他 session_id 的旧凭证无法通过 acquire_for_relogin 再次建立会话，
+    /// 不改变凭证的本地验签结果；不能用先获取租约、再单独写标记的方式实现。
+    /// 续租、转移和释放保留该标记；回收标记后必须拒绝相应快速重登，转为普通鉴权。
+    /// 调用方决定恢复原 session_id 或建立新会话；普通登录应使用新 session_id。
     fn acquire(
         &self,
         player_id: String,
         session_id: String,
-        owner: Owner,
+        owner: Identity,
         expected_epoch: Option<u64>,
         ttl: Duration,
     ) -> BoxFuture<'_, Result<Record>>;

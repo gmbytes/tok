@@ -102,10 +102,8 @@ mod tests {
         protocol::{self, Frame, frame::Content},
     };
     use std::sync::atomic::AtomicBool;
-    use tok_player::{
-        SessionIdentity,
-        ownership::{Owner as SessionOwner, Record as SessionOwnership},
-    };
+    use tok_core::Identity as SessionOwner;
+    use tok_player::{SessionIdentity, ownership::Record as SessionOwnership};
     use tokio::sync::{Notify, mpsc};
     use tokio_util::sync::CancellationToken;
 

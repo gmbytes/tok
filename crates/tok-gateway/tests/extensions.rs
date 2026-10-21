@@ -11,6 +11,7 @@ use std::{
     task::{Context as TaskContext, Poll},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
+use tok_core::Identity as SessionOwner;
 use tok_core::{Extensions, service::Identity};
 use tok_execution::Request;
 use tok_gateway::{
@@ -29,8 +30,7 @@ use tok_gateway::{
 use tok_infra::ownership::MemoryOwnership;
 use tok_lifecycle::{Builder, Init, InitFuture, task::Task};
 use tok_player::{
-    LogicalMessage, MessageKind, TimerSpec, TimerUpdate,
-    ownership::{Owner as SessionOwner, Store as OwnershipStore},
+    LogicalMessage, MessageKind, TimerSpec, TimerUpdate, ownership::Store as OwnershipStore,
 };
 use tokio::{
     net::{TcpListener, TcpStream},

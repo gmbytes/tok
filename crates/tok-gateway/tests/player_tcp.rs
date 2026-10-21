@@ -10,6 +10,7 @@ use std::{
     time::Duration,
 };
 use tok_core::BoxFuture;
+use tok_core::Identity as SessionOwner;
 use tok_gateway::{
     ErrorCode, Gateway,
     codec::{FrameCodec, VERSION},
@@ -22,7 +23,7 @@ use tok_gateway::{
 use tok_infra::ownership::MemoryOwnership;
 use tok_player::{
     LogicalMessage, MessageKind,
-    ownership::{Owner as SessionOwner, Record as SessionOwnership, Store as OwnershipStore},
+    ownership::{Record as SessionOwnership, Store as OwnershipStore},
 };
 use tokio::{
     io::AsyncWriteExt,
@@ -312,7 +313,10 @@ struct DelayedRenew {
     renewals: Arc<AtomicUsize>,
 }
 impl OwnershipStore for DelayedRenew {
-    fn lookup(&self, player: &str) -> BoxFuture<'_, tok_player::Result<Option<SessionOwnership>>> {
+    fn lookup(
+        &self,
+        player: &str,
+    ) -> BoxFuture<'_, tok_player::ownership::Result<Option<SessionOwnership>>> {
         self.memory.lookup(player)
     }
     fn acquire(
@@ -322,14 +326,14 @@ impl OwnershipStore for DelayedRenew {
         owner: SessionOwner,
         expected: Option<u64>,
         ttl: Duration,
-    ) -> BoxFuture<'_, tok_player::Result<SessionOwnership>> {
+    ) -> BoxFuture<'_, tok_player::ownership::Result<SessionOwnership>> {
         self.memory.acquire(player, session, owner, expected, ttl)
     }
     fn renew(
         &self,
         record: SessionOwnership,
         ttl: Duration,
-    ) -> BoxFuture<'_, tok_player::Result<()>> {
+    ) -> BoxFuture<'_, tok_player::ownership::Result<()>> {
         Box::pin(async move {
             self.memory.renew(record, ttl).await?;
             self.renewals.fetch_add(1, Ordering::SeqCst);
@@ -340,7 +344,10 @@ impl OwnershipStore for DelayedRenew {
             Ok(())
         })
     }
-    fn release(&self, record: SessionOwnership) -> BoxFuture<'_, tok_player::Result<bool>> {
+    fn release(
+        &self,
+        record: SessionOwnership,
+    ) -> BoxFuture<'_, tok_player::ownership::Result<bool>> {
         self.memory.release(record)
     }
 }
@@ -2116,4 +2123,20 @@ async fn nats_independent_gateways_share_dynamic_topics_and_keep_fixed_interest_
     a.finish().await;
     b.finish().await;
     bus.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn ownership_capacity_failure_is_reported_as_capacity_not_unavailability() {
+    let fixture = Fixture::with_backend(Config::default(), |_| {
+        Arc::new(MemoryOwnership::new(1).unwrap())
+    })
+    .await;
+    let mut first = Client::connect(fixture.address).await;
+    assert_eq!(first.login(1, "1").await.error_code, 0);
+    let mut second = Client::connect(fixture.address).await;
+    assert_eq!(
+        second.login(1, "2").await.error_code,
+        ErrorCode::CapacityExceeded as u32
+    );
+    fixture.finish().await;
 }

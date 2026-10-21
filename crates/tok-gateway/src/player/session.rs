@@ -77,7 +77,7 @@ pub enum ManagerPhase {
 #[derive(Clone, Debug)]
 pub struct ManagerSnapshot {
     /// 当前网关所有者身份。
-    pub owner: tok_player::ownership::Owner,
+    pub owner: tok_core::Identity,
     /// 当前玩家接入阶段。
     pub phase: ManagerPhase,
     /// 尚未失效的逻辑会话数量。

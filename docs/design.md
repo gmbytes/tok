@@ -196,7 +196,7 @@ protobuf 正文编解码位于 tok-protobuf，基于同一个通用分发表实�
 
 服务发现、请求锁和路由契约分别使用 core::discovery::{Error, Result}、core::lock::{Error, Result}、core::routing::{Error, Result}；不提供旧领域变体兼容别名。路由的 Discovery 包装保留原发现错误与错误链，Application::Error 增加 Discovery 聚合，注册、清理和故障传播均使用该类别。后端错误按相应领域映射，不返回其他领域的变体。
 
-core 不提供根 Error / Result，参数、配置和可选能力校验由实际所属组件表达。所有权后端故障使用 player::Error::OwnershipUnavailable，冲突、配置、凭证与不可用语义保持区分。Redis 发现与锁构造/校验采用所属领域错误，整体应用配置在边界映射为 config::Error::Invalid。
+core 不提供根 Error / Result，参数、配置和可选能力校验由实际所属组件表达。所有权后端故障使用 player::ownership::Error::Unavailable，冲突、配置、凭证与不可用语义保持区分。Redis 发现与锁构造/校验采用所属领域错误，整体应用配置在边界映射为 config::Error::Invalid。
 
 registry 注册错误定名为 Error<K>，运行失败定名为 DispatchError<K, E>；后者覆盖未知键、执行停止与业务处理错误，避免 HandleError 误指只有处理者内部失败。protobuf 适配与示例同步新路径，不保留 RegistrationError 旧类型。
 
@@ -204,10 +204,16 @@ registry 注册错误定名为 Error<K>，运行失败定名为 DispatchError<K,
 
 删除 tok-core/error.rs 及根 Error / Result，领域发现、锁和路由契约不变，不提供兼容类型。剩余校验能力回到所属模块：execution::ContextError 表达无效服务身份、操作名和不可表示期限；lifecycle::task::CreateError 表达无效容量和父范围退出，lifecycle::CreateError 表达服务身份及底层任务范围构造失败。构造失败与运行错误分开，组合处保留原始来源。
 
-应用配置使用 tok::config::{Error, Result}，Application 以 Configuration / Create / Discovery 聚合配置、构造和发现错误，Unsupported 表达应用尚未实现的可选能力。玩家参数、配置、可选操作、所有权和凭证错误直接归 player::Error，不再经 Core 包装；玩家接入运行参数单独使用 gateway::player::ConfigError。示例业务状态构造采用自己的标准 I/O 参数错误，不依赖框架根错误。
+应用配置使用 tok::config::{Error, Result}，Application 以 Configuration / Create / Discovery 聚合配置、构造和发现错误，Unsupported 表达应用尚未实现的可选能力。所有权和凭证错误分别归 player::ownership::Error 与 player::credentials::Error，不再经 Core 包装；玩家接入运行参数单独使用 gateway::player::ConfigError。示例业务状态构造采用自己的标准 I/O 参数错误，不依赖框架根错误。
 
 ## protobuf、编号消息与 gRPC 边界（2026-10-21）
 
 tok-proto 仅提供生成协议；tok-protobuf 在 tok-execution 上适配泛型键的正文编解码，不依赖生成游戏协议、玩家或 Tonic。tok-message::Registry 在其上施加 u32 非零编号规则，保留调用状态、附加结果和业务错误，支持直接本地调用。
 
 tok-message::rpc 承载 CallContext、玩家与普通业务客户端、Service、绑定槽，以及 timer/事件的线协议转换和 Status 映射。HandlerRegistry 是该命名空间下组合玩家调用、timer 和事件的协议适配器，其普通消息表复用根 Registry；它不是通用执行或 protobuf 的必选入口。tok-grpc（原 tok-rpc）明确限于 Tonic/gRPC 的连接、监听、调用预算、取消和追踪，不理解编号消息或玩家协议。门面对应 protobuf / message / grpc，不提供旧路径别名。
+
+## 玩家契约的领域边界（2026-10-21）
+
+tok-player 的会话、逻辑消息和计时类型继续根导出；ownership 与 credentials 是独立功能命名空间，各自定义 Error / Result，不提供玩家根错误。所有权持有者复用 tok-core::Identity，Record 只组合会话身份和持有者，不重复定义部署服务身份。
+
+所有权错误区分比较冲突、容量不足、后端不可用、输入、配置与不支持的操作；凭证错误只描述签发参数、配置与本地组件故障，非法或过期凭证返回 None。诊断不能包含连接凭据、密钥或 token。网关将所有权容量不足映射为已有 CapacityExceeded 客户端错误码，不改变线协议编号。

@@ -15,14 +15,12 @@ use std::{
     sync::{Arc, Mutex, atomic::AtomicBool},
     time::Duration,
 };
+use tok_core::Identity as SessionOwner;
 use tok_message::rpc::{
     protocol::internal::v1 as proto,
     tonic::{self, Status},
 };
-use tok_player::{
-    SessionIdentity,
-    ownership::{Owner as SessionOwner, Record as SessionOwnership},
-};
+use tok_player::{SessionIdentity, ownership::Record as SessionOwnership};
 use tokio::sync::{Notify, mpsc, oneshot};
 use tokio::{
     sync::{Mutex as AsyncMutex, OwnedMutexGuard},

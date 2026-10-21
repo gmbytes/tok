@@ -1,5 +1,6 @@
 //! 真实 TCP/gRPC 双网关交接与失败边界；常规测试不依赖外部服务。
 use tok_core::BoxFuture;
+use tok_core::Identity as SessionOwner;
 use tok_grpc::Listener;
 #[path = "support/topics.rs"]
 mod topic_support;
@@ -25,9 +26,7 @@ use tok_gateway::{
 use tok_infra::{discovery::MemoryDirectory, ownership::MemoryOwnership};
 use tok_message::rpc::protocol::internal::v1 as proto;
 use tok_player::{
-    LogicalMessage, MessageKind,
-    credentials::ResumeTokenCodec,
-    ownership::{Owner as SessionOwner, Store as OwnershipStore},
+    LogicalMessage, MessageKind, credentials::ResumeTokenCodec, ownership::Store as OwnershipStore,
 };
 use tokio::{
     net::{TcpListener, TcpStream},
@@ -44,7 +43,7 @@ impl OwnershipStore for TransferFault {
     fn lookup(
         &self,
         player: &str,
-    ) -> BoxFuture<'_, tok_player::Result<Option<tok_player::ownership::Record>>> {
+    ) -> BoxFuture<'_, tok_player::ownership::Result<Option<tok_player::ownership::Record>>> {
         self.inner.lookup(player)
     }
     fn acquire(
@@ -54,20 +53,20 @@ impl OwnershipStore for TransferFault {
         owner: SessionOwner,
         expected: Option<u64>,
         ttl: Duration,
-    ) -> BoxFuture<'_, tok_player::Result<tok_player::ownership::Record>> {
+    ) -> BoxFuture<'_, tok_player::ownership::Result<tok_player::ownership::Record>> {
         self.inner.acquire(player, session, owner, expected, ttl)
     }
     fn renew(
         &self,
         value: tok_player::ownership::Record,
         ttl: Duration,
-    ) -> BoxFuture<'_, tok_player::Result<()>> {
+    ) -> BoxFuture<'_, tok_player::ownership::Result<()>> {
         self.inner.renew(value, ttl)
     }
     fn release(
         &self,
         value: tok_player::ownership::Record,
-    ) -> BoxFuture<'_, tok_player::Result<bool>> {
+    ) -> BoxFuture<'_, tok_player::ownership::Result<bool>> {
         self.inner.release(value)
     }
     fn transfer(
@@ -75,12 +74,12 @@ impl OwnershipStore for TransferFault {
         value: tok_player::ownership::Record,
         target: SessionOwner,
         ttl: Duration,
-    ) -> BoxFuture<'_, tok_player::Result<tok_player::ownership::Record>> {
+    ) -> BoxFuture<'_, tok_player::ownership::Result<tok_player::ownership::Record>> {
         Box::pin(async move {
             if self.committed_error {
                 self.inner.transfer(value, target, ttl).await?;
             }
-            Err(tok_player::Error::OwnershipUnavailable(
+            Err(tok_player::ownership::Error::Unavailable(
                 "injected transfer result loss".into(),
             ))
         })

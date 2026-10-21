@@ -4,12 +4,12 @@
 use std::{io, sync::Arc, time::Duration};
 use tok::{
     application::CancellationToken,
+    core::Identity as SessionOwner,
     core::service::Identity,
     execution::{Context, Layer as ExecutionLayer, Request},
     gateway::{Gateway, player},
     infra::ownership::MemoryOwnership,
     lifecycle::task,
-    player::ownership::Owner as SessionOwner,
 };
 use tower::{Layer, ServiceExt, service_fn};
 

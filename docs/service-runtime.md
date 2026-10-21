@@ -323,7 +323,7 @@ protobuf 正文适配位于 tok-protobuf，包装上述通用表，不让 tok-ex
 
 服务发现、请求锁和路由契约分别使用 core::discovery::{Error, Result}、core::lock::{Error, Result}、core::routing::{Error, Result}；不提供旧领域变体兼容别名。路由的 Discovery 包装保留原发现错误与错误链，Application::Error 增加 Discovery 聚合，注册、清理和故障传播均使用该类别。后端错误按相应领域映射，不返回其他领域的变体。
 
-core 不提供根 Error / Result，参数、配置和可选能力校验由实际所属组件表达。所有权后端故障使用 player::Error::OwnershipUnavailable，冲突、配置、凭证与不可用语义保持区分。Redis 发现与锁构造/校验采用所属领域错误，整体应用配置在边界映射为 config::Error::Invalid。
+core 不提供根 Error / Result，参数、配置和可选能力校验由实际所属组件表达。所有权后端故障使用 player::ownership::Error::Unavailable，冲突、配置、凭证与不可用语义保持区分。Redis 发现与锁构造/校验采用所属领域错误，整体应用配置在边界映射为 config::Error::Invalid。
 
 registry 注册错误定名为 Error<K>，运行失败定名为 DispatchError<K, E>；后者覆盖未知键、执行停止与业务处理错误，避免 HandleError 误指只有处理者内部失败。protobuf 适配与示例同步新路径，不保留 RegistrationError 旧类型。
 
@@ -331,7 +331,7 @@ registry 注册错误定名为 Error<K>，运行失败定名为 DispatchError<K,
 
 删除 tok-core/error.rs 及根 Error / Result，领域发现、锁和路由契约不变，不提供兼容类型。剩余校验能力回到所属模块：execution::ContextError 表达无效服务身份、操作名和不可表示期限；lifecycle::task::CreateError 表达无效容量和父范围退出，lifecycle::CreateError 表达服务身份及底层任务范围构造失败。构造失败与运行错误分开，组合处保留原始来源。
 
-应用配置使用 tok::config::{Error, Result}，Application 以 Configuration / Create / Discovery 聚合配置、构造和发现错误，Unsupported 表达应用尚未实现的可选能力。玩家参数、配置、可选操作、所有权和凭证错误直接归 player::Error，不再经 Core 包装；玩家接入运行参数单独使用 gateway::player::ConfigError。示例业务状态构造采用自己的标准 I/O 参数错误，不依赖框架根错误。
+应用配置使用 tok::config::{Error, Result}，Application 以 Configuration / Create / Discovery 聚合配置、构造和发现错误，Unsupported 表达应用尚未实现的可选能力。所有权和凭证错误分别归 player::ownership::Error 与 player::credentials::Error，不再经 Core 包装；玩家接入运行参数单独使用 gateway::player::ConfigError。示例业务状态构造采用自己的标准 I/O 参数错误，不依赖框架根错误。
 
 ## 消息与传输边界校正（2026-10-21）
 
@@ -340,3 +340,9 @@ tok-game-rpc 已调整为 tok-message，通用正文适配独立为 tok-protobuf
 tok-message 根 Registry 提供不依赖 Tonic 的非零编号注册、本地分发与原始业务错误；玩家身份、事件/timer RPC 组合、线协议结果与 Status 映射集中于 message::rpc。公会示例和本地/RPC 共用处理链采用根 Registry。通用 protobuf 表继续允许字符串及零键，RPC 不自动添加锁或重试，事件与 timer 仍只能由可信服务器触发。
 
 本轮只校正库与命名空间边界，不宣称通用请求锁泛化、玩家结果模型及通知构造后续批次已经完成。请求锁目前保留在 message::rpc::lock，仍按现有 TTL 和执行预算约束运行。
+
+## 玩家所有权与凭证契约校正（2026-10-21）
+
+所有权 Store 使用 core::Identity 表达持有网关，以 ownership::Error / Result 返回领域故障。普通 acquire 原子更新租约、epoch 和最新登录标记；acquire_for_relogin 还须在同一操作中比较凭证携带的原 session_id。transfer 保留逻辑会话及最新登录标记，renew / release 不清除标记；后端回收标记后只能拒绝相应快速重登并要求普通鉴权，不能将不存在视为通过。
+
+ResumeTokenCodec 使用 credentials::Error / Result，verify 的 None 表示非法或过期，Err 表示本地组件故障；校验仍完全本地，不访问所有权后端。所有权与凭证错误不互相包含。LogicalMessage 的错误码可来自框架或游戏，未发布下行也没有 server_seq；客户端不能直接声明 TimerSpec。

@@ -2,13 +2,14 @@
 
 mod middleware;
 use std::{sync::Arc, time::Duration};
+use tok::core::Identity as SessionOwner;
 use tok::{
     application::Binding,
     gateway::{ErrorCode, Gateway, player},
     grpc::Client,
     infra::routing::RendezvousRouter,
     lifecycle::{Factory, Init, InitFuture, task::Task},
-    player::ownership::{Owner as SessionOwner, Store as OwnershipStore},
+    player::ownership::Store as OwnershipStore,
 };
 
 /// 仅供本地开发的 demo:<正整数 ID> 凭证，不是 SDK 或生产认证方案。

@@ -50,10 +50,42 @@ tok-gateway 是这套基础设施的内置扩展，增加连接、认证、sessi
 
 调用执行层和生命周期层均不依赖 tok-player，彼此也不依赖。tok-player 只依赖 tok-core，供 RPC、网关和基础设施后端共同使用，不能反向依赖 gateway 或门面。[`player::TimerTrigger`] 表达玩家会话的实际计时触发，与同库 TimerSpec / TimerUpdate 组成计时契约；通用执行设施不依赖这些类型。
 
-所有权使用 [`player::ownership::Store`]、[`player::ownership::Owner`]、[`player::ownership::Record`]；恢复凭证使用 [`player::credentials::ResumeTokenCodec`]。它们的结果为 [`player::Result`]：所有权冲突、所有权不可用和本地凭证不可用分别由 [`player::Error`] 表达；参数、配置及可选能力错误也由 player::Error 直接表达，不依赖 core 根错误。请求锁使用 core::lock，不要求玩家会话。
-锁、所有权与发现接口统一使用 [`core::BoxFuture`]，其中输出参数是完整类型，不隐含 Result。锁返回 `BoxFuture<'a, core::lock::Result<T>>`，发现返回 `BoxFuture<'a, core::discovery::Result<T>>`，所有权返回 `BoxFuture<'a, player::Result<T>>`。别名不会自行排队、启动或监督任务；lifecycle::task::Task 继续表达交给监督范围的工作。原 Operation 与 RegistrationTask 别名已移除。
+所有权使用 [`player::ownership::Store`]、[`player::ownership::Record`]，持有者复用 [`core::Identity`]；恢复凭证使用 [`player::credentials::ResumeTokenCodec`]。两者分别返回 [`player::ownership::Result`] 和 [`player::credentials::Result`]，不提供玩家根 Error / Result。所有权错误区分 Conflict、CapacityExceeded、Unavailable、参数、配置及可选操作；凭证验证的非法或过期结果为 Ok(None)，本地组件故障才返回 Err。请求锁使用 core::lock，不要求玩家会话。
+锁、所有权与发现接口统一使用 [`core::BoxFuture`]，其中输出参数是完整类型，不隐含 Result。锁返回 `BoxFuture<'a, core::lock::Result<T>>`，发现返回 `BoxFuture<'a, core::discovery::Result<T>>`，所有权返回 `BoxFuture<'a, player::ownership::Result<T>>`。别名不会自行排队、启动或监督任务；lifecycle::task::Task 继续表达交给监督范围的工作。原 Operation 与 RegistrationTask 别名已移除。
 
 迁移时将旧 core 下的玩家类型改从 player 导入，将 CallContext 改从 message::rpc 导入；Context / StopReason 改从 execution 导入，Extensions 改从 core 根导入；不保留旧路径兼容别名。message::rpc::player 是 PlayerRpc 客户端适配，gateway::player 是会话运行实现，顶层 player 是共享契约，职责不同。
+
+### 玩家凭证与所有权
+
+凭证只证明本地认证和有效期校验通过，不能代替获取所有权。普通登录的 acquire 必须原子更新最新登录标记；快速重登比较该标记与原 session_id，成功后更新为新会话。转移、续租和释放保留标记；后端回收标记后拒绝相应快速重登，客户端需要普通鉴权。顶号不会改变旧凭证的本地验签结果，但会阻止它再次建立会话。
+
+```rust
+use std::time::Duration;
+use tok::{
+    core::Identity,
+    infra::ownership::MemoryOwnership,
+    gateway::player::resume_token::SignedResumeTokens,
+    player::{credentials::ResumeTokenCodec, ownership::Store},
+};
+
+# #[tokio::main]
+# async fn main() -> Result<(), Box<dyn std::error::Error>> {
+let store = MemoryOwnership::new(16)?;
+let record = store.acquire(
+    "42".into(), "login-1".into(),
+    Identity { node_id: "local".into(), service_name: "gateway".into() },
+    None, Duration::from_secs(30),
+).await?;
+// 临时密钥仅用于单进程开发；多网关应配置相同的固定共享密钥。
+let tokens = SignedResumeTokens::ephemeral()?;
+let token = tokens.issue(&record.identity, Duration::from_secs(60))?;
+assert_eq!(tokens.verify(&token)?.map(|claims| claims.session_id), Some("login-1".into()));
+assert!(store.release(record).await?);
+# Ok(())
+# }
+```
+
+LogicalMessage 的 error_code 同时可承载框架与游戏错误，编号分配遵循接入协议；server_seq 由会话发布时分配，未发布的回应和通知也为 None。TimerSpec 由可信玩家业务处理者声明，客户端不能直接提交计时需求。
 
 ## 公开路径与内部模块
 
@@ -72,7 +104,8 @@ tok-core 不提供根 Error / Result；各能力只定义和返回自己能够�
 | 服务发现和目录 | [`core::discovery::Error`]：InvalidInput、InvalidConfig、RegistrationConflict、CapacityExceeded、StateUnavailable、Unavailable、Unsupported |
 | 请求锁 | [`core::lock::Error`]：InvalidInput、InvalidConfig、WaitTimeout、CapacityExceeded、Unavailable |
 | 业务选点 | [`core::routing::Error`]：InvalidInput、NoAvailableService、Discovery；Discovery 保留发现错误及 source |
-| 玩家契约 | [`player::Error`]：InvalidInput、InvalidConfig、Unsupported、OwnershipConflict、OwnershipUnavailable、CredentialUnavailable |
+| 会话所有权 | [`player::ownership::Error`]：InvalidInput、InvalidConfig、Unsupported、Conflict、CapacityExceeded、Unavailable |
+| 恢复凭证 | [`player::credentials::Error`]：InvalidInput、InvalidConfig、Unavailable；非法或过期凭证为 Ok(None) |
 | 执行上下文创建 | [`execution::ContextError`]：InvalidService、InvalidOperation、DeadlineOverflow |
 | 任务范围创建 | [`lifecycle::task::CreateError`]：InvalidCapacity、ParentStopping |
 | 服务构建器创建 | [`lifecycle::CreateError`]：InvalidIdentity、Tasks；Tasks 保留任务范围构造错误 |
@@ -83,7 +116,7 @@ tok-core 不提供根 Error / Result；各能力只定义和返回自己能够�
 
 各领域接口返回自己的 Result；组合服务由上层聚合，例如 application::Error::Discovery 单独承载发现失败，不再经 Core 透传。发现与锁后端配置校验采用相应领域错误，Application 的整体配置校验将组件校验失败转换为 config::Error::Invalid。application::Error::Configuration 与 Create 分别保留配置和服务构建错误的来源，Unsupported 表达应用尚未实现的可选能力。
 
-调用方根据变体判断，不解析 Display 文本。新增错误类别应对应新的处理语义；增加一种底层网络错误通常仍映射到既有不可用类别。其他领域继续使用自己的错误类型，例如 player::Error、message::rpc::Error 或 tonic::Status；跨领域转换由适配层负责。内置后端的错误信息隐藏凭据，不将底层 URL 或 token 作为诊断正文。
+调用方根据变体判断，不解析 Display 文本。新增错误类别应对应新的处理语义；增加一种底层网络错误通常仍映射到既有不可用类别。其他领域继续使用自己的错误类型，例如 player::ownership::Error、player::credentials::Error、message::rpc::Error 或 tonic::Status；跨领域转换由适配层负责。内置后端的错误信息隐藏凭据，不将底层 URL 或 token 作为诊断正文。
 
 ## 通用执行与处理链
 

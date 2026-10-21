@@ -6,7 +6,7 @@ use prost::Message;
 use serde::Deserialize;
 use sha2::Sha256;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tok_player::{Error, Result};
+use tok_player::credentials::{Error, Result};
 use tok_player::{
     SessionIdentity,
     credentials::{ResumeClaims, ResumeTokenCodec},
@@ -70,9 +70,9 @@ struct Payload {
 fn now_ms() -> Result<u64> {
     let millis = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map_err(|_| Error::CredentialUnavailable)?
+        .map_err(|_| Error::Unavailable("系统时钟早于 Unix 纪元"))?
         .as_millis();
-    u64::try_from(millis).map_err(|_| Error::CredentialUnavailable)
+    u64::try_from(millis).map_err(|_| Error::Unavailable("系统时钟超出毫秒表示范围"))
 }
 /// 本地 HMAC 凭证；启动时固定密钥，维护时更换密钥并重启，旧凭证随之失效。
 pub struct SignedResumeTokens {
@@ -95,7 +95,7 @@ impl SignedResumeTokens {
     /// 为单进程开发生成临时随机共享密钥；重启后旧凭证失效。
     pub fn ephemeral() -> Result<Self> {
         let mut secret = [0; 32];
-        getrandom::fill(&mut secret).map_err(|_| Error::CredentialUnavailable)?;
+        getrandom::fill(&mut secret).map_err(|_| Error::Unavailable("系统随机源不可用"))?;
         Self::new(Config {
             secret_key: secret.iter().map(|byte| format!("{byte:02x}")).collect(),
             clock_skew_ms: default_clock_skew(),
@@ -114,7 +114,7 @@ impl SignedResumeTokens {
         }
         let expires = now
             .checked_add(ttl.as_millis() as u64)
-            .ok_or(Error::CredentialUnavailable)?;
+            .ok_or(Error::Unavailable("凭证到期时刻超出表示范围"))?;
         let payload = Payload {
             player_id: identity.player_id.clone(),
             session_id: identity.session_id.clone(),
@@ -280,11 +280,28 @@ mod tests {
         assert!(!format!("{settings:?}").contains(&settings.secret_key));
         for invalid in ["".into(), "ab".repeat(31), "ab".repeat(33), "zz".repeat(32)] {
             settings.secret_key = invalid;
-            assert!(settings.validate().is_err());
+            assert!(matches!(settings.validate(), Err(Error::InvalidConfig(_))));
         }
         let mut settings = config(1);
         settings.clock_skew_ms = 60001;
-        assert!(settings.validate().is_err());
+        assert!(matches!(settings.validate(), Err(Error::InvalidConfig(_))));
         assert!(SignedResumeTokens::ephemeral().is_ok());
+    }
+    #[test]
+    fn issuance_distinguishes_invalid_input_and_safe_local_failure() {
+        let codec = SignedResumeTokens::new(config(1)).unwrap();
+        assert!(matches!(
+            codec.issue_at(&identity(), Duration::ZERO, 100),
+            Err(Error::InvalidInput(_))
+        ));
+        let error = codec
+            .issue_at(&identity(), Duration::from_millis(1), u64::MAX)
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            Error::Unavailable("凭证到期时刻超出表示范围")
+        ));
+        assert!(!error.to_string().contains(&config(1).secret_key));
+        assert!(matches!(codec.verify_at("invalid", 100), Ok(None)));
     }
 }

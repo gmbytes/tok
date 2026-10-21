@@ -19,8 +19,9 @@ use std::{
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
+use tok_core::Identity as SessionOwner;
 use tok_lifecycle::task;
-use tok_player::ownership::{Owner as SessionOwner, Store as OwnershipStore};
+use tok_player::ownership::Store as OwnershipStore;
 use tokio::sync::{Notify, mpsc};
 use tokio_util::sync::CancellationToken;
 
@@ -565,7 +566,8 @@ impl SessionManager {
             .await
             .map_err(|_| ErrorCode::Timeout)?
             .map_err(|error| match error {
-                tok_player::Error::OwnershipConflict => ErrorCode::SessionReplaced,
+                tok_player::ownership::Error::Conflict => ErrorCode::SessionReplaced,
+                tok_player::ownership::Error::CapacityExceeded(_) => ErrorCode::CapacityExceeded,
                 _ => ErrorCode::Unavailable,
             })?;
         let resume_token = match self.inner.resume_token_codec.issue(

@@ -265,7 +265,7 @@ P1–P7 方向校正完成本轮验收，P7 随本次提交交付。后续功能
 
 本轮不重新编号 P1–P7。新增 tok-player 归集玩家会话、消息、计时需求、所有权与恢复凭证契约；tok-core 保留通用基础，tok-service 保留执行、生命周期与任务监督。RPC 专用 CallContext 下沉到 tok-grpc，调用者迁移到新路径，不保留兼容别名。通用计时触发来源留在 core，不包含玩家消息或调度策略。
 
-同步迁移网关、RPC、基础设施后端、测试与 demo；tok 门面导出 player，公开所有权路径按 Rust 模块风格提供 ownership::Store / Owner / Record。玩家专用错误从 core 移除，通用错误在 player::Error::Core 中保留。玩家运行契约分库已完成验收并提交为 `9f32c91`。
+同步迁移网关、RPC、基础设施后端、测试与 demo；tok 门面导出 player，公开所有权路径按 Rust 模块风格提供 ownership::Store / Record，持有者复用 core::Identity。玩家错误不经 core 聚合；所有权和凭证分别提供所属领域的错误类型。玩家运行契约分库已完成验收并提交为 `9f32c91`。
 
 本轮 Windows 验收：`just verify docs` 通过，含 249 项工作区测试（12 项指南示例、2 项编译失败文档测试）、全目标 Clippy、格式检查和 rustdoc。application、execution、lifecycle、events、RPC、TCP 客户端及 NATS 七个 smoke 通过；真实 Redis 所有权 5 项及共享所有权/三进程交接 2 项外部专项通过。Cargo 依赖核对确认 tok-core 不依赖玩家契约，tok-service 与 tok-player 均只引用 tok-core 这一工作区基础库，tok-events 不依赖 tok-player。UTF-8/LF、内部文档链接及空白检查通过。按用户要求未做 release 构建；未运行 Linux、完整 NATS 专项或与迁移无关的发现/请求锁外部专项。本轮随本次提交交付。
 
@@ -297,7 +297,7 @@ ServiceDirectory / ServiceRegistry / ServiceRouter / ServiceDescriptor 是根导
 
 ## BoxFuture 统一（2026-10-21）
 
-在 tok-core 根提供 BoxFuture<'a, T>，T 为完整输出类型，不隐含 Result。锁、所有权与发现统一引用此别名，显式表达 core::Result 或 player::Result；移除各模块的 Operation 和 RegistrationTask，包括发现变更通知中重复写出的 boxed Future 类型。根导出的 ServiceDirectory / ServiceRegistry / DirectoryWatch / ServiceRouter / ServiceDescriptor 保留，不增加兼容别名或第三方依赖。此项已完成验收，随本次提交交付；不做 release 构建。
+在 tok-core 根提供 BoxFuture<'a, T>，T 为完整输出类型，不隐含 Result。锁、所有权与发现统一引用此别名，显式表达 core::Result 或 player::ownership::Result；移除各模块的 Operation 和 RegistrationTask，包括发现变更通知中重复写出的 boxed Future 类型。根导出的 ServiceDirectory / ServiceRegistry / DirectoryWatch / ServiceRouter / ServiceDescriptor 保留，不增加兼容别名或第三方依赖。此项已完成验收，随本次提交交付；不做 release 构建。
 
 本次 Windows 验收：tok-infra 与 tok-grpc 的 40 项常规测试、12 项指南文档测试通过；所有目标编译、全目标 Clippy、workspace rustdoc、格式、198 个文本文件的 UTF-8/LF、83 处内部链接与锚点及空白检查通过。锁、所有权、发现及自定义实现的错误类型保持原样，未新增第三方依赖。未重复完整工作区、真实 Redis/NATS 专项、smoke 或 Linux 验证，按用户要求未做 release 构建。此轮改动随本次提交交付。
 
@@ -401,7 +401,7 @@ Client::with_endpoint_factory 接收从 ServiceDescriptor 创建 Tonic Endpoint 
 
 服务发现、请求锁和路由契约分别使用 core::discovery::{Error, Result}、core::lock::{Error, Result}、core::routing::{Error, Result}；不提供旧领域变体兼容别名。路由的 Discovery 包装保留原发现错误与错误链，Application::Error 增加 Discovery 聚合，注册、清理和故障传播均使用该类别。后端错误按相应领域映射，不返回其他领域的变体。
 
-core 根 Error / Result 已移除，参数、配置及可选能力校验由实际所属组件表达。所有权故障归 player::Error::OwnershipUnavailable；Redis 发现与锁校验使用各自领域错误，整体应用配置映射为 config::Error::Invalid。最终归属与验收见下文。
+core 根 Error / Result 已移除，参数、配置及可选能力校验由实际所属组件表达。所有权故障归 player::ownership::Error::Unavailable；Redis 发现与锁校验使用各自领域错误，整体应用配置映射为 config::Error::Invalid。最终归属与验收见下文。
 
 registry 注册错误定名为 Error<K>，运行失败定名为 DispatchError<K, E>；后者覆盖未知键、执行停止与业务处理错误，避免 HandleError 误指只有处理者内部失败。protobuf 适配与示例同步新路径，不保留 RegistrationError 旧类型。
 
@@ -413,7 +413,7 @@ core 根校验错误的归属迁移已实施，最终落点见下文“移除 co
 
 删除 tok-core/error.rs 及根 Error / Result，领域发现、锁和路由契约不变，不提供兼容类型。剩余校验能力回到所属模块：execution::ContextError 表达无效服务身份、操作名和不可表示期限；lifecycle::task::CreateError 表达无效容量和父范围退出，lifecycle::CreateError 表达服务身份及底层任务范围构造失败。构造失败与运行错误分开，组合处保留原始来源。
 
-应用配置使用 tok::config::{Error, Result}，Application 以 Configuration / Create / Discovery 聚合配置、构造和发现错误，Unsupported 表达应用尚未实现的可选能力。玩家参数、配置、可选操作、所有权和凭证错误直接归 player::Error，不再经 Core 包装；玩家接入运行参数单独使用 gateway::player::ConfigError。示例业务状态构造采用自己的标准 I/O 参数错误，不依赖框架根错误。
+应用配置使用 tok::config::{Error, Result}，Application 以 Configuration / Create / Discovery 聚合配置、构造和发现错误，Unsupported 表达应用尚未实现的可选能力。所有权和凭证错误分别归 player::ownership::Error 与 player::credentials::Error，不再经 Core 包装；玩家接入运行参数单独使用 gateway::player::ConfigError。示例业务状态构造采用自己的标准 I/O 参数错误，不依赖框架根错误。
 
 本轮 Windows 验收：工作区 273 项测试通过、31 项外部专项按约定跳过，包含 15 项指南示例。全目标编译与 Clippy、workspace rustdoc、dispatch / rpc / client / application / lifecycle / execution smoke、格式、206 个文本文件 UTF-8/LF 和 82 处文档相对路径检查通过。源码扫描确认无 core::Error、core::Result 或 Error::Core 遗留，core/error.rs 已删除；回归确认停止父范围的子范围创建失败不泄漏活动记录。未运行真实 Redis/NATS、Linux 或 release 构建；随本次提交交付。
 
@@ -426,3 +426,11 @@ tok-message 根 Registry 提供不依赖 Tonic 的非零编号注册、本地分
 本轮只校正库与命名空间边界，不宣称通用请求锁泛化、玩家结果模型及通知构造后续批次已经完成。请求锁目前保留在 message::rpc::lock，仍按现有 TTL 和执行预算约束运行。
 
 本轮 Windows 验收：工作区 274 项测试通过、31 项外部专项按约定跳过，包含 15 项指南示例；零消息编号的 RPC 拒绝另补定向回归。全目标编译与 Clippy、workspace rustdoc、dispatch / rpc / client / application / lifecycle / execution 六项 smoke、格式、214 个文本文件 UTF-8/LF 和 82 处相对文档路径检查通过。正常依赖确认 tok-protobuf 不依赖 Tonic、生成协议或玩家，tok-grpc 不依赖消息、事件或玩家层。未运行真实 Redis/NATS、Linux 或 release 构建；随本次提交交付。
+
+## 玩家契约审查修复（2026-10-21）
+
+已移除 tok-player 根 Error / Result 和重复的 ownership::Owner。ownership::{Error, Result} 与 credentials::{Error, Result} 分别表达领域故障；持有者直接使用 core::Identity。Memory 与 Redis 构造配置失败统一为 InvalidConfig，内存所有权容量不足独立为 CapacityExceeded，网关映射为已有容量错误码；凭证故障保留不含敏感值的静态原因。
+
+普通登录、快速重登、转移与释放对最新登录标记的要求已写入 trait 和指南；本地验签不授予所有权。模块与主要类型根导出布局保留，LogicalMessage / TimerSpec 注释、调用方、后端、自定义 Store 示例和指南同步修正。后续玩家结果模型、通知归属及请求锁泛化仍按原计划推进。
+
+本轮 Windows 验收：工作区 279 项测试通过、31 项外部专项按约定跳过，包含 16 项指南示例；最终内存所有权定向回归通过。全目标 Clippy、workspace rustdoc、client / execution smoke、格式、213 个文本文件 UTF-8/LF、82 处相对文档路径及空白检查通过。新增回归覆盖构造配置分类、最新登录标记回收、凭证故障的安全诊断和所有权容量不足的 TCP 登录错误映射。未运行真实 Redis/NATS、Linux 或 release 构建；随本次提交交付。

@@ -18,12 +18,12 @@ pub struct LogicalMessage {
     pub kind: MessageKind,
     /// 游戏维护的消息类型 ID。
     pub message_id: u32,
-    /// 请求与回应的关联序号；主动通知不与请求配对。
+    /// 请求与回应的关联序号；主动通知为零，不与请求配对。
     pub request_id: u64,
-    /// 下行消息序号；请求尚无服务端序号。
+    /// 下行发布序号，由会话发布时分配；请求及尚未发布的回应、通知均为 None。
     pub server_seq: Option<u64>,
-    /// 具体游戏定义的错误码，零表示成功。
+    /// 框架或游戏定义的错误码，零表示成功；两者的编号分配由接入协议约定。
     pub error_code: u32,
-    /// 游戏 protobuf 编码后的消息正文。
+    /// 业务编码后的消息正文，不包含传输封装。
     pub body: Vec<u8>,
 }

@@ -6,7 +6,8 @@ use crate::{
     player::{Authenticator, Config, Executor, SessionManager},
 };
 use std::{sync::Arc, time::Duration};
-use tok_player::ownership::{Owner as SessionOwner, Store as OwnershipStore};
+use tok_core::Identity as SessionOwner;
+use tok_player::ownership::Store as OwnershipStore;
 
 use tokio::net::TcpStream;
 use tokio_util::sync::CancellationToken;

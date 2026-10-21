@@ -1,11 +1,10 @@
 //! Redis 所有权的真实原子竞争、代次精度与失效语义。
 
 use std::time::Duration;
+use tok_core::Identity as SessionOwner;
 use tok_infra::ownership::redis::{RedisOwnership, RedisOwnershipConfig};
-use tok_player::Error;
-use tok_player::ownership::{
-    Owner as SessionOwner, Record as SessionOwnership, Store as OwnershipStore,
-};
+use tok_player::ownership::Error;
+use tok_player::ownership::{Record as SessionOwnership, Store as OwnershipStore};
 
 fn config() -> RedisOwnershipConfig {
     RedisOwnershipConfig {
@@ -84,7 +83,7 @@ async fn relogin_atomically_rejects_superseded_credentials_after_lease_release()
         store
             .acquire_for_relogin(claims("s1"), "stale".into(), owner("a"), None, ttl)
             .await,
-        Err(Error::OwnershipConflict)
+        Err(Error::Conflict)
     ));
     let fresh = store
         .acquire_for_relogin(claims("s2"), "s3".into(), owner("a"), None, ttl)
@@ -124,7 +123,7 @@ async fn acquire(
     node: &str,
     epoch: Option<u64>,
     ttl: Duration,
-) -> tok_player::Result<SessionOwnership> {
+) -> tok_player::ownership::Result<SessionOwnership> {
     store
         .acquire("p".into(), session.into(), owner(node), epoch, ttl)
         .await
@@ -143,14 +142,13 @@ async fn atomic_competition_takeover_full_identity_and_persistent_epochs() {
     );
     assert_eq!(usize::from(a.is_ok()) + usize::from(b.is_ok()), 1);
     let old = match (a, b) {
-        (Ok(record), Err(Error::OwnershipConflict))
-        | (Err(Error::OwnershipConflict), Ok(record)) => record,
+        (Ok(record), Err(Error::Conflict)) | (Err(Error::Conflict), Ok(record)) => record,
         other => panic!("竞争结果错误：{other:?}"),
     };
     assert_eq!(second.lookup("p").await.unwrap(), Some(old.clone()));
     assert!(matches!(
         acquire(&second, "s3", "g3", Some(old.identity.epoch + 1), ttl).await,
-        Err(Error::OwnershipConflict)
+        Err(Error::Conflict)
     ));
     let new = acquire(&second, "s3", "g3", Some(old.identity.epoch), ttl)
         .await
@@ -158,7 +156,7 @@ async fn atomic_competition_takeover_full_identity_and_persistent_epochs() {
     assert!(new.identity.epoch > old.identity.epoch);
     assert!(matches!(
         first.renew(old.clone(), ttl).await,
-        Err(Error::OwnershipConflict)
+        Err(Error::Conflict)
     ));
     assert!(!first.release(old).await.unwrap());
     for field in 0..4 {
@@ -171,7 +169,7 @@ async fn atomic_competition_takeover_full_identity_and_persistent_epochs() {
         }
         assert!(matches!(
             first.renew(wrong.clone(), ttl).await,
-            Err(Error::OwnershipConflict)
+            Err(Error::Conflict)
         ));
         assert!(!first.release(wrong).await.unwrap());
     }
@@ -206,7 +204,7 @@ async fn expired_lease_cannot_be_renewed_or_release_new_owner() {
     assert!(store.lookup("p").await.unwrap().is_none());
     assert!(matches!(
         store.renew(old.clone(), Duration::from_secs(1)).await,
-        Err(Error::OwnershipConflict)
+        Err(Error::Conflict)
     ));
     assert!(!store.release(old.clone()).await.unwrap());
     let new = acquire(&store, "new", "g2", None, Duration::from_secs(1))
@@ -233,13 +231,13 @@ async fn epochs_above_double_precision_are_exact_and_overflow_does_not_replace_l
     assert_eq!(second.identity.epoch, 9_007_199_254_740_993);
     assert!(matches!(
         acquire(&store, "c", "g3", Some(first.identity.epoch), ttl).await,
-        Err(Error::OwnershipConflict)
+        Err(Error::Conflict)
     ));
     assert!(!store.release(first).await.unwrap());
     seed(&config, "9223372036854775807").await;
     assert!(matches!(
         acquire(&store, "c", "g3", Some(second.identity.epoch), ttl).await,
-        Err(Error::OwnershipUnavailable(_))
+        Err(Error::Unavailable(_))
     ));
     assert_eq!(store.lookup("p").await.unwrap(), Some(second));
     cleanup(&config).await;
@@ -265,6 +263,6 @@ async fn timeout_and_invalid_ttl_are_bounded_and_do_not_expose_credentials() {
     .await
     .unwrap()
     .unwrap_err();
-    assert!(matches!(error, Error::OwnershipUnavailable(_)));
+    assert!(matches!(error, Error::Unavailable(_)));
     assert!(!error.to_string().contains("secret"));
 }

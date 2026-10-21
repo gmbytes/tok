@@ -6,10 +6,11 @@ use std::{
     time::{Duration, Instant},
 };
 use tok_core::BoxFuture;
-use tok_player::{Error, Result};
+use tok_core::Identity as SessionOwner;
+use tok_player::ownership::{Error, Result};
 use tok_player::{
     SessionIdentity,
-    ownership::{Owner as SessionOwner, Record as SessionOwnership, Store as OwnershipStore},
+    ownership::{Record as SessionOwnership, Store as OwnershipStore},
 };
 
 struct Record {
@@ -41,7 +42,7 @@ impl MemoryOwnership {
     /// 创建具有有限记录容量的开发后端，capacity 必须大于零。
     pub fn new(capacity: usize) -> Result<Self> {
         if capacity == 0 {
-            return Err(Error::InvalidInput("所有权容量必须大于零".into()));
+            return Err(Error::InvalidConfig("所有权容量必须大于零".into()));
         }
         Ok(Self {
             capacity,
@@ -57,7 +58,7 @@ impl MemoryOwnership {
         expected_epoch: Option<u64>,
         expected_session_id: Option<String>,
         ttl: Duration,
-    ) -> BoxFuture<'_, tok_player::Result<SessionOwnership>> {
+    ) -> BoxFuture<'_, tok_player::ownership::Result<SessionOwnership>> {
         Box::pin(async move {
             if [
                 player_id.as_str(),
@@ -83,18 +84,18 @@ impl MemoryOwnership {
                 .as_ref()
                 .is_some_and(|expected| state.latest_sessions.get(&player_id) != Some(expected))
             {
-                return Err(Error::OwnershipConflict);
+                return Err(Error::Conflict);
             }
             if current != expected_epoch {
-                return Err(Error::OwnershipConflict);
+                return Err(Error::Conflict);
             }
             if current.is_none() && state.records.len() >= self.capacity {
-                return Err(Error::OwnershipUnavailable("所有权容量已满".into()));
+                return Err(Error::CapacityExceeded("活动租约记录已满"));
             }
             let next_epoch = state
                 .epoch
                 .checked_add(1)
-                .ok_or_else(|| Error::OwnershipUnavailable("epoch 已耗尽".into()))?;
+                .ok_or_else(|| Error::Unavailable("epoch 已耗尽".into()))?;
             // 只缓存有限玩家的最新登录标记；回收历史后拒绝其快速重登，需普通鉴权。
             if !state.latest_sessions.contains_key(&player_id)
                 && state.latest_sessions.len() >= self.capacity
@@ -104,7 +105,7 @@ impl MemoryOwnership {
                     .keys()
                     .find(|player| !state.records.contains_key(*player))
                     .cloned()
-                    .ok_or_else(|| Error::OwnershipUnavailable("登录标记容量已满".into()))?;
+                    .ok_or(Error::CapacityExceeded("最新登录标记已满"))?;
                 state.latest_sessions.remove(&inactive);
             }
             state
@@ -133,7 +134,7 @@ impl MemoryOwnership {
     fn state(&self) -> Result<std::sync::MutexGuard<'_, State>> {
         self.state
             .lock()
-            .map_err(|_| Error::OwnershipUnavailable("内存所有权锁不可用".into()))
+            .map_err(|_| Error::Unavailable("内存所有权锁不可用".into()))
     }
 }
 
@@ -152,7 +153,7 @@ impl OwnershipStore for MemoryOwnership {
         expected: SessionOwnership,
         target: SessionOwner,
         ttl: Duration,
-    ) -> BoxFuture<'_, tok_player::Result<SessionOwnership>> {
+    ) -> BoxFuture<'_, tok_player::ownership::Result<SessionOwnership>> {
         Box::pin(async move {
             let expires = expiration(ttl)?;
             if target.node_id.trim().is_empty() || target.service_name.trim().is_empty() {
@@ -163,12 +164,12 @@ impl OwnershipStore for MemoryOwnership {
             if !state.records.get(key).is_some_and(|record| {
                 record.ownership == expected && record.expires > Instant::now()
             }) {
-                return Err(Error::OwnershipConflict);
+                return Err(Error::Conflict);
             }
             state.epoch = state
                 .epoch
                 .checked_add(1)
-                .ok_or_else(|| Error::OwnershipUnavailable("epoch 已耗尽".into()))?;
+                .ok_or_else(|| Error::Unavailable("epoch 已耗尽".into()))?;
             let ownership = SessionOwnership {
                 identity: SessionIdentity {
                     epoch: state.epoch,
@@ -189,7 +190,7 @@ impl OwnershipStore for MemoryOwnership {
     fn lookup(
         &self,
         player_id: &str,
-    ) -> BoxFuture<'_, tok_player::Result<Option<SessionOwnership>>> {
+    ) -> BoxFuture<'_, tok_player::ownership::Result<Option<SessionOwnership>>> {
         let player_id = player_id.to_owned();
         Box::pin(async move {
             let mut state = self.state()?;
@@ -210,7 +211,7 @@ impl OwnershipStore for MemoryOwnership {
         owner: SessionOwner,
         expected_epoch: Option<u64>,
         ttl: Duration,
-    ) -> BoxFuture<'_, tok_player::Result<SessionOwnership>> {
+    ) -> BoxFuture<'_, tok_player::ownership::Result<SessionOwnership>> {
         self.acquire_checked(player_id, session_id, owner, expected_epoch, None, ttl)
     }
     fn acquire_for_relogin(
@@ -220,7 +221,7 @@ impl OwnershipStore for MemoryOwnership {
         owner: SessionOwner,
         expected_epoch: Option<u64>,
         ttl: Duration,
-    ) -> BoxFuture<'_, tok_player::Result<SessionOwnership>> {
+    ) -> BoxFuture<'_, tok_player::ownership::Result<SessionOwnership>> {
         self.acquire_checked(
             previous.player_id,
             session_id,
@@ -235,23 +236,26 @@ impl OwnershipStore for MemoryOwnership {
         &self,
         ownership: SessionOwnership,
         ttl: Duration,
-    ) -> BoxFuture<'_, tok_player::Result<()>> {
+    ) -> BoxFuture<'_, tok_player::ownership::Result<()>> {
         Box::pin(async move {
             let mut state = self.state()?;
             let expires = expiration(ttl)?;
             let record = state
                 .records
                 .get_mut(&ownership.identity.player_id)
-                .ok_or(Error::OwnershipConflict)?;
+                .ok_or(Error::Conflict)?;
             if record.ownership != ownership || record.expires <= Instant::now() {
-                return Err(Error::OwnershipConflict);
+                return Err(Error::Conflict);
             }
             record.expires = expires;
             Ok(())
         })
     }
 
-    fn release(&self, ownership: SessionOwnership) -> BoxFuture<'_, tok_player::Result<bool>> {
+    fn release(
+        &self,
+        ownership: SessionOwnership,
+    ) -> BoxFuture<'_, tok_player::ownership::Result<bool>> {
         Box::pin(async move {
             let mut state = self.state()?;
             let key = &ownership.identity.player_id;
