@@ -11,7 +11,7 @@ use std::{
     time::Duration,
 };
 use tok_core::ServiceDescriptor;
-use tok_game_rpc::{RpcEndpoint, protocol::internal::v1 as proto};
+use tok_game_rpc::{Listener, protocol::internal::v1 as proto};
 use tok_gateway::{
     Gateway,
     codec::{FrameCodec, VERSION},
@@ -297,7 +297,7 @@ impl Fixture {
         let rpc_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let rpc_address = rpc_listener.local_addr().unwrap();
         let shutdown = CancellationToken::new();
-        let rpc = RpcEndpoint::new()
+        let rpc = Listener::new()
             .add_service("gateway-rpc", service.into_rpc())
             .unwrap();
         rpc.readiness().set("gateway-rpc", true);

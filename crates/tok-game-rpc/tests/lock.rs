@@ -284,7 +284,7 @@ fn invalid_budgets_are_rejected_before_backend_access() {
 async fn business_rpc_on_two_nodes_shares_locks_after_target_validation() {
     use std::{collections::BTreeMap, sync::Mutex};
     use tok_core::ServiceDescriptor;
-    use tok_game_rpc::{RpcClients, RpcEndpoint, RpcService, TowerHandler};
+    use tok_game_rpc::{Client, Listener, RpcService, TowerHandler};
     use tokio::net::TcpListener;
     use tokio_util::sync::CancellationToken;
 
@@ -337,7 +337,7 @@ async fn business_rpc_on_two_nodes_shares_locks_after_target_validation() {
             protocol: "grpc".into(),
             address: listener.local_addr().unwrap(),
         };
-        let endpoint = RpcEndpoint::new()
+        let endpoint = Listener::new()
             .add_service(
                 "guild",
                 RpcService::new(
@@ -355,7 +355,7 @@ async fn business_rpc_on_two_nodes_shares_locks_after_target_validation() {
         ));
         nodes.push(target);
     }
-    let clients = Arc::new(RpcClients::new(Duration::from_secs(2), 4).unwrap());
+    let clients = Arc::new(Client::new(Duration::from_secs(2), 4).unwrap());
     let business_client = tok_game_rpc::business::Client::new(Arc::clone(&clients));
     let context_for = |node: &ServiceDescriptor, bid: &str| CallContext {
         node_id: node.node_id.clone(),

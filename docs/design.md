@@ -163,7 +163,7 @@ Redis Cluster 缓存与 MongoDB 集群是存储选型方向，存储 API 由业�
 
 ## 通用 RPC 与游戏协议适配
 
-tok-rpc 只提供 RpcClients、RpcEndpoint 和 Server；Server 接受任意类型化 Tower Service，客户端 execute 接入任意生成协议。它不依赖 tok-player、tok-events 或 tok-proto，不定义玩家事件方法。tok-game-rpc 基于这些设施提供游戏消息注册、CallContext、玩家身份校验、timer、事件转发及可选业务请求锁；通用任务、生命周期和处理链仍分别由 tok-lifecycle / tok-execution 提供。
+tok-rpc 只提供 Client、Listener 和 Server；Server 接受任意类型化 Tower Service，客户端 execute 接入任意生成协议。它不依赖 tok-player、tok-events 或 tok-proto，不定义玩家事件方法。tok-game-rpc 基于这些设施提供游戏消息注册、CallContext、玩家身份校验、timer、事件转发及可选业务请求锁；通用任务、生命周期和处理链仍分别由 tok-lifecycle / tok-execution 提供。
 
 游戏协议可以有 Call 与 HandleEvent 等不同远程方法；方法数量不是分层依据。session 通过玩家客户端适配调用 HandleEvent，由玩家服务适配解码并进入事件 Registry 和同一 Tower 处理模型。事件由服务器驱动，客户端业务入口不能选择事件或 timer。独立游戏协议层的 Handler 是游戏分发契约，不是通用 RPC 必须实现的接口。tok 门面的 rpc / game_rpc 分别对应这两层，不保留旧游戏 API 路径。
 
@@ -178,3 +178,5 @@ tok-rpc 只提供 RpcClients、RpcEndpoint 和 Server；Server 接受任意类�
 Context 移除 source 字段、Source 枚举和构造/child 的来源参数。执行核心只管理服务、操作、期限、取消、追踪和 Extensions。RPC、事件与网关在入口提供类型化扩展：复用游戏 CallContext、EventId / Topic / Arc<Message>、TimerTrigger，仅网关新增无正文的 ClientRequest 关联标识。RPC 关联信息与事件元信息可以共存，不再将传输方式、触发原因和客户端入口混成互斥枚举。
 
 事件 Registry 的本地与远端分发提供相同事件头，派生子上下文覆盖当前事件头，不修改父扩展；本地派生仍清除继承的原始编码。客户端无法发布事件、请求与 timer 分表、会话身份校验、预算和取消约束保持不变；Extensions 元信息不作为认证证明。调用方和指南已迁移，不保留 Source 兼容类型。
+
+RPC 客户端连接策略可通过 Client::with_endpoint_factory 扩展，服务端传输通过 Listener::from_server 复用 Tonic Server 配置。连接共享边界仍为节点与地址，同一边界采用一致传输策略；TLS 证书与域名验证由应用配置 Tonic，不放入通用服务发现契约。默认构造维持本地开发使用的明文传输。

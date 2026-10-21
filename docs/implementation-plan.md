@@ -329,7 +329,7 @@ JetStream、离线玩家加载、通用跨节点去重、自动玩家归属扇�
 
 ## RPC 协议适配分层校正（2026-10-21）
 
-通用 tok-rpc 保留 RpcClients / RpcEndpoint / Server，通过泛型请求和 Tower 接入任意协议；正常依赖移除 tok-player / tok-events / tok-proto。新增 tok-game-rpc 承载游戏 CallContext、Handler / HandlerRegistry、玩家与普通业务协议客户端、绑定槽、通知编码及 timer / 事件 / 请求锁适配。门面从 game_rpc 访问游戏协议，rpc 访问通用设施；移除通用 CallHandler 上的事件契约，不提供旧路径兼容别名。Application 的普通自定义 protobuf 绑定继续使用通用端点，游戏 register_rpc_factory 使用新协议适配。客户端 Frame、内部 protobuf、事件 topic、timer、租约和无自动重试语义保持原有约束；事件与 timer 入口仍仅供可信服务端。
+通用 tok-rpc 保留 RpcClients / Listener / Server，通过泛型请求和 Tower 接入任意协议；正常依赖移除 tok-player / tok-events / tok-proto。新增 tok-game-rpc 承载游戏 CallContext、Handler / HandlerRegistry、玩家与普通业务协议客户端、绑定槽、通知编码及 timer / 事件 / 请求锁适配。门面从 game_rpc 访问游戏协议，rpc 访问通用设施；移除通用 CallHandler 上的事件契约，不提供旧路径兼容别名。Application 的普通自定义 protobuf 绑定继续使用通用端点，游戏 register_rpc_factory 使用新协议适配。客户端 Frame、内部 protobuf、事件 topic、timer、租约和无自动重试语义保持原有约束；事件与 timer 入口仍仅供可信服务端。
 
 本轮 Windows 验收：工作区 255 项测试通过（包含 12 项指南示例和 2 项编译失败文档测试），31 项外部专项跳过；通用 RPC 新增 3 项无游戏类型执行测试，游戏 RPC 的事件入口隔离、身份、timer、共享连接、追踪及请求锁专项通过。全目标 Clippy、workspace rustdoc、application / lifecycle smoke、格式、UTF-8/LF、内部文档链接及空白检查通过。cargo tree 核对通用 RPC 的正常依赖不含玩家、事件或游戏 protobuf。不做 release 构建；未运行真实 Redis/NATS 专项或 Linux，本轮随本次提交交付。
 
@@ -354,3 +354,31 @@ Context 移除 source 字段、Source 枚举和构造/child 的来源参数。�
 TimerTrigger 从 tok-core 移至 tok-player，与 TimerSpec / TimerUpdate 聚合，门面路径为 tok::player::TimerTrigger。core 移除 timer 模块及根导出，不保留兼容别名；网关调度、玩家执行与游戏 RPC 统一消费新路径。通用执行测试和示例使用本地扩展类型，不为计时元信息依赖玩家库。内部 protobuf 与计时调度、预算及取消语义不变。本轮不做 release 构建。
 
 本轮 Windows 验收：受影响的 core / execution / player / game-rpc / gateway 共 132 项测试通过、2 项外部专项跳过；demo 生产测试 2 项、指南示例 12 项通过。全目标编译与 Clippy、workspace rustdoc、execution smoke、格式、199 个文本文件 UTF-8/LF 与内部文档链接检查通过。未重复无关外部专项或完整工作区测试；未做 release 构建或 Linux 验证，本轮随本次提交交付。
+
+## 通用 RPC 客户端命名（2026-10-21）
+
+RpcClients 更名为 tok_rpc::Client，门面为 tok::rpc::Client，游戏协议层同步重导出 Client。玩家与普通业务协议适配器仍为各自模块的 Client，通过 Arc<tok_rpc::Client> 共享通用调用设施，不保留旧名称别名。连接缓存、期限、追踪、指标和不自动重试的执行行为不变。
+
+本轮 Client 更名验收：RPC 两库 27 项常规测试与 12 项指南示例通过，全目标编译、Clippy、workspace rustdoc、格式、UTF-8/LF 和空白检查通过。本轮随本次提交交付。
+
+同期审查发现的问题已在后续修复中处理：Client / Listener / Readiness 统一公开名称；客户端与服务端共用 grpc-timeout 解析，请求期限只缩短默认值，准备与发送计入同一截止点，迟到结果按超时返回。客户端配置期限限制为大于零且不超过一天，防止 tonic 编码过大超时值时 panic。Readiness::set 返回是否命中服务；无效名称、业务重复绑定及 protobuf 重复绑定分别报告原因。传输与监听错误保留 source 并增加中文操作说明；channel 文档明确延迟建连。内部模块继续私有，仅新增共享超时解析模块，不扩大公共 API 或引入业务错误码。
+
+本轮修复 Windows 验收：RPC、游戏协议、门面与网关共 171 项测试通过（含 12 项指南示例），2 项外部专项按约定跳过；全目标编译与 Clippy、workspace rustdoc、rpc-smoke / client-smoke、格式、202 个文本文件 UTF-8/LF 和空白检查通过。未做 release 构建，未运行真实 Redis/NATS 或 Linux；本轮随本次提交交付。
+
+监听接口 bind / serve 直接返回 `Result<BoxFuture<'static, Result<(), Error>>, Error>`，复用 tok_core::BoxFuture，不提供 ServerTask 别名或重导出。返回的 Future 不创建任务，须由调用方驱动和监督；外层错误表示绑定或组装失败，内层错误表示运行失败。
+
+## RPC 传输配置扩展（2026-10-21）
+
+Client::with_endpoint_factory 接收从 ServiceDescriptor 创建 Tonic Endpoint 的同步工厂；默认保持明文 URI 和默认连接期限。自定义工厂可设置 HTTPS/TLS、连接期限和 HTTP/2 参数，execute 的整体预算仍生效。工厂在缓存锁外执行，并发未命中允许重复构造；重新获取锁后优先复用已发布 Channel。节点和地址是连接共享边界，同一边界必须使用一致的 URI 和传输策略；替换工厂清空本实例缓存，不影响已有克隆。
+
+服务端 Listener::from_server 接收配置好的 Tonic Server，首次路由绑定保留其 TLS/HTTP2 等参数；new/default 仍使用默认 Server。接口接受未添加 Tower Layer 的 Server，业务中间件可包装具体服务。服务绑定、就绪开关、监听 Future 与 Application::register_rpc_endpoint 的监督流程不变。TLS 由应用启用 Tonic 的 TLS feature 并提供证书，不新增框架证书模型、服务发现密钥或配置文件开关。
+
+本轮 Windows 验收：RPC 两库与门面共 78 项测试通过（含 13 项指南示例）；全目标编译与 Clippy、workspace rustdoc、rpc-smoke / client-smoke、格式、202 个文本文件 UTF-8/LF 和空白检查通过。回归覆盖自定义 URI 实际使用、传入 Server 超时生效、缓存复用/撤销、替换工厂清理及工厂错误反馈。未做真实 TLS 握手、外部 Redis/NATS、Linux 或 release 验证；随本次提交交付。
+
+## RPC 服务端监听命名（2026-10-21）
+
+服务端 tok_rpc::Endpoint 更名为 tok_rpc::Listener，游戏协议层同步重导出 Listener，内部实现文件改为 listener.rs，不保留旧名称别名。Listener 负责服务绑定、就绪控制与共享监听；Tonic 的客户端 transport::Endpoint 保留原名，继续由 Client 的工厂创建。应用配置中的 endpoint 仍表示网络端点，register_rpc_endpoint 等配置组装接口保持名称。传输配置、路由和执行语义不变。
+
+本轮命名调整验收：RPC 两库与门面共 78 项测试通过（含 13 项指南示例），全目标编译、Clippy、workspace rustdoc、格式、UTF-8/LF 和空白检查通过。未做 release 构建；随本次提交交付。
+
+内部接口补充校正：grpc-timeout 解析函数 request_budget 收紧为 pub(super)；OTel metadata 适配器明确命名为 MetadataExtractor / MetadataInjector。相关全目标编译与格式检查通过，随本次提交交付。

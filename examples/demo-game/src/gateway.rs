@@ -4,7 +4,7 @@ mod middleware;
 use std::{sync::Arc, time::Duration};
 use tok::{
     application::Binding,
-    game_rpc::RpcClients,
+    game_rpc::Client,
     gateway::{ErrorCode, Gateway, player},
     infra::routing::RendezvousRouter,
     lifecycle::{Factory, Init, InitFuture, task::Task},
@@ -83,7 +83,7 @@ impl Factory for PlayerIngressFactory {
                 return Err(std::io::Error::other("示例玩家网关要求 tcp 端点").into());
             }
             let listener = tokio::net::TcpListener::bind(binding.listen_address).await?;
-            let clients = Arc::new(RpcClients::new(
+            let clients = Arc::new(Client::new(
                 Duration::from_millis(config.rpc_timeout_ms),
                 64,
             )?);

@@ -11,7 +11,7 @@ use std::{
 use tok_core::ServiceDescriptor;
 use tok_game_rpc::CallContext;
 use tok_game_rpc::{
-    HandlerRegistry, HandlerReply, RpcClients, RpcEndpoint, RpcService,
+    Client, HandlerRegistry, HandlerReply, Listener, RpcService,
     protocol::internal::v1::{self as proto, Payload},
     timer::{decode_update, encode_update},
 };
@@ -94,7 +94,7 @@ async fn internal_trigger_is_propagated_and_cannot_be_selected_by_client_message
             .register_timer(3, |_ctx, _: Data| async { Ok(None) })
             .is_err()
     );
-    let endpoint = RpcEndpoint::new()
+    let endpoint = Listener::new()
         .add_service(
             "player",
             RpcService::new("node", "player", Arc::new(registry))
@@ -112,7 +112,7 @@ async fn internal_trigger_is_propagated_and_cannot_be_selected_by_client_message
     };
     let cancel = CancellationToken::new();
     let server = tokio::spawn(endpoint.serve(listener, cancel.clone()).unwrap());
-    let clients = Arc::new(RpcClients::new(Duration::from_secs(2), 2).unwrap());
+    let clients = Arc::new(Client::new(Duration::from_secs(2), 2).unwrap());
     let player_client = tok_game_rpc::player::Client::new(Arc::clone(&clients));
     let business_client = tok_game_rpc::business::Client::new(Arc::clone(&clients));
     let mut context = CallContext {

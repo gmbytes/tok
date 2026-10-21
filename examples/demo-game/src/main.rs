@@ -66,7 +66,7 @@ async fn main() -> Result<(), Error> {
     let telemetry =
         Observability::init(&config.observability, "demo-game", &config.node_id).await?;
     tracing::info!(node_id = %config.node_id, discovery = ?config.discovery, services = config.services.len(), metrics_address = ?telemetry.metrics_address(), "进程启动");
-    let result = async {
+    let result = Box::pin(async {
         let application = demo_game::application(config)?;
         let directory = application.service_directory();
         tracing::info!("运行客户端 TCP 与内部 RPC，按 Ctrl+C 退出");
@@ -133,7 +133,7 @@ async fn main() -> Result<(), Error> {
             .await?;
         tracing::info!("所有服务已退出");
         Ok::<(), Error>(())
-    }
+    })
     .await;
     if let Err(error) = &result {
         tracing::error!(error = %error, "进程运行失败");

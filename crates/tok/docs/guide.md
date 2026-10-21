@@ -300,13 +300,13 @@ trace_sample_ratio = 0.1
 
 ## 内部 RPC 与共享端点
 
-通用 RPC 设施从 [`rpc`] 导入；游戏消息、玩家事件、timer 和 CallContext 从 [`game_rpc`] 导入。后者的 RpcClients / RpcEndpoint 是通用类型的便捷重导出。
+通用 RPC 设施从 [`rpc`] 导入；游戏消息、玩家事件、timer 和 CallContext 从 [`game_rpc`] 导入。后者的 Client / Listener 是通用类型的便捷重导出。
 
-自定义 protobuf 不需要依赖游戏协议：用 [`rpc::RpcClients::execute`] 包装生成客户端；服务端由 [`rpc::Server::context`] 建立预算、追踪和取消范围，再用 [`rpc::Server::execute`] 调用任意类型化 Tower Service。协议适配器负责认证、输入校验、操作名和类型化元信息，Server 不负责解码或决定业务入口。
+自定义 protobuf 不需要依赖游戏协议：用 [`rpc::Client::execute`] 包装生成客户端；服务端由 [`rpc::Server::context`] 建立预算、追踪和取消范围，再用 [`rpc::Server::execute`] 调用任意类型化 Tower Service。协议适配器负责认证、输入校验、操作名和类型化元信息，Server 不负责解码或决定业务入口。
 
 先用 [`game_rpc::HandlerRegistry`] 注册游戏消息，再用 [`game_rpc::RpcService`] 显式绑定节点和业务服务名。
 player 使用 `into_player`，普通业务服务使用 `into_business`，两者使用不同的 protobuf 服务。
-其他业务也可以使用自己生成的 gRPC 服务，通过 [`game_rpc::RpcEndpoint::add_service`] 绑定。
+其他业务也可以使用自己生成的 gRPC 服务，通过 [`game_rpc::Listener::add_service`] 绑定。
 同一端点不能重复注册同一个 protobuf 服务；多个普通业务服务共享端点时，应分别定义不同的 protobuf 服务。
 
 下面用一个公会请求演示完整组装。游戏需要依赖 tok、prost 和 tokio。
@@ -362,7 +362,7 @@ endpoint = "internal-rpc"
 
 Application::register_rpc_factory 按配置的 factory（默认服务名）建立入口，将所属 `game_rpc::Binding` 注入 Init.extensions；工厂安装实际处理链，未安装会在初始化结束时失败，不发布服务。多个服务可共用工厂，但同一端点仍不能重复绑定同一个 protobuf 服务。协议转换函数不决定锁或中间件。
 
-自定义 protobuf 服务通过 `Application::bind_rpc(service_name, server)` 声明；生命周期沿用 register_factory。已有完整 RpcEndpoint 可交给 register_rpc_endpoint，端点必须与配置完全匹配，同一端点不与逐服务声明混用。高级自定义组装仍可手动使用 RpcService::deferred；不需要普通使用者维护一份按服务名查询的绑定表。
+自定义 protobuf 服务通过 `Application::bind_rpc(service_name, server)` 声明；生命周期沿用 register_factory。已有完整 Listener 可交给 register_rpc_endpoint，端点必须与配置完全匹配，同一端点不与逐服务声明混用。高级自定义组装仍可手动使用 RpcService::deferred；不需要普通使用者维护一份按服务名查询的绑定表。
 
 应用先合并并校验共享端点，再绑定监听，业务初始化完成后才开启对应服务的就绪入口。
 初始化失败、监听失败和运行异常都进入同一清理流程。
@@ -370,10 +370,41 @@ Application::register_rpc_factory 按配置的 factory（默认服务名）建�
 
 调用方通过 [`application::Application::service_directory`] 或 [`application::Binding::directory`]
 查询服务，再用 [`infra::routing::route`] 按 bid 选点。
-[`game_rpc::RpcClients`] 只管理共享连接、缓存撤销和默认期限，不包含 Player 或 Business 方法。
+[`rpc::Client`] 管理共享连接、缓存撤销、默认期限及通用调用执行，不包含 Player 或 Business 方法。
 [`game_rpc::player::Client`] 提供 call / handle_event，[`game_rpc::business::Client`] 提供普通业务 call；
-构造时分别传入同一个 `Arc<RpcClients>`，协议适配器共享连接但保持各自的调用约束。
-自定义 protobuf 客户端可以使用 RpcClients::channel 取得 Channel，结合 timeout 设置自己的调用预算和协议适配。
+构造时分别传入同一个 `Arc<Client>`，协议适配器共享连接但保持各自的调用约束。
+自定义 protobuf 客户端推荐通过 Client::execute 接入统一期限、追踪和指标；也可以使用 Client::channel 取得 Channel，自行管理调用预算和协议适配。
+Client 的默认期限须大于零且不超过一天。execute 保留更短的请求 grpc-timeout，准备与发送共用本地截止点，超期结果不会成功返回；这不会中断阻塞代码或回滚远端副作用。
+Channel 为延迟连接，实际发送时才建立网络连接。
+
+客户端通过 [`rpc::Client::with_endpoint_factory`] 定制 Tonic Endpoint，服务端通过 [`rpc::Listener::from_server`] 接收配置好的 Tonic Server：
+
+```rust
+use std::time::Duration;
+use tok::rpc::{self, tonic::transport};
+
+# fn example() -> Result<(), rpc::Error> {
+let client = rpc::Client::new(Duration::from_secs(3), 128)?
+    .with_endpoint_factory(|target| {
+        Ok(transport::Endpoint::from_shared(format!("http://{}", target.address))?
+            .connect_timeout(Duration::from_secs(1))
+            .http2_adaptive_window(true))
+    });
+let server = transport::Server::builder()
+    .http2_adaptive_window(Some(true));
+let endpoint = rpc::Listener::from_server(server);
+// 接着使用 endpoint.add_service(...) 绑定服务，并驱动监听 Future。
+# drop((client, endpoint));
+# Ok(())
+# }
+```
+
+默认构造仍采用明文连接；启用 TLS 时，应用依赖可为 `tonic` 开启 `tls-ring` 或 `tls-aws-lc` feature，客户端工厂构造 HTTPS URI 并配置 ClientTlsConfig，服务端配置 ServerTlsConfig 后传给 from_server。框架不复制 Tonic 的证书或 HTTP/2 配置，也不将密钥放进服务发现。
+工厂在缓存锁外按需执行，并发缓存未命中时可能多次调用，应当快速返回且无副作用。同一节点和地址共享 Channel，必须具有一致的 URI/TLS 等连接策略，不能随业务服务名变化；替换工厂会清空本实例缓存，在途克隆继续使用原连接。自定义连接参数由工厂负责，execute 的整体预算始终生效。
+from_server 接受未添加 Tower Layer 的 Tonic Server，业务中间件仍可在 add_service 时包装各个服务；就绪控制和业务绑定校验继续由 rpc::Listener 管理。
+
+[`rpc::Server`] 是逻辑服务的调用执行入口；[`rpc::Listener`] 负责网络监听和 protobuf 服务绑定。
+[`rpc::Readiness::set`] 返回是否命中已绑定的服务名，直接指定服务时应检查结果；Application 遍历多个端点时允许未命中。
 Channel 缓存有界，节点和地址相同的服务复用连接；节点变更时调用 `invalidate` 撤销该节点缓存。
 请求携带 [`game_rpc::CallContext`]，player 调用还需匹配的 [`player::SessionIdentity`]。
 上下文校验检查目标和字段一致性，不能代替内部调用身份认证或全局 session 所有权校验。
@@ -652,7 +683,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 游戏通过 [`gateway::player::Authenticator`] 返回规范化的可信玩家 ID，同一玩家的凭据别名必须归一到相同 ID。
 `gateway::Gateway::player` 注入认证器、[`player::ownership::Store`] 和
 [`gateway::player::Executor`]；[`gateway::player::RpcExecutor`] 可组合
-[`infra::routing::RendezvousRouter`] 与 [`game_rpc::player::Client`] 调用 player 服务，后者复用共享 RpcClients。
+[`infra::routing::RendezvousRouter`] 与 [`game_rpc::player::Client`] 调用 player 服务，后者复用共享 Client。
 网关工厂先绑定 TCP 监听，再把监听及服务退出 token 交给 `serve` 的受监督任务。
 客户端正文不提供 session 身份；示例 player 从可信的调用上下文读取玩家 ID。
 
@@ -819,7 +850,7 @@ clock_skew_ms = 5000
 每个节点配置名为 `gateway-rpc` 的网关内部 gRPC 服务；`gateway_rpc_service_name` 可覆盖发现名称。
 自定义组装先通过 [`gateway::player::Ingress::with_resume_token_codec`] 注入本地 codec，
 再通过 [`gateway::player::Ingress::with_gateway_rpc`] 注入目录并向
-[`gateway::rpc::GatewayRpcService`] 登记会话管理器；内部服务交给 [`game_rpc::RpcEndpoint::add_service`]。
+[`gateway::rpc::GatewayRpcService`] 登记会话管理器；内部服务交给 [`game_rpc::Listener::add_service`]。
 统一入口当前提供 PrepareHandoff、CommitHandoff、CancelHandoff、CompleteHandoff，未来网关管理 RPC 在同一服务扩展。
 登记不受 handoff_enabled 限制，交接关闭时由具体交接操作拒绝；不会为每组方法重复登记管理器。
 普通 credential 登录仍不能直接抢占远端活动租约；恢复交接由旧网关协作完成。

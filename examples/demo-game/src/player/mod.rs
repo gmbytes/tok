@@ -17,7 +17,7 @@ use std::{
 use tok::{
     core::ServiceDirectory,
     game_rpc::{
-        CallContext, HandlerRegistry, HandlerReply, RpcClients, protocol::internal::v1::Payload,
+        CallContext, Client, HandlerRegistry, HandlerReply, protocol::internal::v1::Payload,
         tonic::Status,
     },
     player::{TimerSpec, TimerUpdate},
@@ -225,10 +225,8 @@ pub fn handlers(
             Ok(None)
         })
     })?;
-    let client = tok::game_rpc::business::Client::new(Arc::new(RpcClients::new(
-        Duration::from_secs(2),
-        16,
-    )?));
+    let client =
+        tok::game_rpc::business::Client::new(Arc::new(Client::new(Duration::from_secs(2), 16)?));
     registry.register(
         QueryGuildRequest::MESSAGE_ID,
         QueryGuildResponse::MESSAGE_ID,

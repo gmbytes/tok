@@ -1,19 +1,19 @@
 //! 会话驱动的 PlayerRpc 客户端适配；与通用连接管理分离。
 use crate::CallContext;
-use crate::{RpcClients, call};
+use crate::call;
 use std::sync::Arc;
 use tok_core::ServiceDescriptor;
 use tok_proto::internal::v1::{self as proto, CallResponse, Payload};
 use tonic::{Request, Status};
 
-/// 玩家协议客户端；多个适配器可以共享同一个 RpcClients 连接缓存。
+/// 玩家协议客户端；多个适配器可以共享同一个 tok_rpc::Client 连接缓存。
 #[derive(Clone)]
 pub struct Client {
-    connections: Arc<RpcClients>,
+    connections: Arc<tok_rpc::Client>,
 }
 impl Client {
     /// 注入共享连接管理器，不建立连接。
-    pub fn new(connections: Arc<RpcClients>) -> Self {
+    pub fn new(connections: Arc<tok_rpc::Client>) -> Self {
         Self { connections }
     }
     /// 调用玩家请求或内部 timer 入口；会话字段校验不代替所有权与调用者认证。

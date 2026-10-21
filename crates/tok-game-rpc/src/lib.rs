@@ -2,8 +2,8 @@
 //!
 //! 通用连接、端点与调用执行由 tok-rpc 提供；本 crate 定义游戏协议语义。
 //!
-//! [`RpcEndpoint`] 显式绑定业务服务名和 protobuf 服务，监听由应用生命周期管理。
-//! [`RpcClients`] 管理共享 Channel 缓存和传输配置；具体协议由
+//! [`Listener`] 显式绑定业务服务名和 protobuf 服务，监听由应用生命周期管理。
+//! [`Client`] 管理共享 Channel 缓存和传输配置；具体协议由
 //! [`player::Client`]、[`business::Client`] 等适配器调用，有超时且不添加重试。
 //! [`HandlerRegistry`] 将游戏 protobuf 消息注册为强类型业务处理函数。
 
@@ -23,7 +23,7 @@ pub use context::CallContext;
 pub use handler::{
     CallTask, EventTask, Handler, HandlerRegistry, HandlerReply, RpcService, TowerHandler,
 };
-pub use tok_rpc::{Error, RpcClients, RpcEndpoint, RpcReadiness, RpcServerTask};
+pub use tok_rpc::{Client, Error, Listener, Readiness};
 
 pub use tok_proto as protocol;
 /// gRPC 客户端、服务端和状态类型；详细 API 见 tonic 上游文档。

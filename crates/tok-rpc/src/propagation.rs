@@ -5,8 +5,8 @@ use opentelemetry::{
 use tonic::metadata::{KeyAndValueRef, MetadataMap};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
-struct Metadata<'a>(&'a MetadataMap);
-impl Extractor for Metadata<'_> {
+struct MetadataExtractor<'a>(&'a MetadataMap);
+impl Extractor for MetadataExtractor<'_> {
     fn get(&self, key: &str) -> Option<&str> {
         self.0.get(key)?.to_str().ok()
     }
@@ -20,8 +20,8 @@ impl Extractor for Metadata<'_> {
             .collect()
     }
 }
-struct Outgoing<'a>(&'a mut MetadataMap);
-impl Injector for Outgoing<'_> {
+struct MetadataInjector<'a>(&'a mut MetadataMap);
+impl Injector for MetadataInjector<'_> {
     fn set(&mut self, key: &str, value: String) {
         if let (Ok(key), Ok(value)) = (
             key.parse::<tonic::metadata::MetadataKey<tonic::metadata::Ascii>>(),
@@ -33,9 +33,9 @@ impl Injector for Outgoing<'_> {
 }
 pub fn inject(metadata: &mut MetadataMap, span: &tracing::Span) {
     global::get_text_map_propagator(|propagator| {
-        propagator.inject_context(&span.context(), &mut Outgoing(metadata))
+        propagator.inject_context(&span.context(), &mut MetadataInjector(metadata))
     });
 }
 pub fn extract(metadata: &MetadataMap) -> opentelemetry::Context {
-    global::get_text_map_propagator(|propagator| propagator.extract(&Metadata(metadata)))
+    global::get_text_map_propagator(|propagator| propagator.extract(&MetadataExtractor(metadata)))
 }

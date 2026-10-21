@@ -12,7 +12,7 @@ use tok::{
     AppConfig,
     application::{self, Application},
     core::ServiceDirectory,
-    game_rpc::{HandlerRegistry, RpcEndpoint, RpcService},
+    game_rpc::{HandlerRegistry, Listener, RpcService},
     lifecycle::{self, Init, InitFuture, task::Task},
 };
 
@@ -79,8 +79,8 @@ impl lifecycle::Factory for Factory {
 fn config(address: std::net::SocketAddr) -> AppConfig {
     AppConfig::from_toml(&format!("node_id='local'\ndiscovery='memory'\n[[endpoints]]\nname='internal'\nprotocol='grpc'\naddress='{address}'\n[[services]]\nservice_name='player'\nendpoint='internal'\n[[services]]\nservice_name='guild'\nendpoint='internal'")).unwrap()
 }
-fn endpoint() -> RpcEndpoint {
-    RpcEndpoint::new()
+fn endpoint() -> Listener {
+    Listener::new()
         .add_service(
             "player",
             RpcService::new("local", "player", Arc::new(HandlerRegistry::new()))
@@ -222,7 +222,7 @@ async fn initialization_failure_cleans_up_shared_listener_and_directory() {
 async fn configuration_requires_complete_and_unique_endpoint_bindings() {
     let mut app = Application::new(config("127.0.0.1:7001".parse().unwrap())).unwrap();
     assert!(app.register_rpc_endpoint("missing", endpoint()).is_err());
-    let incomplete = RpcEndpoint::new()
+    let incomplete = Listener::new()
         .add_service(
             "player",
             RpcService::new("local", "player", Arc::new(HandlerRegistry::new()))

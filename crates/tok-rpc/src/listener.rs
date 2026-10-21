@@ -1,14 +1,13 @@
 use std::{
     collections::BTreeMap,
     convert::Infallible,
-    future::Future,
-    pin::Pin,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
 };
 
+use tok_core::BoxFuture;
 use tokio::net::TcpListener;
 use tokio_stream::wrappers::TcpListenerStream;
 use tokio_util::sync::CancellationToken;
@@ -23,19 +22,19 @@ use tower::Service;
 
 use crate::Error;
 
-/// 持续监听任务，必须由组装层监督并在退出期限内结束。
-pub type RpcServerTask = Pin<Box<dyn Future<Output = Result<(), Error>> + Send>>;
-
 /// 各业务服务的就绪开关。未就绪的调用返回 Unavailable。
 #[derive(Clone, Default)]
-pub struct RpcReadiness(BTreeMap<String, Arc<AtomicBool>>);
+pub struct Readiness(BTreeMap<String, Arc<AtomicBool>>);
 
-impl RpcReadiness {
-    /// 发布就绪前应已完成对应业务服务初始化。
-    pub fn set(&self, service_name: &str, ready: bool) {
-        if let Some(flag) = self.0.get(service_name) {
-            flag.store(ready, Ordering::Release);
-        }
+impl Readiness {
+    /// 发布就绪前应已完成对应业务服务初始化；更新成功返回 true，未绑定的名称返回 false。
+    /// 应用遍历多个端点时可以忽略未命中结果；直接指定服务时应检查返回值。
+    pub fn set(&self, service_name: &str, ready: bool) -> bool {
+        let Some(flag) = self.0.get(service_name) else {
+            return false;
+        };
+        flag.store(ready, Ordering::Release);
+        true
     }
 
     /// 退出或初始化失败时先停止接收所有绑定服务的新调用。
@@ -50,17 +49,37 @@ impl RpcReadiness {
 ///
 /// 同一 protobuf 服务只能绑定一次，避免 tonic 路由相互覆盖。
 /// 不同 protobuf 服务可以共享一个端点，支持用户自己生成的服务与 Tower 包装。
-#[derive(Default)]
-pub struct RpcEndpoint {
+pub struct Listener {
+    server: Server,
     router: Option<Router>,
     bindings: BTreeMap<String, &'static str>,
-    readiness: RpcReadiness,
+    readiness: Readiness,
 }
 
-impl RpcEndpoint {
+impl Default for Listener {
+    fn default() -> Self {
+        Self::from_server(Server::builder())
+    }
+}
+
+impl Listener {
     /// 创建没有业务绑定、尚未监听的端点。
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// 使用已配置的 Tonic Server 创建尚未绑定业务的端点，保留 TLS 与 HTTP/2 等传输参数。
+    ///
+    /// TLS 需在应用依赖中启用 Tonic 对应的 TLS feature。
+    /// 本入口接受未添加 Tower Layer 的 Server；业务中间件可在 add_service 时包装具体服务。
+    /// 服务绑定、就绪控制和监听 Future 的监督约定与 new 相同。
+    pub fn from_server(server: Server) -> Self {
+        Self {
+            server,
+            router: None,
+            bindings: BTreeMap::new(),
+            readiness: Readiness::default(),
+        }
     }
 
     /// 绑定业务名到 NamedService；默认未就绪，由运行时开启入口。
@@ -79,12 +98,19 @@ impl RpcEndpoint {
         S::Future: Send + 'static,
     {
         let service_name = service_name.into();
-        if service_name.trim().is_empty()
-            || self.bindings.contains_key(&service_name)
-            || self.bindings.values().any(|name| *name == S::NAME)
-        {
+        if service_name.trim().is_empty() {
+            return Err(Error::Configuration(
+                "RPC 绑定的业务服务名称不能为空".into(),
+            ));
+        }
+        if self.bindings.contains_key(&service_name) {
             return Err(Error::Configuration(format!(
-                "重复或无效的 RPC 绑定：{service_name} / {}",
+                "RPC 业务服务重复绑定：{service_name}"
+            )));
+        }
+        if self.bindings.values().any(|name| *name == S::NAME) {
+            return Err(Error::Configuration(format!(
+                "RPC protobuf 服务重复绑定：{}",
                 S::NAME
             )));
         }
@@ -101,7 +127,7 @@ impl RpcEndpoint {
         });
         self.router = Some(match self.router {
             Some(router) => router.add_service(service),
-            None => Server::builder().add_service(service),
+            None => self.server.add_service(service),
         });
         Ok(self)
     }
@@ -112,26 +138,27 @@ impl RpcEndpoint {
     }
 
     /// 获取共享就绪开关；通常由 Application 在初始化和退出时管理。
-    pub fn readiness(&self) -> RpcReadiness {
+    pub fn readiness(&self) -> Readiness {
         self.readiness.clone()
     }
 
-    /// 先绑定监听，返回持续运行的任务。调用方必须监督任务并设置退出期限。
+    /// 先绑定监听，返回待驱动的监听 Future。调用方必须驱动、监督并设置退出期限。
     pub async fn bind(
         self,
         address: std::net::SocketAddr,
         shutdown: CancellationToken,
-    ) -> Result<RpcServerTask, Error> {
+    ) -> Result<BoxFuture<'static, Result<(), Error>>, Error> {
         let listener = TcpListener::bind(address).await?;
         self.serve(listener, shutdown)
     }
 
     /// 接管已绑定的监听，可用于需要动态端口或自定义监听准备的组装。
+    /// 返回待驱动的 Future，不创建任务；调用方必须驱动、监督并设置退出期限。
     pub fn serve(
         self,
         listener: TcpListener,
         shutdown: CancellationToken,
-    ) -> Result<RpcServerTask, Error> {
+    ) -> Result<BoxFuture<'static, Result<(), Error>>, Error> {
         let router = self
             .router
             .ok_or_else(|| Error::Configuration("RPC 端点至少需要绑定一个服务".into()))?;

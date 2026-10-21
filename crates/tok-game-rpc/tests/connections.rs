@@ -6,7 +6,7 @@ use std::{
 };
 use tok_core::ServiceDescriptor;
 use tok_game_rpc::CallContext;
-use tok_game_rpc::{RpcClients, RpcEndpoint};
+use tok_game_rpc::{Client, Listener};
 use tok_proto::internal::v1::{
     CallRequest, CallResponse, Payload,
     business_rpc_server::{BusinessRpc, BusinessRpcServer},
@@ -55,7 +55,7 @@ async fn two_services_on_one_endpoint_share_a_tcp_connection() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let probe = Probe::default();
-    let endpoint = RpcEndpoint::new()
+    let endpoint = Listener::new()
         .add_service("player", PlayerRpcServer::new(probe.clone()))
         .unwrap()
         .add_service("guild", BusinessRpcServer::new(probe.clone()))
@@ -64,7 +64,7 @@ async fn two_services_on_one_endpoint_share_a_tcp_connection() {
     endpoint.readiness().set("guild", true);
     let shutdown = CancellationToken::new();
     let server = tokio::spawn(endpoint.serve(listener, shutdown.clone()).unwrap());
-    let clients = Arc::new(RpcClients::new(Duration::from_secs(2), 1).unwrap());
+    let clients = Arc::new(Client::new(Duration::from_secs(2), 1).unwrap());
     let player_client = tok_game_rpc::player::Client::new(Arc::clone(&clients));
     let business_client = tok_game_rpc::business::Client::new(Arc::clone(&clients));
     for (name, player) in [("player", true), ("guild", false)] {

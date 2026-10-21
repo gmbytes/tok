@@ -16,7 +16,7 @@ use tok::{
     AppConfig,
     application::Application,
     core::ServiceDirectory,
-    game_rpc::{CallContext, RpcClients, RpcService, protocol::internal::v1::Payload},
+    game_rpc::{CallContext, Client, RpcService, protocol::internal::v1::Payload},
     lifecycle::{Init, InitFuture, task::Task},
     observability::Error,
     player::SessionIdentity,
@@ -187,7 +187,7 @@ pub fn application_with_locks(
 pub async fn rpc_smoke(directory: &dyn ServiceDirectory) -> Result<(), Error> {
     let player = tok::infra::routing::route(directory, "player", "42")?;
     let guild = tok::infra::routing::route(directory, "guild", "7")?;
-    let clients = Arc::new(RpcClients::new(Duration::from_secs(2), 8)?);
+    let clients = Arc::new(Client::new(Duration::from_secs(2), 8)?);
     let player_client = tok::game_rpc::player::Client::new(Arc::clone(&clients));
     let business_client = tok::game_rpc::business::Client::new(clients);
     let response = player_client

@@ -54,7 +54,7 @@ impl GatewayRpcService {
         }
         Ok(())
     }
-    /// 生成可由 RpcEndpoint 显式绑定的 tonic 服务。
+    /// 生成可由 Listener 显式绑定的 tonic 服务。
     pub fn into_rpc(self) -> proto::gateway_rpc_server::GatewayRpcServer<Self> {
         let limit = self.max_handoff_bytes + 65536;
         proto::gateway_rpc_server::GatewayRpcServer::new(self)

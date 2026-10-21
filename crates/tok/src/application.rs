@@ -9,7 +9,7 @@ use tok_core::{ServiceDescriptor, ServiceDirectory};
 use tok_infra::discovery::{MemoryDirectory, redis::RedisDirectory};
 use tok_lifecycle as lifecycle;
 use tok_lifecycle::{Builder, Factory, Handle, task::BoxError};
-use tok_rpc::{RpcEndpoint, RpcReadiness};
+use tok_rpc::{Listener, Readiness};
 use tokio::task::{JoinError, JoinSet};
 /// 服务协作退出的取消令牌；详细 API 见 tokio-util 上游文档。
 pub use tokio_util::sync::CancellationToken;
@@ -84,7 +84,7 @@ pub struct Application {
     startup_timeout: Duration,
     shutdown_timeout: Duration,
     max_service_tasks: usize,
-    rpc_endpoints: BTreeMap<String, RpcEndpoint>,
+    rpc_endpoints: BTreeMap<String, Listener>,
     rpc_registrations: Vec<rpc::Registration>,
     service_directory: Arc<dyn ServiceDirectory>,
     registry: Arc<dyn ServiceRegistry>,
@@ -97,7 +97,7 @@ struct Registrations {
     shutdown: CancellationToken,
     services: Vec<ServiceDescriptor>,
     running_services: Vec<String>,
-    rpc_readiness: Vec<RpcReadiness>,
+    rpc_readiness: Vec<Readiness>,
     service_handles: Vec<Handle>,
 }
 
@@ -201,7 +201,7 @@ impl Application {
     pub fn register_rpc_endpoint(
         &mut self,
         endpoint_name: impl Into<String>,
-        endpoint: RpcEndpoint,
+        endpoint: Listener,
     ) -> Result<(), Error> {
         let endpoint_name = endpoint_name.into();
         let config = self

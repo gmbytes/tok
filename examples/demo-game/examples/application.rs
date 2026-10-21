@@ -19,7 +19,7 @@ use tok::{
     events::{self, Envelope, Event, EventId, Outcome, Registry},
     execution::{Context, Request, sync_handler},
     game_rpc::{
-        CallContext, HandlerRegistry, HandlerReply, RpcClients, RpcService,
+        CallContext, Client, HandlerRegistry, HandlerReply, RpcService,
         protocol::internal::v1::Payload, tonic::Status,
     },
     lifecycle::{
@@ -175,7 +175,7 @@ async fn main() -> Result<(), BoxError> {
                 return Err(std::io::Error::other("无端点服务不应发布地址"));
             }
             let client = tok::game_rpc::business::Client::new(Arc::new(
-                RpcClients::new(Duration::from_secs(2), 4).map_err(std::io::Error::other)?,
+                Client::new(Duration::from_secs(2), 4).map_err(std::io::Error::other)?,
             ));
             let response = client
                 .call(

@@ -6,12 +6,12 @@ use tok_game_rpc::RpcService;
 use tok_lifecycle as lifecycle;
 use tok_lifecycle::Factory;
 use tok_rpc::{
-    RpcEndpoint,
+    Listener,
     tonic::{body::Body, codegen::http, server::NamedService},
     tower::Service,
 };
 
-type EndpointBinding = Box<dyn FnOnce(RpcEndpoint) -> Result<RpcEndpoint, tok_rpc::Error> + Send>;
+type EndpointBinding = Box<dyn FnOnce(Listener) -> Result<Listener, tok_rpc::Error> + Send>;
 pub(super) struct Registration {
     pub(super) endpoint: String,
     pub(super) service: String,
@@ -160,7 +160,7 @@ impl Application {
         for registration in std::mem::take(&mut self.rpc_registrations) {
             let endpoint = endpoints
                 .remove(&registration.endpoint)
-                .unwrap_or_else(RpcEndpoint::new);
+                .unwrap_or_else(Listener::new);
             endpoints.insert(registration.endpoint, (registration.bind)(endpoint)?);
         }
         for (name, endpoint) in endpoints {

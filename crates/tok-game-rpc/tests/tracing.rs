@@ -11,7 +11,7 @@ use std::{
 };
 use tok_core::ServiceDescriptor;
 use tok_game_rpc::CallContext;
-use tok_game_rpc::{CallTask, Handler, RpcClients, RpcEndpoint, RpcService};
+use tok_game_rpc::{CallTask, Client, Handler, Listener, RpcService};
 use tok_proto::internal::v1::{CallResponse, Payload};
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
@@ -75,7 +75,7 @@ async fn trace_context_is_propagated_across_the_network_call() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let observed = Arc::new(Mutex::new(None));
-    let endpoint = RpcEndpoint::new()
+    let endpoint = Listener::new()
         .add_service(
             "guild",
             RpcService::new("local", "guild", Arc::new(Capture(Arc::clone(&observed))))
@@ -97,7 +97,7 @@ async fn trace_context_is_propagated_across_the_network_call() {
     async {
         let root = tracing::info_span!("client_root");
         root.set_parent(context.clone()).unwrap();
-        let clients = Arc::new(RpcClients::new(Duration::from_secs(2), 1).unwrap());
+        let clients = Arc::new(Client::new(Duration::from_secs(2), 1).unwrap());
         let business_client = tok_game_rpc::business::Client::new(Arc::clone(&clients));
         let target = ServiceDescriptor {
             node_id: "local".into(),
@@ -151,7 +151,7 @@ async fn trace_context_is_propagated_across_the_network_call() {
         timer: None,
     };
     use tracing::Instrument;
-    let clients = Arc::new(RpcClients::new(Duration::from_secs(2), 1).unwrap());
+    let clients = Arc::new(Client::new(Duration::from_secs(2), 1).unwrap());
     let player_client = tok_game_rpc::player::Client::new(Arc::clone(&clients));
     player_client
         .handle_event(

@@ -10,7 +10,7 @@ use std::{
 };
 use tok_core::ServiceDescriptor;
 use tok_game_rpc::CallContext;
-use tok_game_rpc::{CallTask, Handler, HandlerRegistry, RpcClients, RpcEndpoint, RpcService};
+use tok_game_rpc::{CallTask, Client, Handler, HandlerRegistry, Listener, RpcService};
 use tok_player::SessionIdentity;
 use tok_proto::internal::v1::{
     CallRequest, CallResponse, Payload, player_rpc_client::PlayerRpcClient,
@@ -69,7 +69,7 @@ fn handler() -> HandlerRegistry {
 async fn shared_endpoint_dispatches_and_rejects_unready_malformed_and_wrong_targets() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
-    let endpoint = RpcEndpoint::new()
+    let endpoint = Listener::new()
         .add_service(
             "player",
             RpcService::new("local", "player", Arc::new(handler()))
@@ -87,7 +87,7 @@ async fn shared_endpoint_dispatches_and_rejects_unready_malformed_and_wrong_targ
     let ready = endpoint.readiness();
     let shutdown = CancellationToken::new();
     let server = tokio::spawn(endpoint.serve(listener, shutdown.clone()).unwrap());
-    let clients = Arc::new(RpcClients::new(Duration::from_secs(2), 1).unwrap());
+    let clients = Arc::new(Client::new(Duration::from_secs(2), 1).unwrap());
     let player_client = tok_game_rpc::player::Client::new(Arc::clone(&clients));
     let business_client = tok_game_rpc::business::Client::new(Arc::clone(&clients));
     let player = target(address, "player");
@@ -100,8 +100,9 @@ async fn shared_endpoint_dispatches_and_rejects_unready_malformed_and_wrong_targ
             .code(),
         Code::Unavailable
     );
-    ready.set("player", true);
-    ready.set("guild", true);
+    assert!(!ready.set("unknown", true));
+    assert!(ready.set("player", true));
+    assert!(ready.set("guild", true));
     for (entry, is_player) in [(&player, true), (&guild, false)] {
         let response = if is_player {
             player_client.call(entry, context(entry), payload(41)).await
@@ -207,7 +208,7 @@ async fn timeout_does_not_retry_business_execution() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let calls = Arc::new(AtomicUsize::new(0));
-    let endpoint = RpcEndpoint::new()
+    let endpoint = Listener::new()
         .add_service(
             "guild",
             RpcService::new(
@@ -225,7 +226,7 @@ async fn timeout_does_not_retry_business_execution() {
     let shutdown = CancellationToken::new();
     let server = tokio::spawn(endpoint.serve(listener, shutdown.clone()).unwrap());
     let target = target(address, "guild");
-    let clients = Arc::new(RpcClients::new(Duration::from_millis(150), 1).unwrap());
+    let clients = Arc::new(Client::new(Duration::from_millis(150), 1).unwrap());
     let business_client = tok_game_rpc::business::Client::new(Arc::clone(&clients));
     let error = business_client
         .call(&target, context(&target), payload(1))
@@ -260,7 +261,7 @@ fn duplicate_message_and_proto_service_bindings_are_rejected() {
     );
     let service = RpcService::new("local", "guild", Arc::new(handler())).unwrap();
     assert!(
-        RpcEndpoint::new()
+        Listener::new()
             .add_service("guild", service.clone().into_business())
             .unwrap()
             .add_service("mail", service.into_business())
@@ -296,7 +297,7 @@ async fn user_tower_concurrency_limit_is_preserved_across_handler_clones() {
         ));
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
-    let endpoint = RpcEndpoint::new()
+    let endpoint = Listener::new()
         .add_service(
             "guild",
             RpcService::new(
@@ -311,7 +312,7 @@ async fn user_tower_concurrency_limit_is_preserved_across_handler_clones() {
     endpoint.readiness().set("guild", true);
     let shutdown = CancellationToken::new();
     let server = tokio::spawn(endpoint.serve(listener, shutdown.clone()).unwrap());
-    let clients = Arc::new(RpcClients::new(Duration::from_secs(2), 1).unwrap());
+    let clients = Arc::new(Client::new(Duration::from_secs(2), 1).unwrap());
     let business_client = tok_game_rpc::business::Client::new(Arc::clone(&clients));
     let target = target(address, "guild");
     let (first, second) = tokio::join!(
@@ -323,6 +324,84 @@ async fn user_tower_concurrency_limit_is_preserved_across_handler_clones() {
     assert_eq!(peak.load(Ordering::SeqCst), 1);
     shutdown.cancel();
     tokio::time::timeout(Duration::from_secs(2), server)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+}
+
+#[test]
+fn endpoint_binding_errors_identify_the_invalid_configuration() {
+    let service = RpcService::new("local", "guild", Arc::new(handler())).unwrap();
+    let error = Listener::new()
+        .add_service(" ", service.clone().into_business())
+        .err()
+        .unwrap();
+    assert!(error.to_string().contains("业务服务名称不能为空"));
+    let error = Listener::new()
+        .add_service("guild", service.clone().into_business())
+        .unwrap()
+        .add_service("guild", service.clone().into_player())
+        .err()
+        .unwrap();
+    assert!(error.to_string().contains("业务服务重复绑定：guild"));
+    let error = Listener::new()
+        .add_service("guild", service.clone().into_business())
+        .unwrap()
+        .add_service("mail", service.into_business())
+        .err()
+        .unwrap();
+    assert!(error.to_string().contains("protobuf 服务重复绑定"));
+}
+
+#[tokio::test]
+async fn custom_client_uri_and_server_transport_timeout_are_applied() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let server = tonic::transport::Server::builder().timeout(Duration::from_millis(30));
+    let endpoint = Listener::from_server(server)
+        .add_service(
+            "guild",
+            RpcService::new(
+                "local",
+                "guild",
+                Arc::new(Slow {
+                    calls: Arc::clone(&calls),
+                }),
+            )
+            .unwrap()
+            .into_business(),
+        )
+        .unwrap();
+    assert!(endpoint.readiness().set("guild", true));
+    let shutdown = CancellationToken::new();
+    let task = tokio::spawn(endpoint.serve(listener, shutdown.clone()).unwrap());
+    let client = Client::new(Duration::from_secs(3), 1)
+        .unwrap()
+        .with_endpoint_factory(move |_| {
+            // 发现地址在本测试中不可达，工厂将其映射到实际监听，以验证 URI 没有被覆盖。
+            Ok(tonic::transport::Endpoint::from_shared(format!(
+                "http://{address}"
+            ))?)
+        });
+    let client = tok_game_rpc::business::Client::new(Arc::new(client));
+    let target = target("127.0.0.1:1".parse().unwrap(), "guild");
+    // 服务端传输期限应先于客户端三秒预算生效。
+    let error = tokio::time::timeout(
+        Duration::from_secs(1),
+        client.call(&target, context(&target), payload(1)),
+    )
+    .await
+    .expect("configured server timeout was not applied")
+    .unwrap_err();
+    assert!(matches!(
+        error.code(),
+        Code::Cancelled | Code::DeadlineExceeded
+    ));
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    shutdown.cancel();
+    tokio::time::timeout(Duration::from_secs(1), task)
         .await
         .unwrap()
         .unwrap()

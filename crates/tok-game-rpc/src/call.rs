@@ -1,6 +1,6 @@
-//! 游戏协议的目标校验与正文编码；追踪、期限和指标委托通用 RpcClients。
+//! 游戏协议的目标校验与正文编码；追踪、期限和指标委托通用 Client。
 use crate::CallContext;
-use crate::RpcClients;
+use crate::Client;
 use std::future::Future;
 use tok_core::ServiceDescriptor;
 use tok_proto::internal::v1::{self as proto, CallRequest, CallResponse, Payload};
@@ -29,7 +29,7 @@ pub(crate) fn encode_context(context: CallContext) -> proto::CallContext {
     }
 }
 pub(crate) async fn call<F, Fut>(
-    clients: &RpcClients,
+    client: &Client,
     target: &ServiceDescriptor,
     mut context: CallContext,
     payload: Payload,
@@ -52,7 +52,7 @@ where
         payload: Some(payload),
     });
     let span = tracing::info_span!("rpc_client", node_id = %target.node_id, service_name = %target.service_name, request_id);
-    let response = clients
+    let response = client
         .execute(target, request_id, request, span, send)
         .await?;
     if response.request_id != request_id {
