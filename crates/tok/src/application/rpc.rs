@@ -21,7 +21,7 @@ struct FactoryBinding {
     bindings: BTreeMap<String, tok_rpc::Binding>,
 }
 impl Factory for FactoryBinding {
-    fn initialize(&self, mut init: lifecycle::Init) -> lifecycle::InitTask {
+    fn initialize(&self, mut init: lifecycle::Init) -> lifecycle::InitFuture {
         let binding = self.bindings.get(&init.identity.service_name).cloned();
         let factory = Arc::clone(&self.factory);
         Box::pin(async move {

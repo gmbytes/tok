@@ -122,12 +122,12 @@ owned 输入满足相应 Send 条件时仍可交给运行时。P1 不增加隐�
 
 ```rust
 use tok::{AppConfig, core::ServiceDirectory, application::Application,
-    service::{lifecycle::{Init, Factory, InitTask}, task::Task}};
+    service::{lifecycle::{Init, Factory, InitFuture}, task::Task}};
 
 struct GameService;
 
 impl Factory for GameService {
-    fn initialize(&self, init: Init) -> InitTask {
+    fn initialize(&self, init: Init) -> InitFuture {
         Box::pin(async move {
             // 在返回前完成初始化，持有资源使用 RAII，初始化必须可取消。
             Ok(Box::pin(async move {
@@ -173,13 +173,18 @@ assert!(directory.snapshot("guild")?.is_empty());
 [`service::lifecycle::Factory::initialize`] 返回初始化 future；初始化完成后返回持续运行的服务任务。
 [`application::Application::run_until`] 监督任务，初始化失败、超时、提前结束或崩溃会触发整个进程清理。
 服务通过 [`service::lifecycle::Handle::cancellation`] 接收取消通知。
+
+初始化返回 [`service::lifecycle::InitFuture`]，成功后提供受监督的 [`service::task::Task`]。
+任务容量预留与提交返回 [`service::task::SubmitError`]，可按 CapacityExceeded、Stopping、Closed、InvalidName 区分失败原因；名称须非空白且不超过 256 字节。提交成功仅表示入队。
+调用执行错误为 [`service::Error`]，内层错误通过标准 source 链保留；任务执行与退出错误为 [`service::task::Error`]，服务初始化与退出错误为 [`service::lifecycle::Error`]。后两者使用 Join 表示 Tokio 任务异常结束，正常返回错误使用 Run；任务完成报告在 panic 时仍保留提交名称。
+
 默认初始化期限为 30 秒，整体退出期限为 10 秒，可通过
 [`application::Application::with_timeouts`] 调整。
 生产进程可向 `run_until` 传入 [`application::shutdown_signal`]，支持 Windows Ctrl+C 和 Unix SIGTERM。
 
 ## 通用工厂与生命周期
 
-[`service::lifecycle::Factory`] 是公共构建契约，可实现 trait 或使用返回 InitTask 的闭包。
+[`service::lifecycle::Factory`] 是公共构建契约，可实现 trait 或使用返回 InitFuture 的闭包。
 工厂创建状态、入口和 Tower 链，返回主任务；普通服务不要求网络端点或 session。
 Application 通过类型化 [`application::Binding`] 扩展注入端点和发现查询；RPC 入口可通过 RpcService::deferred 创建绑定槽，再在工厂中使用 rpc::Binding::install 安装实际处理链；示例 player/guild 已按此方式初始化状态。端点仍由 Application 共享监听，就绪后才接受调用。
 
@@ -198,9 +203,9 @@ Application 通过类型化 [`application::Binding`] 扩展注入端点和发现
 
 ```rust
 use std::{sync::Arc, time::Duration};
-use tok::{core::{Extensions, service::Identity}, application::CancellationToken, service::{lifecycle::{Init, Factory, Phase, InitTask, Builder}, task::Task}};
+use tok::{core::{Extensions, service::Identity}, application::CancellationToken, service::{lifecycle::{Init, Factory, Phase, InitFuture, Builder}, task::Task}};
 
-fn initialize(init: Init) -> InitTask {
+fn initialize(init: Init) -> InitFuture {
     Box::pin(async move {
         let stop = init.service.cancellation();
         init.service.tasks().launch("worker", Box::pin(async move {
@@ -297,7 +302,7 @@ player 使用 `into_player`，普通业务服务使用 `into_business`，两者�
 use std::sync::Arc;
 use tok::{AppConfig, rpc::{HandlerRegistry, RpcService},
     application::{Application, shutdown_signal},
-    service::{lifecycle::{Init, InitTask}, task::Task}};
+    service::{lifecycle::{Init, InitFuture}, task::Task}};
 
 #[derive(Clone, PartialEq, prost::Message)]
 struct ReadGuild {
@@ -319,7 +324,7 @@ service_name = "guild"
 endpoint = "internal-rpc"
 "#)?;
     let mut app = Application::new(config)?;
-    app.register_rpc_factory("guild", |init: Init| -> InitTask {
+    app.register_rpc_factory("guild", |init: Init| -> InitFuture {
         Box::pin(async move {
             // 状态、入口和 Layer 在同一个工厂中初始化。
             let mut handlers = HandlerRegistry::new();
@@ -907,10 +912,10 @@ timer 失败或超时只记录本次失败，不重试；周期的后续触发�
 
 ```rust
 use std::sync::Arc;
-use tok::{rpc::{RpcService, HandlerRegistry}, service::{lifecycle::{Factory, Init, InitTask}, task::Task}};
+use tok::{rpc::{RpcService, HandlerRegistry}, service::{lifecycle::{Factory, Init, InitFuture}, task::Task}};
 # fn example() -> Result<(), Box<dyn std::error::Error>> {
 let (endpoint, binding) = RpcService::deferred("node-a", "guild")?;
-let factory = move |init: Init| -> InitTask {
+let factory = move |init: Init| -> InitFuture {
     let binding = binding.clone();
     Box::pin(async move {
         let registry = HandlerRegistry::new(); // 在此创建状态、注册路由和安装 Layer。

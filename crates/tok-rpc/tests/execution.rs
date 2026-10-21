@@ -247,7 +247,7 @@ async fn rpc_budget_and_malformed_timeout_are_enforced_before_accepting_results(
 }
 #[tokio::test]
 async fn deferred_rpc_is_initialized_once_by_its_own_factory_and_stops_with_service() {
-    use tok_service::lifecycle::{Builder, Init, InitTask};
+    use tok_service::lifecycle::{Builder, Init, InitFuture};
     let (rpc, binding) = RpcService::deferred("node", "test").unwrap();
     assert_eq!(
         proto::business_rpc_server::BusinessRpc::call(&rpc, wire_request(None))
@@ -273,7 +273,7 @@ async fn deferred_rpc_is_initialized_once_by_its_own_factory_and_stops_with_serv
     };
     let builder = Builder::new(identity, 1, CancellationToken::new()).unwrap();
     let service = builder.handle();
-    let factory = move |init: Init| -> InitTask {
+    let factory = move |init: Init| -> InitFuture {
         let binding = binding.clone();
         let wrong = Init {
             identity: Identity {

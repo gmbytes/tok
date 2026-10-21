@@ -187,9 +187,8 @@ async fn custom_ingress_uses_task_capacity_and_clean_shutdown() {
             .tasks
             .launch("test-background", Box::pin(async { Ok(()) }))
             .await
-            .unwrap_err()
-            .kind(),
-        std::io::ErrorKind::WouldBlock
+            .unwrap_err(),
+        tok_service::task::SubmitError::CapacityExceeded
     );
     fixture.stop.cancel();
     fixture.result().await.unwrap();

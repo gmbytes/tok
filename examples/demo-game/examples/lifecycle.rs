@@ -14,7 +14,7 @@ use tok::{
     gateway::{Gateway, GatewayConfig, GatewayIngress, GatewayTask},
     service::{
         Context as ExecutionContext, Layer as ExecutionLayer, Request, Source,
-        lifecycle::{Builder, Factory, Init, InitTask},
+        lifecycle::{Builder, Factory, Init, InitFuture},
         task::{BoxError, Task},
     },
 };
@@ -49,7 +49,7 @@ fn reports(init: &Init) -> io::Result<Reports> {
         .cloned()
         .ok_or_else(|| io::Error::other("缺少示例结果入口"))
 }
-fn counter(init: Init) -> InitTask {
+fn counter(init: Init) -> InitFuture {
     Box::pin(async move {
         // 初始化状态和类型化入口；不要求网络或 session，Layer 用 Rust 组合。
         tokio::task::yield_now().await;
@@ -101,7 +101,7 @@ async fn add(request: Request<(&mut u64, u64)>) -> io::Result<()> {
     *request.input.0 += request.input.1;
     Ok(())
 }
-fn gateway(init: Init) -> InitTask {
+fn gateway(init: Init) -> InitFuture {
     Box::pin(async move {
         let reports = reports(&init)?;
         let finished = init
@@ -138,7 +138,7 @@ async fn main() -> Result<(), BoxError> {
     let mut running = tokio::task::JoinSet::new();
     let result = async {
         for (name, factory) in [
-            ("counter", counter as fn(Init) -> InitTask),
+            ("counter", counter as fn(Init) -> InitFuture),
             ("gateway", gateway),
         ] {
             let builder = Builder::new(

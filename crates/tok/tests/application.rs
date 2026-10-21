@@ -14,7 +14,7 @@ use tok::{
     application::{self, Application},
     core::ServiceDirectory,
     service::{
-        lifecycle::{self, Init, InitTask},
+        lifecycle::{self, Init, InitFuture},
         task::Task,
     },
 };
@@ -35,7 +35,7 @@ struct TestService {
 }
 
 impl lifecycle::Factory for TestService {
-    fn initialize(&self, init: Init) -> InitTask {
+    fn initialize(&self, init: Init) -> InitFuture {
         let stopped = Arc::clone(&self.stopped);
         match self.behavior {
             Behavior::FailStart => {
@@ -344,7 +344,7 @@ async fn startup_failure_also_reclaims_uncooperative_service_children() {
     let exported_clone = Arc::clone(&exported);
     let released = Arc::new(AtomicUsize::new(0));
     let observed = Arc::clone(&released);
-    app.register_factory("player-ingress", move |init: Init| -> InitTask {
+    app.register_factory("player-ingress", move |init: Init| -> InitFuture {
         *exported_clone.lock().unwrap() = Some(init.service.clone());
         let guard = Released(Arc::clone(&observed));
         Box::pin(async move {
@@ -359,8 +359,8 @@ async fn startup_failure_also_reclaims_uncooperative_service_children() {
                 )
                 .await?;
             assert_eq!(
-                init.service.tasks().reserve().err().unwrap().kind(),
-                std::io::ErrorKind::WouldBlock
+                init.service.tasks().reserve().err().unwrap(),
+                tok_service::task::SubmitError::CapacityExceeded
             );
             Ok(Box::pin(async move {
                 init.service.cancellation().cancelled().await;
@@ -406,7 +406,7 @@ async fn service_without_network_endpoint_is_supervised_without_discovery_public
     app.register_factory("events", {
         let starts = Arc::clone(&starts);
         let stopped = Arc::clone(&stopped);
-        move |init: Init| -> InitTask {
+        move |init: Init| -> InitFuture {
             assert_eq!(init.identity.service_name, "events");
             assert!(init.extensions.get::<application::Binding>().is_none());
             let starts = Arc::clone(&starts);

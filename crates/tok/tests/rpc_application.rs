@@ -14,7 +14,7 @@ use tok::{
     core::ServiceDirectory,
     rpc::{HandlerRegistry, RpcEndpoint, RpcService},
     service::{
-        lifecycle::{self, Init, InitTask},
+        lifecycle::{self, Init, InitFuture},
         task::Task,
     },
 };
@@ -65,7 +65,7 @@ async fn redis_startup_timeout_does_not_start_or_publish_business() {
     assert!(query.snapshot("player").is_err());
 }
 impl lifecycle::Factory for Factory {
-    fn initialize(&self, init: Init) -> InitTask {
+    fn initialize(&self, init: Init) -> InitFuture {
         let fail = self.fail;
         self.starts.fetch_add(1, Ordering::SeqCst);
         Box::pin(async move {
@@ -104,7 +104,7 @@ struct Inspect {
     observed: Arc<AtomicUsize>,
 }
 impl lifecycle::Factory for Inspect {
-    fn initialize(&self, init: Init) -> InitTask {
+    fn initialize(&self, init: Init) -> InitFuture {
         let observed = Arc::clone(&self.observed);
         Box::pin(async move {
             let nodes = init
@@ -238,7 +238,7 @@ async fn configuration_requires_complete_and_unique_endpoint_bindings() {
     assert!(app.register_rpc_endpoint("internal", endpoint()).is_err());
 }
 
-fn installing_factory(init: Init) -> InitTask {
+fn installing_factory(init: Init) -> InitFuture {
     Box::pin(async move {
         let binding = init.extensions.get::<tok::rpc::Binding>().unwrap().clone();
         assert!(!binding.is_installed());
@@ -262,7 +262,7 @@ async fn configured_rpc_factories_assemble_shared_endpoint_and_reject_missing_in
             .unwrap();
         app.register_rpc_factory(
             "guild",
-            move |init: Init| -> InitTask {
+            move |init: Init| -> InitFuture {
                 if install {
                     installing_factory(init)
                 } else {

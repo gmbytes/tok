@@ -457,7 +457,7 @@ fn task_error(service_name: String, source: BoxError) -> Error {
 fn service_error(name: &str, error: tok_service::lifecycle::Error, starting: bool) -> Error {
     match error {
         lifecycle::Error::InitializationTimeout => Error::StartTimeout(name.into()),
-        lifecycle::Error::Task(error) => Error::Task(error),
+        lifecycle::Error::Join(error) => Error::Task(error),
         lifecycle::Error::ShutdownTimeout => Error::ShutdownTimeout,
         lifecycle::Error::UnexpectedExit => Error::UnexpectedExit(name.into()),
         error => {

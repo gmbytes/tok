@@ -320,3 +320,9 @@ Windows 验收：infra/RPC 的 40 项常规测试与 12 项指南测试通过；
 JetStream、离线玩家加载、通用跨节点去重、自动玩家归属扇出中继、Redis Cluster、Kubernetes 与生产安全、Scene 接入、配置式中间件语言、存储实现及无缝场景切换保持后续事项。现有租约尽力保护、超时不回滚、无自动业务重试和客户端协议边界继续生效；不为统一模型增加严格 fencing 或分布式事务。
 
 后续能力必须建立在本轮统一核心上，另行形成设计、计划与验收，不沿用已被替代的阶段编号推进。
+
+## tok-service API 与错误校正（2026-10-21）
+
+保留调用执行、task 与 lifecycle 的职责边界及公开功能命名空间；Request 与同步 handler 移入私有实现模块，根导出不变。InitTask 更名 InitFuture，复用 core::BoxFuture；task::Task 保留监督任务语义。任务预留和提交改用 SubmitError，区分容量不足、停止、入口关闭及名称非法；任务与服务错误的 Task 变体改名 Join。执行 Error::Inner 通过标准 source 暴露原始错误，任务 panic 时完成报告保留原名称；修正通用任务范围、初始化取消及 256 字节名称限制的中文文本。调用方与 rustdoc 指南同步迁移，不保留旧名称兼容别名。本轮不做 release 构建。
+
+本轮 Windows 验收：工作区常规测试（含 12 项指南示例、2 项编译失败文档测试）、全目标 Clippy（警告视为错误）和 workspace rustdoc（警告视为错误）通过；新增标准错误链、提交失败容量释放及多任务 panic 名称保留回归测试。真实 Redis/NATS 专项未运行；本轮随本次提交交付。

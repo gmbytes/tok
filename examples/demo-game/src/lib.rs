@@ -20,7 +20,7 @@ use tok::{
     player::SessionIdentity,
     rpc::{CallContext, RpcClients, RpcService, protocol::internal::v1::Payload},
     service::{
-        lifecycle::{Init, InitTask},
+        lifecycle::{Init, InitFuture},
         task::Task,
     },
 };
@@ -125,7 +125,7 @@ pub fn application_with_locks(
     app.register_factory("player-ingress", ingress)?;
 
     // 自定义 protobuf 服务沿用同一 Factory 生命周期；端点由 Application 按配置合并。
-    app.register_factory("gateway-rpc", |init: Init| -> InitTask {
+    app.register_factory("gateway-rpc", |init: Init| -> InitFuture {
         Box::pin(async move {
             Ok(Box::pin(async move {
                 init.service.cancellation().cancelled().await;
@@ -143,7 +143,7 @@ pub fn application_with_locks(
     let capacity = config.player_gateway.max_sessions;
     app.register_rpc_factory(
         "player",
-        move |init: Init| -> InitTask {
+        move |init: Init| -> InitFuture {
             Box::pin(async move {
                 let endpoints = init
                     .extensions
@@ -167,7 +167,7 @@ pub fn application_with_locks(
     )?;
     app.register_rpc_factory(
         "guild",
-        move |init: Init| -> InitTask {
+        move |init: Init| -> InitFuture {
             let locks = Arc::clone(&locks);
             Box::pin(async move {
                 let handlers = guild::locked_handler(&init.identity.service_name, locks)?;

@@ -1,10 +1,9 @@
 use super::Handle;
 use crate::task::{BoxError, Task};
-use std::{future::Future, pin::Pin};
 use tok_core::{Extensions, service::Identity};
 
 /// 初始化状态、入口与处理链，成功后返回服务主任务。
-pub type InitTask = Pin<Box<dyn Future<Output = Result<Task, BoxError>> + Send>>;
+pub type InitFuture = tok_core::BoxFuture<'static, Result<Task, BoxError>>;
 
 /// 初始化所需的服务身份、运行范围和组装能力，不强制服务绑定网络端点。
 #[derive(Clone)]
@@ -23,13 +22,13 @@ pub struct Init {
 /// future 被丢弃时，资源必须具备 RAII 释放路径，不承诺异步清理回调必达。
 pub trait Factory: Send + Sync {
     /// 返回可取消的初始化 future，主任务负责持续运行及协作清理。
-    fn initialize(&self, init: Init) -> InitTask;
+    fn initialize(&self, init: Init) -> InitFuture;
 }
 impl<F> Factory for F
 where
-    F: Fn(Init) -> InitTask + Send + Sync,
+    F: Fn(Init) -> InitFuture + Send + Sync,
 {
-    fn initialize(&self, init: Init) -> InitTask {
+    fn initialize(&self, init: Init) -> InitFuture {
         self(init)
     }
 }

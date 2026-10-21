@@ -27,8 +27,8 @@ async fn reserved_queued_and_running_tasks_share_one_capacity() {
     let reservation = handle.reserve().unwrap();
     assert_eq!(handle.used_capacity(), 1);
     assert_eq!(
-        handle.reserve().err().unwrap().kind(),
-        std::io::ErrorKind::WouldBlock
+        handle.reserve().err().unwrap(),
+        tok_service::task::SubmitError::CapacityExceeded
     );
     drop(reservation);
     let (done, completion) = oneshot::channel();
@@ -210,4 +210,60 @@ async fn shutdown_timeout_reclaims_owned_tasks_but_reports_retained_external_wor
     drop(external);
     handle.wait_finished().await;
     assert_eq!(handle.state(), State::Stopped);
+}
+
+#[tokio::test]
+async fn rejected_submissions_report_the_reason_and_release_capacity() {
+    use tok_service::task::SubmitError;
+    let scope = scope(1);
+    let handle = scope.handle();
+    for name in [" ".to_owned(), "中".repeat(86)] {
+        let error = handle
+            .launch(name, Box::pin(async { Ok(()) }))
+            .await
+            .unwrap_err();
+        assert_eq!(error, SubmitError::InvalidName);
+        assert_eq!(handle.used_capacity(), 0);
+    }
+    let reservation = handle.reserve().unwrap();
+    handle.request_stop();
+    assert_eq!(handle.reserve().err().unwrap(), SubmitError::Stopping);
+    assert_eq!(
+        reservation
+            .launch("late", Box::pin(async { Ok(()) }))
+            .await
+            .unwrap_err(),
+        SubmitError::Stopping
+    );
+    assert_eq!(handle.used_capacity(), 0);
+    scope.shutdown(Some(LIMIT)).await.unwrap();
+}
+
+#[tokio::test]
+async fn panicked_tasks_keep_their_names_and_do_not_consume_future_capacity() {
+    let mut scope = scope(2);
+    let handle = scope.handle();
+    for name in ["first", "second"] {
+        handle
+            .launch(name, Box::pin(async { panic!("test panic") }))
+            .await
+            .unwrap();
+    }
+    let mut names = Vec::new();
+    for _ in 0..2 {
+        let completion = tokio::time::timeout(LIMIT, scope.next()).await.unwrap();
+        assert!(matches!(completion.result, Err(Error::Join(error)) if error.is_panic()));
+        names.push(completion.name);
+    }
+    names.sort();
+    assert_eq!(names, ["first", "second"]);
+    assert_eq!(handle.used_capacity(), 0);
+    handle
+        .launch("healthy", Box::pin(async { Ok(()) }))
+        .await
+        .unwrap();
+    let completion = scope.next().await;
+    assert_eq!(completion.name, "healthy");
+    completion.result.unwrap();
+    scope.shutdown(Some(LIMIT)).await.unwrap();
 }

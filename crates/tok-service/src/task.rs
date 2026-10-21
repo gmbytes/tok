@@ -1,5 +1,5 @@
 //! 通用有界任务范围：提交、监督、取消与结束等待，不包含服务初始化或就绪。
-use std::{future::Future, pin::Pin};
+use std::{collections::HashMap, future::Future};
 use std::{
     sync::{
         Arc, Mutex,
@@ -9,7 +9,7 @@ use std::{
 };
 use tokio::{
     sync::{OwnedSemaphorePermit, Semaphore, mpsc, watch},
-    task::{JoinError, JoinSet},
+    task::{Id, JoinError, JoinSet},
 };
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, instrument::WithSubscriber};
@@ -17,7 +17,7 @@ use tracing::{Instrument, instrument::WithSubscriber};
 /// 保留任务原始错误，不依赖具体传输。
 pub type BoxError = Box<dyn std::error::Error + Send + Sync>;
 /// 受监督异步任务，取消后应协作清理资源。
-pub type Task = Pin<Box<dyn Future<Output = Result<(), BoxError>> + Send>>;
+pub type Task = tok_core::BoxFuture<'static, Result<(), BoxError>>;
 
 /// 通用任务范围状态；与服务初始化、就绪阶段无关。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -124,26 +124,41 @@ impl Handle {
         }
     }
     /// 预留待启动及执行中的共同容量；停止后拒绝预留。
-    pub fn reserve(&self) -> std::io::Result<Reservation> {
+    pub fn reserve(&self) -> Result<Reservation, SubmitError> {
         if self.cancellation.is_cancelled()
             || matches!(self.state(), State::Stopping | State::Stopped)
         {
-            return Err(std::io::Error::other("服务正在退出"));
+            return Err(SubmitError::Stopping);
         }
         let permit = Arc::clone(&self.capacity)
             .try_acquire_owned()
-            .map_err(|_| {
-                std::io::Error::new(std::io::ErrorKind::WouldBlock, "服务后台任务容量已满")
-            })?;
+            .map_err(|_| SubmitError::CapacityExceeded)?;
         Ok(Reservation {
             handle: self.clone(),
             permit,
         })
     }
     /// 提交有名称的受监督任务；满时立即失败，不启动任务。
-    pub async fn launch(&self, name: impl Into<String>, task: Task) -> std::io::Result<()> {
+    pub async fn launch(&self, name: impl Into<String>, task: Task) -> Result<(), SubmitError> {
         self.reserve()?.launch(name, task).await
     }
+}
+
+/// 任务容量预留或提交失败；不表示任务执行失败。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum SubmitError {
+    /// 任务范围已收到停止通知。
+    #[error("任务范围正在退出")]
+    Stopping,
+    /// 待提交、排队和执行中的任务已占满容量。
+    #[error("后台任务容量已满")]
+    CapacityExceeded,
+    /// 监督队列已关闭。
+    #[error("任务提交入口已关闭")]
+    Closed,
+    /// 名称全为空白或 UTF-8 编码超过 256 字节。
+    #[error("任务名称不能为空白，且不得超过 256 字节")]
+    InvalidName,
 }
 
 /// 已预留的后台任务名额；放弃提交时自动归还。
@@ -153,13 +168,10 @@ pub struct Reservation {
 }
 impl Reservation {
     /// 提交前重新检查停止状态；成功只表示进入监督队列。
-    pub async fn launch(self, name: impl Into<String>, task: Task) -> std::io::Result<()> {
+    pub async fn launch(self, name: impl Into<String>, task: Task) -> Result<(), SubmitError> {
         let name = name.into();
         if name.trim().is_empty() || name.len() > 256 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "任务名称为空或超出上限",
-            ));
+            return Err(SubmitError::InvalidName);
         }
         let submission = Submission {
             name,
@@ -169,8 +181,8 @@ impl Reservation {
         };
         tokio::select! {
             biased;
-            _ = self.handle.cancellation.cancelled() => Err(std::io::Error::other("服务正在退出")),
-            result = self.handle.launches.send(submission) => result.map_err(|_| std::io::Error::other("服务任务入口已关闭")),
+            _ = self.handle.cancellation.cancelled() => Err(SubmitError::Stopping),
+            result = self.handle.launches.send(submission) => result.map_err(|_| SubmitError::Closed),
         }
     }
 }
@@ -187,7 +199,7 @@ struct Submission {
 pub struct Completion {
     /// 组装方声明的任务名称。
     pub name: String,
-    /// 原任务错误或任务崩溃。
+    /// 原任务错误或任务异常结束。
     pub result: Result<(), Error>,
 }
 
@@ -202,9 +214,9 @@ pub enum Error {
         /// 原始任务错误。
         source: BoxError,
     },
-    /// 被监督任务崩溃。
+    /// 被监督任务异常结束，包括 panic 或调度取消。
     #[error("任务异常：{0}")]
-    Task(#[from] JoinError),
+    Join(#[from] JoinError),
     /// 协作退出期限耗尽，本监督者拥有的任务已中止；外部跟踪工作仍由其所有者回收。
     #[error("任务范围退出超时")]
     ShutdownTimeout,
@@ -218,13 +230,14 @@ pub struct Supervisor {
     handle: Handle,
     launches: mpsc::Receiver<Submission>,
     tasks: JoinSet<Completion>,
+    names: HashMap<Id, String>,
 }
 impl Supervisor {
     /// 创建有界任务范围；容量须为 1 至 65536，外部跟踪工作使用调用方自己的容量约束。
     pub fn new(max_tasks: usize, cancellation: CancellationToken) -> tok_core::Result<Self> {
         if max_tasks == 0 || max_tasks > 65_536 {
             return Err(tok_core::Error::InvalidConfig(
-                "服务后台任务容量须为 1 至 65536".into(),
+                "后台任务容量须为 1 至 65536".into(),
             ));
         }
         let (launches, receiver) = mpsc::channel(max_tasks);
@@ -243,6 +256,7 @@ impl Supervisor {
             },
             launches: receiver,
             tasks: JoinSet::new(),
+            names: HashMap::new(),
         })
     }
     /// 创建独立容量的子运行范围；父取消向子传播，父结束等待包含子范围的全部任务。
@@ -250,7 +264,7 @@ impl Supervisor {
     pub fn child(max_tasks: usize, parent: &Handle) -> tok_core::Result<Self> {
         let activity = ActivityGuard::new(&parent.scope);
         if parent.cancellation.is_cancelled() || parent.scope.owner_closed.load(Ordering::SeqCst) {
-            return Err(tok_core::Error::InvalidInput("父运行范围正在退出".into()));
+            return Err(tok_core::Error::InvalidInput("父任务范围正在退出".into()));
         }
         let child = Self::new(max_tasks, parent.cancellation.child_token())?;
         *child
@@ -266,7 +280,8 @@ impl Supervisor {
         self.handle.clone()
     }
     fn spawn(&mut self, submission: Submission) {
-        self.tasks.spawn(async move {
+        let name = submission.name.clone();
+        let task = self.tasks.spawn(async move {
             let Submission {
                 name,
                 task,
@@ -279,6 +294,26 @@ impl Supervisor {
             });
             Completion { name, result }
         });
+        self.names.insert(task.id(), name);
+    }
+    fn completion(&mut self, result: Result<(Id, Completion), JoinError>) -> Completion {
+        match result {
+            Ok((id, completion)) => {
+                self.names.remove(&id);
+                completion
+            }
+            Err(error) => {
+                // 所有 spawn 都登记名称；防御性回退仍保留 Tokio 任务 ID 便于定位。
+                let name = self
+                    .names
+                    .remove(&error.id())
+                    .unwrap_or_else(|| format!("task-{}", error.id()));
+                Completion {
+                    name,
+                    result: Err(Error::Join(error)),
+                }
+            }
+        }
     }
     /// 将外部调度器拥有的 future 纳入结束等待，不启动任务、不占后台名额。
     ///
@@ -297,9 +332,9 @@ impl Supervisor {
         loop {
             tokio::select! {
                 biased;
-                result = self.tasks.join_next(), if !self.tasks.is_empty() => {
+                result = self.tasks.join_next_with_id(), if !self.tasks.is_empty() => {
                     if let Some(result) = result {
-                        return result.unwrap_or_else(|error| Completion { name: "panicked-task".into(), result: Err(Error::Task(error)) });
+                        return self.completion(result);
                     }
                 }
                 submission = self.launches.recv(), if !self.launches.is_closed() || !self.launches.is_empty() => {
@@ -319,10 +354,8 @@ impl Supervisor {
     }
     async fn drain(&mut self) -> Result<(), Error> {
         let mut error = None;
-        while let Some(result) = self.tasks.join_next().await {
-            let result = result
-                .map_err(Error::Task)
-                .and_then(|completion| completion.result);
+        while let Some(result) = self.tasks.join_next_with_id().await {
+            let result = self.completion(result).result;
             if let Err(next) = result {
                 error.get_or_insert(next);
             }
@@ -333,6 +366,7 @@ impl Supervisor {
         self.launches.close();
         while self.launches.try_recv().is_ok() {}
         self.tasks.shutdown().await;
+        self.names.clear();
     }
     /// 消费任务范围并收束全部工作；成功返回时 wait_finished 已完成。
     ///

@@ -499,3 +499,10 @@ async fn ordered_borrowed_event_handlers_stop_on_the_first_business_error() {
     assert!(matches!(result, Err(Error::Inner(Rejected(31)))));
     assert_eq!(state.value, 3); // 前一处理者已完成，不回滚；后一处理者未执行。
 }
+
+#[test]
+fn execution_error_exposes_the_original_error_in_its_source_chain() {
+    let error = Error::Inner(Rejected(41));
+    let source = std::error::Error::source(&error).unwrap();
+    assert_eq!(source.downcast_ref::<Rejected>(), Some(&Rejected(41)));
+}

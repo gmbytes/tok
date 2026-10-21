@@ -154,7 +154,9 @@ impl Context {
     }
     fn validate_operation(operation: &str) -> Result<()> {
         if operation.trim().is_empty() || operation.len() > 256 {
-            return Err(Error::InvalidInput("执行操作名为空或超出上限".into()));
+            return Err(Error::InvalidInput(
+                "执行操作名不能为空白，且不得超过 256 字节".into(),
+            ));
         }
         Ok(())
     }

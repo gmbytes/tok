@@ -72,3 +72,9 @@ AGENTS.md 已记录有官方依据的 API 组织规则：功能命名空间公�
 release 示例构建通过；release 二进制对全部 8 份示例配置校验通过，RPC 与 TCP 客户端 smoke 通过。UTF-8/LF、仓库内 81 处 Markdown 链接及锚点、git diff 空白检查通过。CI 加入应用组合、Redis 请求锁及真实 NATS 专项；未在本地运行 Linux，不将 CI 配置视为已通过结果。
 
 P1–P7 方向校正完成本轮验收，P7 随本次提交交付。后续功能仍按明确边界另行设计，当前不提供吞吐或延迟压测结论。
+
+## tok-service API 与错误校正（2026-10-21）
+
+保留调用执行、task 与 lifecycle 的职责边界及公开功能命名空间；Request 与同步 handler 移入私有实现模块，根导出不变。InitTask 更名 InitFuture，复用 core::BoxFuture；task::Task 保留监督任务语义。任务预留和提交改用 SubmitError，区分容量不足、停止、入口关闭及名称非法；任务与服务错误的 Task 变体改名 Join。执行 Error::Inner 通过标准 source 暴露原始错误，任务 panic 时完成报告保留原名称；修正通用任务范围、初始化取消及 256 字节名称限制的中文文本。调用方与 rustdoc 指南同步迁移，不保留旧名称兼容别名。本轮不做 release 构建。
+
+本轮 Windows 验收：工作区常规测试（含 12 项指南示例、2 项编译失败文档测试）、全目标 Clippy（警告视为错误）和 workspace rustdoc（警告视为错误）通过；新增标准错误链、提交失败容量释放及多任务 panic 名称保留回归测试。真实 Redis/NATS 专项未运行；本轮随本次提交交付。

@@ -20,7 +20,7 @@ pub enum Error<E> {
     Stopped(#[from] StopReason),
     /// 内层 Service 就绪或处理失败，保留其具体错误类型。
     #[error("处理失败：{0}")]
-    Inner(E),
+    Inner(#[source] E),
 }
 
 /// 为任意类型化调用增加原期限、取消及追踪约束，不增加业务重试或后台队列。

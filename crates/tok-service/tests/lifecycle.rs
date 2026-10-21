@@ -9,7 +9,7 @@ use std::{
 };
 use tok_core::{Extensions, service::Identity};
 use tok_service::{
-    lifecycle::{Builder, Error, Factory, Init, InitTask, Phase},
+    lifecycle::{Builder, Error, Factory, Init, InitFuture, Phase},
     task::Task,
 };
 use tokio::sync::oneshot;
@@ -40,7 +40,7 @@ async fn initialization_is_separate_from_start_and_stop_waits_for_cleanup() {
     let (began, started) = oneshot::channel();
     let (finish, finished) = oneshot::channel();
     let signals = std::sync::Mutex::new(Some((began, finished)));
-    let factory: Arc<dyn Factory> = Arc::new(move |init: Init| -> InitTask {
+    let factory: Arc<dyn Factory> = Arc::new(move |init: Init| -> InitFuture {
         let (began, finished) = signals.lock().unwrap().take().unwrap();
         Box::pin(async move {
             Ok(Box::pin(async move {
@@ -83,7 +83,7 @@ async fn failed_timed_out_and_panicked_initialization_release_all_resources() {
         let handle = builder.handle();
         let count = Arc::new(AtomicUsize::new(0));
         let observed = Arc::clone(&count);
-        let factory: Arc<dyn Factory> = Arc::new(move |init: Init| -> InitTask {
+        let factory: Arc<dyn Factory> = Arc::new(move |init: Init| -> InitFuture {
             let released = Released(Arc::clone(&observed));
             Box::pin(async move {
                 init.service
@@ -114,7 +114,7 @@ async fn failed_timed_out_and_panicked_initialization_release_all_resources() {
             (mode, result),
             (0, Err(Error::Initialize(_)))
                 | (1, Err(Error::InitializationTimeout))
-                | (2, Err(Error::Task(_)))
+                | (2, Err(Error::Join(_)))
                 | (3, Err(Error::Cancelled))
         ));
         assert_eq!(count.load(Ordering::SeqCst), 1);
@@ -126,7 +126,7 @@ async fn failed_timed_out_and_panicked_initialization_release_all_resources() {
 #[tokio::test]
 async fn initialization_supervises_background_errors_before_ready() {
     let builder = builder(1);
-    let factory: Arc<dyn Factory> = Arc::new(|init: Init| -> InitTask {
+    let factory: Arc<dyn Factory> = Arc::new(|init: Init| -> InitFuture {
         Box::pin(async move {
             init.service
                 .tasks()
@@ -150,7 +150,7 @@ async fn abandoning_initialization_cancels_scope_and_drop_reclaims_tasks() {
     let handle = builder.handle();
     let (started, beginning) = oneshot::channel();
     let started = std::sync::Mutex::new(Some(started));
-    let factory: Arc<dyn Factory> = Arc::new(move |_context: Init| -> InitTask {
+    let factory: Arc<dyn Factory> = Arc::new(move |_context: Init| -> InitFuture {
         let started = started.lock().unwrap().take().unwrap();
         Box::pin(async move {
             started.send(()).unwrap();
@@ -174,7 +174,7 @@ async fn run_failure_and_early_exit_stop_background_tasks() {
         let handle = builder.handle();
         let count = Arc::new(AtomicUsize::new(0));
         let observed = Arc::clone(&count);
-        let factory: Arc<dyn Factory> = Arc::new(move |init: Init| -> InitTask {
+        let factory: Arc<dyn Factory> = Arc::new(move |init: Init| -> InitFuture {
             let guard = Released(Arc::clone(&observed));
             Box::pin(async move {
                 let stop = init.service.cancellation();
@@ -207,7 +207,7 @@ async fn run_failure_and_early_exit_stop_background_tasks() {
             (mode, result),
             (0, Err(Error::UnexpectedExit))
                 | (1, Err(Error::Run { .. }))
-                | (2, Err(Error::Task(_)))
+                | (2, Err(Error::Join(_)))
         ));
         handle.wait_finished().await;
         assert_eq!(count.load(Ordering::SeqCst), 1);
@@ -220,7 +220,7 @@ async fn shutdown_deadline_reclaims_uncooperative_main_and_background_futures() 
     let handle = builder.handle();
     let count = Arc::new(AtomicUsize::new(0));
     let observed = Arc::clone(&count);
-    let factory: Arc<dyn Factory> = Arc::new(move |init: Init| -> InitTask {
+    let factory: Arc<dyn Factory> = Arc::new(move |init: Init| -> InitFuture {
         let child = Released(Arc::clone(&observed));
         let main = Released(Arc::clone(&observed));
         Box::pin(async move {
@@ -265,7 +265,7 @@ async fn initialization_and_submitted_tasks_keep_the_callers_tracing_scope() {
         let span = tracing::info_span!("service_initialization");
         let expected = span.id();
         assert!(expected.is_some());
-        let factory: Arc<dyn Factory> = Arc::new(move |init: Init| -> InitTask {
+        let factory: Arc<dyn Factory> = Arc::new(move |init: Init| -> InitFuture {
             assert_eq!(tracing::Span::current().id(), expected);
             let expected = expected.clone();
             Box::pin(async move {
@@ -306,7 +306,7 @@ async fn dropping_prepared_service_releases_unstarted_main_before_finished() {
     let handle = builder.handle();
     let released = Arc::new(AtomicUsize::new(0));
     let observed = Arc::clone(&released);
-    let factory: Arc<dyn Factory> = Arc::new(move |_context: Init| -> InitTask {
+    let factory: Arc<dyn Factory> = Arc::new(move |_context: Init| -> InitFuture {
         let guard = Released(Arc::clone(&observed));
         Box::pin(async move {
             Ok(Box::pin(async move {
@@ -332,7 +332,7 @@ async fn service_completion_includes_component_cleanup_after_child_task_scope_en
     let (ended, child_ended) = oneshot::channel();
     let (finish, finished) = oneshot::channel();
     let signals = std::sync::Mutex::new(Some((ended, finished)));
-    let factory: Arc<dyn Factory> = Arc::new(move |init: Init| -> InitTask {
+    let factory: Arc<dyn Factory> = Arc::new(move |init: Init| -> InitFuture {
         let (ended, finished) = signals.lock().unwrap().take().unwrap();
         Box::pin(async move {
             let child = tok_service::task::Supervisor::child(1, &init.service.tasks())?;

@@ -9,7 +9,7 @@ use tok::{
     player::ownership::{Owner as SessionOwner, Store as OwnershipStore},
     rpc::RpcClients,
     service::{
-        lifecycle::{Factory, Init, InitTask},
+        lifecycle::{Factory, Init, InitFuture},
         task::Task,
     },
 };
@@ -70,7 +70,7 @@ impl PlayerIngressFactory {
     }
 }
 impl Factory for PlayerIngressFactory {
-    fn initialize(&self, init: Init) -> InitTask {
+    fn initialize(&self, init: Init) -> InitFuture {
         let config = self.config.clone();
         let ownership = Arc::clone(&self.ownership);
         let tokens = self.tokens.clone();

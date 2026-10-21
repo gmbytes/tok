@@ -4,5 +4,5 @@
 mod factory;
 mod service;
 
-pub use factory::{Factory, Init, InitTask};
+pub use factory::{Factory, Init, InitFuture};
 pub use service::{Builder, Error, Handle, Phase, Prepared, Running};

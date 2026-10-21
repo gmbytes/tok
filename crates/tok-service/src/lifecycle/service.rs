@@ -69,7 +69,7 @@ pub enum Error {
     #[error("初始化超时")]
     InitializationTimeout,
     /// 初始化期间收到停止通知。
-    #[error("服务已取消")]
+    #[error("服务初始化已取消")]
     Cancelled,
     /// 主任务或后台任务失败。
     #[error("任务 {name} 失败：{source}")]
@@ -79,9 +79,9 @@ pub enum Error {
         /// 原始任务错误。
         source: BoxError,
     },
-    /// 初始化或任务崩溃。
+    /// 初始化或任务异常结束，包括 panic 或调度取消。
     #[error("服务任务异常：{0}")]
-    Task(#[from] JoinError),
+    Join(#[from] JoinError),
     /// 主任务在停止通知前结束。
     #[error("服务主任务在停止通知前结束")]
     UnexpectedExit,
@@ -93,7 +93,7 @@ impl From<task::Error> for Error {
     fn from(error: task::Error) -> Self {
         match error {
             task::Error::Run { name, source } => Self::Run { name, source },
-            task::Error::Task(error) => Self::Task(error),
+            task::Error::Join(error) => Self::Join(error),
             task::Error::ShutdownTimeout => Self::ShutdownTimeout,
         }
     }
@@ -176,7 +176,7 @@ impl Builder {
                 result = starting.join_next() => break match result {
                     Some(Ok(Ok(task))) => Ok(task),
                     Some(Ok(Err(error))) => Err(Error::Initialize(error)),
-                    Some(Err(error)) => Err(Error::Task(error)),
+                    Some(Err(error)) => Err(Error::Join(error)),
                     None => Err(Error::UnexpectedExit),
                 },
             }
@@ -267,7 +267,7 @@ impl Running {
                 completion = supervisor.next() => { if let Err(error) = completion.result { break Err(error.into()); } }
                 result = main.join_next() => break match result {
                     Some(Ok(Err(source))) => Err(Error::Run { name: "main".into(), source }),
-                    Some(Err(error)) => Err(Error::Task(error)),
+                    Some(Err(error)) => Err(Error::Join(error)),
                     _ => Err(Error::UnexpectedExit),
                 },
             }
@@ -276,7 +276,7 @@ impl Running {
         let cleanup = async {
             let mut error = None;
             while let Some(result) = main.join_next().await {
-                if let Err(next) = result.map_err(Error::Task).and_then(|r| {
+                if let Err(next) = result.map_err(Error::Join).and_then(|r| {
                     r.map_err(|source| Error::Run {
                         name: "main".into(),
                         source,

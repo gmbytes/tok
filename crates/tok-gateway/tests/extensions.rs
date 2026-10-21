@@ -32,7 +32,7 @@ use tok_player::{
 };
 use tok_service::{
     Request,
-    lifecycle::{Builder, Init, InitTask},
+    lifecycle::{Builder, Init, InitFuture},
     task::Task,
 };
 use tokio::{
@@ -372,7 +372,7 @@ impl Fixture {
         )
         .unwrap();
         let service = builder.handle();
-        let factory = move |init: Init| -> InitTask {
+        let factory = move |init: Init| -> InitFuture {
             let counts = Arc::clone(&captured);
             let sender = Arc::clone(&sender);
             let gate = gate.clone();

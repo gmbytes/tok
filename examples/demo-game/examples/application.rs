@@ -23,7 +23,7 @@ use tok::{
     },
     service::{
         Context, Request, Source,
-        lifecycle::{Init, InitTask},
+        lifecycle::{Init, InitFuture},
         sync_handler,
         task::{BoxError, Task},
     },
@@ -81,7 +81,7 @@ async fn main() -> Result<(), BoxError> {
     let (processed, mut progress) = watch::channel(0usize);
     app.register_factory("audit", {
         let count = count.clone();
-        move |init: Init| -> InitTask {
+        move |init: Init| -> InitFuture {
             let receiver = Arc::clone(&receiver); let processed = processed.clone(); let count = count.clone();
             Box::pin(async move {
                 let mut receiver = receiver.lock().map_err(|_| std::io::Error::other("事件入口锁不可用"))?
@@ -111,7 +111,7 @@ async fn main() -> Result<(), BoxError> {
         "guild",
         {
             let count = count.clone();
-            move |init: Init| -> InitTask {
+            move |init: Init| -> InitFuture {
                 let events = events.clone();
                 let count = count.clone();
                 Box::pin(async move {
