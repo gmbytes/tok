@@ -7,6 +7,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+lru.workspace = true
 tok-execution.workspace = true
 tok-core.workspace = true
 tonic.workspace = true

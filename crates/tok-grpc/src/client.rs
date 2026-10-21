@@ -6,10 +6,10 @@ mod call;
 mod middleware;
 mod sender;
 pub use call::{Call, PreparedCall};
+use lru::LruCache;
 pub use middleware::{Layer, ResponseFuture, Service};
-use std::future::Future;
+use std::{future::Future, num::NonZeroUsize};
 use std::{
-    collections::BTreeMap,
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -26,26 +26,28 @@ type EndpointFactory = dyn Fn(&ServiceDescriptor) -> Result<Endpoint, crate::Err
 ///
 /// 克隆共享缓存和端点工厂；缓存键包含节点和地址，共享端点的服务复用同一 Channel。
 /// 节点变更时可显式 invalidate；缓存满时
-/// 清除一个旧键，已有 Channel 克隆仍可完成在途请求。默认使用明文内部 gRPC，可通过端点工厂定制传输。
+/// 按 LRU 淘汰最久未访问的连接，已有 Channel 克隆仍可完成在途请求。默认使用明文内部 gRPC，可通过端点工厂定制传输。
 #[derive(Clone)]
 pub struct Client {
     shared: Arc<Shared>,
 }
 struct Shared {
     timeout: Duration,
-    capacity: usize,
+    capacity: NonZeroUsize,
     endpoint_factory: Box<EndpointFactory>,
-    channels: Mutex<BTreeMap<(String, std::net::SocketAddr), Channel>>,
+    channels: Mutex<LruCache<(String, std::net::SocketAddr), Channel>>,
 }
 
 impl Client {
     /// 设置连接及协议适配器使用的调用期限和缓存容量，期限须大于零且不超过一天，容量须大于零。
     pub fn new(timeout: Duration, capacity: usize) -> Result<Self, crate::Error> {
-        if timeout.is_zero() || timeout > Duration::from_secs(86_400) || capacity == 0 {
+        let Some(capacity) = NonZeroUsize::new(capacity)
+            .filter(|_| !timeout.is_zero() && timeout <= Duration::from_secs(86_400))
+        else {
             return Err(crate::Error::Configuration(
                 "RPC 期限须大于零且不超过一天，连接缓存容量须大于零".into(),
             ));
-        }
+        };
         Ok(Self {
             shared: Arc::new(Shared {
                 timeout,
@@ -54,7 +56,7 @@ impl Client {
                     Ok(Endpoint::from_shared(format!("http://{}", target.address))?
                         .connect_timeout(timeout))
                 }),
-                channels: Mutex::new(BTreeMap::new()),
+                channels: Mutex::new(LruCache::sparse(capacity)),
             }),
         })
     }
@@ -74,7 +76,7 @@ impl Client {
             timeout: self.shared.timeout,
             capacity: self.shared.capacity,
             endpoint_factory: Box::new(factory),
-            channels: Mutex::new(BTreeMap::new()),
+            channels: Mutex::new(LruCache::sparse(self.shared.capacity)),
         });
         self
     }
@@ -111,20 +113,25 @@ impl Client {
         if let Some(channel) = channels.get(&key) {
             return Ok(channel.clone());
         }
-        if channels.len() >= self.shared.capacity {
-            channels.pop_first();
-        }
-        channels.insert(key, channel.clone());
+        drop(channels.put(key, channel.clone()));
         Ok(channel)
     }
 
     /// 节点移除或端点变化时撤销缓存，在途 Channel 克隆仍可完成调用。
     pub fn invalidate(&self, node_id: &str) -> Result<(), Status> {
-        self.shared
+        let mut channels = self
+            .shared
             .channels
             .lock()
-            .map_err(|_| Status::internal("连接缓存锁不可用"))?
-            .retain(|(node, _), _| node != node_id);
+            .map_err(|_| Status::internal("连接缓存锁不可用"))?;
+        let keys: Vec<_> = channels
+            .iter()
+            .filter(|((node, _), _)| node == node_id)
+            .map(|(key, _)| key.clone())
+            .collect();
+        for key in keys {
+            drop(channels.pop(&key));
+        }
         Ok(())
     }
 

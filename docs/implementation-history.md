@@ -720,3 +720,15 @@ gRPC 移除重复的取消、期限与就绪循环，保留协议准备及 Statu
 新增四项测试覆盖就绪停止、锁执行上限与释放、错误组合，以及四类失败日志的 span 关联。
 
 本轮 Windows 验收：全工作区串行测试 330 项通过、32 项外部专项默认跳过，包含 21 项指南示例；全目标 Clippy、无警告 workspace rustdoc、execution / dispatch / rpc / client 四个 smoke、格式与空白检查通过。222 个文本文件 UTF-8/LF、119 处相对文档路径检查通过。未运行真实 Redis/NATS、Linux 或 release 构建。
+
+
+## 连接缓存淘汰与处理链克隆修复（2026-10-21）
+
+连接缓存采用 lru 库并关闭默认 hashbrown feature，按需分配容量，命中刷新访问顺序，
+容量满时淘汰最久未访问的 Channel，避免排序靠后的冷节点常驻、热节点交替访问反复重建连接。
+Client 克隆共享缓存与访问顺序，invalidate 移除节点全部地址，保留其他节点的访问顺序和在途连接。
+
+注册 Handler 每次调用仅克隆一次 Service，直接交给 Call::new，不再经过额外 Layer 克隆。
+三项新回归验证冷热节点淘汰、多地址失效及处理链克隆次数；原执行、错误和协议边界测试保持通过。
+
+本轮 Windows 验收：全工作区串行测试 333 项通过、32 项外部专项默认跳过，包含 21 项指南示例；全目标 Clippy、无警告 workspace rustdoc、格式及空白检查通过。222 个文本文件 UTF-8/LF、119 处相对文档路径检查通过。未运行真实 Redis/NATS、Linux 或 release 构建。

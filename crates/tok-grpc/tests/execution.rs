@@ -761,3 +761,82 @@ async fn upstream_stop_prevents_preparation_and_interrupts_inner_readiness() {
     assert_eq!(result.unwrap_err().code(), Code::Cancelled);
     assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
 }
+
+#[tokio::test]
+async fn channel_cache_evicts_cold_keys_and_refreshes_recency_across_client_clones() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    let builds = Arc::new(AtomicUsize::new(0));
+    let observed = Arc::clone(&builds);
+    let client = Client::new(Duration::from_secs(1), 2)
+        .unwrap()
+        .with_endpoint_factory(move |target| {
+            observed.fetch_add(1, Ordering::SeqCst);
+            Ok(tonic::transport::Endpoint::from_shared(format!(
+                "http://{}",
+                target.address
+            ))?)
+        });
+    let target = |node: &str| ServiceDescriptor {
+        node_id: node.into(),
+        ..target()
+    };
+    let shared = client.clone();
+    for node in ["z", "a", "b"] {
+        drop(client.channel(&target(node)).unwrap());
+    }
+    for _ in 0..10 {
+        drop(client.channel(&target("a")).unwrap());
+        drop(shared.channel(&target("b")).unwrap());
+    }
+    assert_eq!(builds.load(Ordering::SeqCst), 3);
+    drop(client.channel(&target("z")).unwrap());
+    assert_eq!(builds.load(Ordering::SeqCst), 4);
+    // a 比 b 更久未访问，所以插入 z 后 b 仍命中。
+    drop(shared.channel(&target("b")).unwrap());
+    assert_eq!(builds.load(Ordering::SeqCst), 4);
+    drop(client.channel(&target("a")).unwrap());
+    assert_eq!(builds.load(Ordering::SeqCst), 5);
+}
+
+#[tokio::test]
+async fn channel_invalidation_removes_all_node_addresses_without_dropping_other_nodes() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    let builds = Arc::new(AtomicUsize::new(0));
+    let observed = Arc::clone(&builds);
+    let client = Client::new(Duration::from_secs(1), 3)
+        .unwrap()
+        .with_endpoint_factory(move |target| {
+            observed.fetch_add(1, Ordering::SeqCst);
+            Ok(tonic::transport::Endpoint::from_shared(format!(
+                "http://{}",
+                target.address
+            ))?)
+        });
+    let first = target();
+    let second = ServiceDescriptor {
+        address: "127.0.0.1:12346".parse().unwrap(),
+        ..first.clone()
+    };
+    let other = ServiceDescriptor {
+        node_id: "other".into(),
+        ..first.clone()
+    };
+    for target in [&first, &second, &other] {
+        drop(client.channel(target).unwrap());
+    }
+    let shared = client.clone();
+    shared.invalidate(&first.node_id).unwrap();
+    drop(client.channel(&other).unwrap());
+    assert_eq!(builds.load(Ordering::SeqCst), 3);
+    drop(client.channel(&first).unwrap());
+    drop(shared.channel(&second).unwrap());
+    assert_eq!(builds.load(Ordering::SeqCst), 5);
+    drop(client.channel(&other).unwrap());
+    assert_eq!(builds.load(Ordering::SeqCst), 5);
+}

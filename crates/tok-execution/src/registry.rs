@@ -52,10 +52,7 @@ impl<T: Send + 'static, R: Send + 'static, E: Send + 'static> Handler<T, R, E> {
         S::Future: Send + 'static,
     {
         Self {
-            call: Arc::new(move |request| {
-                let service = service.clone();
-                Box::pin(async move { crate::Layer.layer(service).oneshot(request).await })
-            }),
+            call: Arc::new(move |request| Box::pin(crate::Call::new(service.clone(), request))),
         }
     }
     /// 执行此链；不会重建上下文或放大预算。

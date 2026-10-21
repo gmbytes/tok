@@ -462,7 +462,7 @@ assert_eq!(Value::decode(result.output.message.body.as_slice())?.value, 42);
 # }
 ```
 
-`registry::Handler` 擦除具体 Service 类型，并保护就绪等待与执行。自定义派发须接续 Request / Response、原期限、取消和追踪；`registry::Service::new(Arc<G>, key)` 同时保护取键与整个自定义派发过程，允许 G 为 dyn Registry。注册错误保留实现自己的类型，不能通过包装静默放大预算或自动重试。
+`registry::Handler` 擦除具体 Service 类型，每次调用仅克隆一次 Service，并通过 Call::new 保护就绪等待与执行。自定义派发须接续 Request / Response、原期限、取消和追踪；`registry::Service::new(Arc<G>, key)` 同时保护取键与整个自定义派发过程，允许 G 为 dyn Registry。注册错误保留实现自己的类型，不能通过包装静默放大预算或自动重试。
 
 protobuf::Registry / message::Registry 的最后一个泛型参数 G 是底层 Registry，默认值仍使用静态 Table；from_registry 注入自有实现，from_shared_registry 接受共享实现或 trait 对象。调用时不要求 G 可克隆；通过这两个适配器注册新路由时要求 G: Clone，以便在共享状态下明确按实现的克隆语义更新。普通业务 RPC 的 business::Handler 和玩家 HandlerRegistry 同样支持自定义底层注册器；自定义构造使用 business::Handler::from_registry 或 HandlerRegistry::from_registry / from_shared_registry，并显式注入 G::DispatchError 到 Status 的映射；默认 new 保留默认表的映射。timer 和服务器事件继续走各自隔离入口。
 
@@ -759,7 +759,7 @@ from_server 接受包含 Tower Layer 的 Tonic Server，监听级 Layer 包住�
 
 [`grpc::Server`] 是逻辑服务的调用执行入口；[`grpc::Listener`] 负责网络监听和 protobuf 服务绑定。
 [`grpc::Readiness::set`] 返回是否命中已绑定的服务名，直接指定服务时应检查结果；Application 遍历多个端点时允许未命中。
-Channel 缓存有界，节点和地址相同的服务复用连接；节点变更时调用 `invalidate` 撤销该节点缓存。
+Channel 缓存有界，按 LRU 淘汰最久未访问的连接；命中会刷新访问顺序，Client 克隆共享同一访问顺序与容量。节点和地址相同的服务复用连接；节点变更时调用 `invalidate` 撤销该节点全部地址的缓存，其他节点的访问顺序保持不变。淘汰或撤销只移除缓存持有的 Channel，已有克隆仍可完成在途调用。
 请求携带 [`message::rpc::CallContext`]，player 调用还需匹配的 [`player::SessionIdentity`]。
 上下文校验检查目标和字段一致性，不能代替内部调用身份认证或全局 session 所有权校验。
 

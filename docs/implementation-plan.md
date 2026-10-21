@@ -540,3 +540,17 @@ Call::new 消费单次 Service 并支持借用，不要求 Clone；execution::La
 迟到就绪不调用业务，执行上限失败仍释放租约；原调用取消/丢弃的未完成释放继续由有限 TTL 兜底。
 
 本轮 Windows 验收：全工作区串行测试 330 项通过、32 项外部专项默认跳过，包含 21 项指南示例；全目标 Clippy、无警告 workspace rustdoc、execution / dispatch / rpc / client 四个 smoke、格式与空白检查通过。222 个文本文件 UTF-8/LF、119 处相对文档路径检查通过。未运行真实 Redis/NATS、Linux 或 release 构建。
+
+
+### 热连接缓存与处理链克隆校正（2026-10-21）
+
+gRPC Channel 缓存改为 LRU，命中刷新访问顺序，容量满时淘汰最久未访问的条目，
+避免节点键排序造成冷连接驻留与热连接反复重建。Client 克隆共享缓存与访问顺序；
+invalidate 移除指定节点的全部地址，不改变其他节点的访问顺序，工厂替换仍创建独立空缓存。
+采用 lru 库并关闭默认 hashbrown feature，按需分配缓存；新增依赖已锁定。
+
+registry::Handler 每次调用克隆一次 Service 后直接交给 Call::new，不再经过额外 Layer 克隆；
+共同期限、取消、就绪及追踪保护保持不变。新增回归覆盖冷热节点淘汰、跨克隆访问更新、
+多地址节点失效及每次处理调用的克隆次数。
+
+本轮 Windows 验收：全工作区串行测试 333 项通过、32 项外部专项默认跳过，包含 21 项指南示例；全目标 Clippy、无警告 workspace rustdoc、格式及空白检查通过。222 个文本文件 UTF-8/LF、119 处相对文档路径检查通过。未运行真实 Redis/NATS、Linux 或 release 构建。

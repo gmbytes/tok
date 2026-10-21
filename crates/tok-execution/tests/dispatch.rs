@@ -309,3 +309,41 @@ async fn slow_key_selection_cannot_dispatch_or_return_a_late_unknown_result() {
     }
     assert_eq!(calls.load(Ordering::SeqCst), 0);
 }
+
+struct CloneProbe(Arc<AtomicUsize>);
+impl Clone for CloneProbe {
+    fn clone(&self) -> Self {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        Self(Arc::clone(&self.0))
+    }
+}
+impl tower::Service<Request<()>> for CloneProbe {
+    type Response = Response<()>;
+    type Error = std::convert::Infallible;
+    type Future = std::future::Ready<Result<Response<()>, Self::Error>>;
+    fn poll_ready(
+        &mut self,
+        _: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), Self::Error>> {
+        std::task::Poll::Ready(Ok(()))
+    }
+    fn call(&mut self, _: Request<()>) -> Self::Future {
+        std::future::ready(Ok(Response::new(())))
+    }
+}
+#[tokio::test]
+async fn erased_handler_clones_its_service_once_per_call() {
+    let clones = Arc::new(AtomicUsize::new(0));
+    let handler = tok_execution::registry::Handler::new(CloneProbe(Arc::clone(&clones)));
+    assert_eq!(clones.load(Ordering::SeqCst), 0);
+    for expected in 1..=2 {
+        handler
+            .call(Request::new(
+                context(Duration::from_secs(1), CancellationToken::new()),
+                (),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(clones.load(Ordering::SeqCst), expected);
+    }
+}

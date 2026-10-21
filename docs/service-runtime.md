@@ -454,3 +454,5 @@ execution::Call::new 统一驱动单次 Service，不要求 Clone；Layer 克隆
 gRPC 客户端只负责准备 Channel / metadata、收紧预算、协议映射和观察，复用共同驱动；
 失败日志显式关联执行 span。通用请求锁同样使用共同执行结果，Stopped 只在 execution::Error 外层表达，
 锁自身获取、租期余量、持锁执行和释放期限仍使用 lock::Error 的具体变体。
+
+Channel 缓存以节点与地址为键，采用 LRU 并在命中时更新访问顺序；Client 克隆共享此顺序，invalidate 移除指定节点的全部地址，工厂替换则建立独立空缓存。注册 Handler 每次调用克隆一次内层 Service，并交给共同 Call 驱动执行。

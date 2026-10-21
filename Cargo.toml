@@ -9,6 +9,7 @@ rust-version = "1.99"
 license = "Apache-2.0"
 
 [workspace.dependencies]
+lru = { version = "0.18.5", default-features = false }
 async-nats = { version = "0.50.0", default-features = false, features = ["ring", "nuid"] }
 futures-util = { version = "0.3", default-features = false, features = ["std", "async-await"] }
 tok-core = { path = "crates/tok-core", version = "0.1.0" }
