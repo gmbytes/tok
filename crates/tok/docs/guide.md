@@ -166,7 +166,7 @@ Context 不固定调用来源。入口适配器通过 Extensions 提供自己的
 
 事件 Registry 派生子上下文，使用当前事件的 ID / topic 覆盖继承值，不改变父上下文；本地派生事件清除继承的原始编码消息。其余适用扩展由注册表显式克隆到派生 Request，因此 RPC 关联信息与事件头可以共存。这些值用于中间件观察，不构成认证或分发权限；请求、事件和 timer 仍由各自协议入口及分发表隔离。
 
-ExecutionLayer 将内层就绪与执行放入同一预算，执行前后检查取消和截止点，丢弃 future 会停止本地等待，不回滚副作用。
+execution::Layer 将内层就绪与执行放入同一预算，就绪成功后、调用业务前及接受结果前检查取消和截止点，丢弃 future 会停止本地等待，不回滚副作用。
 外层 poll_ready 立即就绪，内层 readiness 在调用 future 内等待；它不承诺内层立即可执行。
 调用会克隆内层 Service，共享限流状态应由对应 Layer 共享。需要预算保护的 readiness 等待应放在 ExecutionLayer 内侧。
 
@@ -363,6 +363,10 @@ execution 根公开 Context、Request、Response、Error、Result 和 Layer。�
 RegistrationError 分别表达处理链错误、注册器自身派发错误与组装错误，不在 DispatchError 中重复定义 Stopped。
 协议、锁和事件的专门错误仍可在明确边界映射执行结果；这不要求第三方 Service 或后端全部采用同一枚举。
 
+单次或不可克隆的 Service 可直接使用 [`execution::Call::new`](execution::Call::new)，消费 Service 和 Request，
+保留借用输入，并与 Layer 共用就绪、期限、取消和追踪驱动。就绪检查期间耗尽期限或取消时，不再调用业务；
+本地检查不构成远端副作用回滚，也不消除检查之后的线程暂停窗口。gRPC 客户端使用同一驱动，在边界映射为 Status。
+
 ## 按自定义键分发处理链
 
 [`execution::Registry`] 是注册与派发 trait，[`execution::Table`] 是基于 BTreeMap 的默认静态实现；不规定消息编码方式。
@@ -530,7 +534,7 @@ let rpc = message::rpc::Service::new("local", "custom", Arc::new(adapter))?;
 业务中间件通过 register_service 安装，本地与 RPC 调用共用该链。普通业务 RPC 适配要求 u32 消息 ID，拒绝零请求消息 ID 和零回应消息 ID；message::Registry 在注册时校验请求/回应 ID 非零，RPC HandlerRegistry 复用该表，通用分发表和 protobuf 适配本身不施加该规则。
 示例公会的 guild::handlers 返回 message::Registry 及消息注册错误，业务错误保留其自身类型；RPC 组装只负责提取目标、映射错误并安装请求锁。运行 `just dispatch-smoke` 验证直接本地调用，`just rpc-smoke client-smoke` 验证同一业务链在真实 RPC/TCP 中的使用。
 
-当前 message::rpc::HandlerRegistry 的普通请求表已委托执行库分发；timer、事件及其玩家附加结果仍由游戏协议层组合。通知归属仍待校正；通用请求锁已迁入 execution::lock，RPC 仅保留协议策略与映射。
+当前 message::rpc::HandlerRegistry 的普通请求表已委托执行库分发；timer、事件及其玩家附加结果仍由游戏协议层组合。通知归属仍待校正；通用请求锁已迁入 execution::lock，RPC 仅保留协议策略与映射。通用锁返回 `execution::Error<execution::lock::Error<E>>`，原调用停止统一位于外层；锁自身获取、执行与释放上限属于内层具体错误。
 
 ## 执行上下文的承载与边界
 
@@ -698,6 +702,8 @@ let response = chain.oneshot(Request::new(context, grpc::client::Call {
 [`grpc::Client::execute_service`] 便捷方法接收内层 `Service<execution::Request<PreparedCall<Req>>, Response = execution::Response<tonic::Response<Res>>, Error = Status>`，接收 `Request<tonic::Request<Req>>`，消费该 Service 后返回 `execution::Response<Res>`，保留输出扩展，不要求 Service 克隆；execute 使用相同请求承载，保留 FnOnce 发送回调。两者从 Context 取得期限、取消与 Span，不另外传入 Span。二者复用同一客户端 Layer 执行实现，准备阶段失败也计入其调用指标。已有协议客户端不自动安装用户出站链。框架不主动重试，中间件自行重试时须承担幂等与剩余预算约束；丢弃 Future 不回滚远端副作用。
 
 通用 gRPC 调用不要求 request_id；业务协议自行保存请求关联字段，需要本地诊断信息时可使用 Request 扩展或关联 span，传输层不自动将扩展写入 metadata。
+
+客户端准备失败、发送失败、取消与超时的观察日志显式关联 Request.context.span，不要求调用方把整个客户端 Future 再放入该 span。
 
 ### 服务端类型化处理链
 

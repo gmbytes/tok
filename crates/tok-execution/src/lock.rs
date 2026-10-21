@@ -2,8 +2,9 @@
 //!
 //! 调用方显式提供取键函数及回应成功判断；中间件不理解 RPC、玩家或消息编码。
 //! 获取、就绪等待、执行和释放受原 Request 上下文约束，不续租、不重试。
+//! 返回 `execution::Error<lock::Error<E>>`；原调用停止统一位于外层 Stopped。
 //! 外层取消或丢弃 future 后，未完成的获取和释放依靠后端有限 TTL 兜底。
-use crate::{Request, StopReason};
+use crate::Request;
 use std::{
     sync::Arc,
     task::{Context, Poll},
@@ -43,9 +44,6 @@ pub enum Error<E> {
     /// 条件释放超时，结果可能不确定。
     #[error("请求锁条件释放超时")]
     ReleaseTimeout,
-    /// 原调用已取消或整体预算耗尽。
-    #[error(transparent)]
-    Stopped(#[from] StopReason),
 }
 
 /// 一次请求的获取、执行和释放预算；以获取开始时刻保守计算租约有效期。
@@ -173,7 +171,7 @@ where
     P: Fn(&S::Response) -> bool + Send + Sync + 'static,
 {
     type Response = S::Response;
-    type Error = Error<S::Error>;
+    type Error = crate::Error<Error<S::Error>>;
     type Future = BoxFuture<'static, Result<S::Response, Self::Error>>;
     fn poll_ready(&mut self, _: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         Poll::Ready(Ok(()))
@@ -189,10 +187,7 @@ where
             execution
                 .oneshot(request)
                 .await
-                .map_err(|error| match error {
-                    crate::Error::Stopped(reason) => Error::Stopped(reason),
-                    crate::Error::Inner(error) => error,
-                })
+                .map_err(crate::Error::flatten)
         })
     }
 }
@@ -200,13 +195,13 @@ async fn run<S, T, K, P>(
     inner: S,
     layer: Layer<K, P>,
     request: Request<T>,
-) -> Result<S::Response, Error<S::Error>>
+) -> crate::Result<S::Response, Error<S::Error>>
 where
     S: tower::Service<Request<T>>,
     K: Fn(&Request<T>) -> Result<Key, S::Error>,
     P: Fn(&S::Response) -> bool,
 {
-    let key = (layer.key)(&request).map_err(Error::Key)?;
+    let key = (layer.key)(&request).map_err(|error| crate::Error::Inner(Error::Key(error)))?;
     request.context.check()?;
     let namespace = key.namespace.clone();
     let config = &layer.config;
@@ -216,26 +211,28 @@ where
         layer.backend.acquire(key, config.wait, config.ttl),
     )
     .await
-    .map_err(|_| Error::AcquireTimeout)?
-    .map_err(Error::Acquire)?;
+    .map_err(|_| crate::Error::Inner(Error::AcquireTimeout))?
+    .map_err(|error| crate::Error::Inner(Error::Acquire(error)))?;
     let elapsed = started.elapsed();
     let remaining = config.ttl.saturating_sub(elapsed);
     let result = if elapsed >= config.acquire_timeout {
-        Err(Error::AcquireTimeout)
+        Err(crate::Error::Inner(Error::AcquireTimeout))
     } else if remaining <= config.execution_timeout + config.release_timeout {
-        Err(Error::InsufficientLease)
+        Err(crate::Error::Inner(Error::InsufficientLease))
     } else if let Err(reason) = request.context.check() {
-        Err(Error::Stopped(reason))
+        Err(crate::Error::Stopped(reason))
     } else {
         let execution_started = Instant::now();
-        let result = timeout(config.execution_timeout, inner.oneshot(request)).await;
+        let mut request = request;
+        request.context = request.context.with_budget_limit(config.execution_timeout);
+        let result = timeout(config.execution_timeout, crate::Call::new(inner, request)).await;
         // timeout 无法抢占单次 poll 内的阻塞代码，接受结果前仍检查实际耗时。
         if execution_started.elapsed() >= config.execution_timeout {
-            Err(Error::ExecutionTimeout)
+            Err(crate::Error::Inner(Error::ExecutionTimeout))
         } else {
             match result {
-                Ok(result) => result.map_err(Error::Inner),
-                Err(_) => Err(Error::ExecutionTimeout),
+                Ok(result) => result.map_err(|error| error.map_inner(Error::Inner)),
+                Err(_) => Err(crate::Error::Inner(Error::ExecutionTimeout)),
             }
         }
     };
@@ -256,7 +253,7 @@ where
             .as_ref()
             .is_ok_and(|response| (layer.success)(response))
         {
-            return Err(error);
+            return Err(crate::Error::Inner(error));
         }
     }
     result

@@ -7,10 +7,9 @@ use std::{
 };
 use tokio::time::Timeout;
 use tokio_util::sync::WaitForCancellationFutureOwned;
-use tower::{ServiceExt, util::Oneshot};
 use tracing::{Instrument, instrument::Instrumented};
 
-type Work<S, T> = Instrumented<Timeout<Oneshot<S, Request<T>>>>;
+type Work<S, T> = Instrumented<Timeout<Dispatch<S, T>>>;
 
 /// 共同执行结果；T 是完整成功值，E 是具体处理错误，不隐含 Response 包装。
 pub type Result<T, E> = std::result::Result<T, Error<E>>;
@@ -80,20 +79,7 @@ where
         Poll::Ready(Ok(()))
     }
     fn call(&mut self, request: Request<T>) -> Self::Future {
-        let context = request.context.clone();
-        let cancellation = Box::pin(context.cancellation().cancelled_owned());
-        let work = Box::pin(
-            tokio::time::timeout_at(
-                tokio::time::Instant::from_std(context.deadline()),
-                self.inner.clone().oneshot(request),
-            )
-            .instrument(context.span().clone()),
-        );
-        Call {
-            context,
-            work,
-            cancellation,
-        }
+        Call::new(self.inner.clone(), request)
     }
 }
 
@@ -108,6 +94,29 @@ where
     context: ExecutionContext,
     work: Pin<Box<Work<S, T>>>,
     cancellation: Pin<Box<WaitForCancellationFutureOwned>>,
+}
+impl<S, T> Call<S, T>
+where
+    S: tower::Service<Request<T>>,
+{
+    /// 消费单次 Service，统一保护就绪等待、调用及结果接受；不要求 Service 可克隆。
+    /// 请求与 Future 可以借用本地数据，不创建任务，不重新分配预算。
+    pub fn new(service: S, request: Request<T>) -> Self {
+        let context = request.context.clone();
+        let cancellation = Box::pin(context.cancellation().cancelled_owned());
+        let work = Box::pin(
+            tokio::time::timeout_at(
+                tokio::time::Instant::from_std(context.deadline()),
+                Dispatch::new(service, request),
+            )
+            .instrument(context.span().clone()),
+        );
+        Self {
+            context,
+            work,
+            cancellation,
+        }
+    }
 }
 impl<S, T> Future for Call<S, T>
 where
@@ -130,10 +139,52 @@ where
                     return Poll::Ready(Err(reason.into()));
                 }
                 Poll::Ready(match result {
-                    Ok(result) => result.map_err(Error::Inner),
+                    Ok(result) => result,
                     Err(_) => Err(StopReason::DeadlineExceeded.into()),
                 })
             }
+        }
+    }
+}
+
+// 在就绪与实际调用之间复查范围，避免迟到就绪或就绪期间取消仍触发业务副作用。
+struct Dispatch<S: tower::Service<Request<T>>, T> {
+    ready: Option<Box<(S, Request<T>)>>,
+    running: Option<Pin<Box<S::Future>>>,
+}
+impl<S: tower::Service<Request<T>>, T> Dispatch<S, T> {
+    fn new(service: S, request: Request<T>) -> Self {
+        Self {
+            ready: Some(Box::new((service, request))),
+            running: None,
+        }
+    }
+}
+impl<S: tower::Service<Request<T>>, T> Future for Dispatch<S, T> {
+    type Output = Result<S::Response, S::Error>;
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = self.get_mut();
+        if let Some(ready) = this.ready.as_mut() {
+            match ready.0.poll_ready(cx) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(Err(error)) => {
+                    this.ready = None;
+                    return Poll::Ready(Err(Error::Inner(error)));
+                }
+                Poll::Ready(Ok(())) => {}
+            }
+        }
+        if let Some(ready) = this.ready.take() {
+            let (mut service, request) = *ready;
+            if let Err(reason) = request.context.check() {
+                return Poll::Ready(Err(Error::Stopped(reason)));
+            }
+            this.running = Some(Box::pin(service.call(request)));
+        }
+        match this.running.as_mut() {
+            Some(future) => future.as_mut().poll(cx).map_err(Error::Inner),
+            // 两者均为空仅可能发生在就绪失败/停止已返回 Ready 后；再次 poll 违反 Future 契约。
+            None => unreachable!("执行 Future 完成后不得再次轮询"),
         }
     }
 }

@@ -250,3 +250,81 @@ fn root_request<T>(input: T, span: tracing::Span) -> tok_execution::Request<T> {
         input,
     )
 }
+
+#[derive(Clone)]
+struct FailureScopes(Arc<Mutex<Vec<Option<String>>>>);
+impl<S> tracing_subscriber::Layer<S> for FailureScopes
+where
+    S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
+{
+    fn on_event(
+        &self,
+        event: &tracing::Event<'_>,
+        context: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        if event.metadata().level() == &tracing::Level::ERROR {
+            self.0.lock().unwrap().push(
+                context
+                    .event_scope(event)
+                    .and_then(|mut scope| scope.next().map(|span| span.name().to_owned())),
+            );
+        }
+    }
+}
+#[tokio::test]
+async fn grpc_failure_logs_keep_request_span_without_an_ambient_span() {
+    use tracing::instrument::WithSubscriber as _;
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let subscriber = tracing_subscriber::registry().with(FailureScopes(Arc::clone(&captured)));
+    async {
+        let target = ServiceDescriptor {
+            node_id: "remote".into(),
+            service_name: "custom".into(),
+            protocol: "grpc".into(),
+            address: "127.0.0.1:12345".parse().unwrap(),
+        };
+        for mode in 0..4 {
+            let span = tracing::info_span!("request_scope");
+            assert!(span.id().is_some());
+            let mut request = root_request(tonic::Request::new(()), span);
+            if mode == 0 {
+                request
+                    .input
+                    .metadata_mut()
+                    .insert("grpc-timeout", "invalid".parse().unwrap());
+            }
+            if mode == 1 {
+                request.context = request.context.with_budget_limit(Duration::from_millis(10));
+            }
+            if mode == 2 {
+                request.context.cancellation().cancel();
+            }
+            let result = Client::new(Duration::from_secs(1), 1)
+                .unwrap()
+                .execute(&target, request, |_, _| async move {
+                    assert_eq!(
+                        tracing::Span::current().metadata().unwrap().name(),
+                        "request_scope"
+                    );
+                    if mode == 1 {
+                        std::future::pending::<()>().await;
+                    }
+                    Err::<tonic::Response<()>, _>(tonic::Status::unavailable("测试发送失败"))
+                })
+                .await;
+            let expected = [
+                tonic::Code::InvalidArgument,
+                tonic::Code::DeadlineExceeded,
+                tonic::Code::Cancelled,
+                tonic::Code::Unavailable,
+            ][mode];
+            assert_eq!(result.unwrap_err().code(), expected);
+        }
+    }
+    .with_subscriber(subscriber)
+    .await;
+    assert_eq!(
+        *captured.lock().unwrap(),
+        vec![Some("request_scope".into()); 4]
+    );
+}

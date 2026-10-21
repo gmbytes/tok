@@ -312,3 +312,17 @@ Call / PreparedCall 不再携带 request_id；Client::execute / execute_service 
 tok-message 等上层维护；可选本地关联信息使用 Request 扩展或 span，不自动传播到网络。
 
 移除通用关联序号验收：全工作区串行测试 326 项通过、32 项外部专项默认跳过，包含 21 项指南示例；全目标 Clippy、无警告 rustdoc、格式与空白检查通过。222 个文本文件 UTF-8/LF、119 处相对文档路径检查通过，未执行 release 构建。
+
+
+### execution / gRPC 审查问题修复（2026-10-21）
+
+共同执行驱动在内层 poll_ready 成功后、调用业务前复查原期限与取消；迟到就绪不再启动业务。
+Call::new 消费单次 Service 并支持借用，不要求 Clone；execution::Layer 和 gRPC 客户端共用同一驱动，
+移除 gRPC 重复的期限、取消和就绪执行循环。协议预算收紧、准备失败与 Status 映射仍留在 gRPC。
+客户端准备、取消、超时及发送失败日志显式进入 Context.span，不依赖调用者的当前任务 span。
+
+通用锁移除自身 Stopped 变体，返回 execution::Error<lock::Error<E>>；原调用停止保持外层，
+锁特有获取、执行和释放期限保持内层错误，RPC 适配显式映射。持锁执行先收紧 Context 至执行上限，
+迟到就绪不调用业务，执行上限失败仍释放租约；原调用取消/丢弃的未完成释放继续由有限 TTL 兜底。
+
+本轮 Windows 验收：全工作区串行测试 330 项通过、32 项外部专项默认跳过，包含 21 项指南示例；全目标 Clippy、无警告 workspace rustdoc、execution / dispatch / rpc / client 四个 smoke、格式与空白检查通过。222 个文本文件 UTF-8/LF、119 处相对文档路径检查通过。未运行真实 Redis/NATS、Linux 或 release 构建。

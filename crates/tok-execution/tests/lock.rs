@@ -156,7 +156,9 @@ async fn typed_input_and_response_preserve_context_and_key_errors_skip_backend()
     assert_eq!(observed.releases.load(Ordering::SeqCst), 1);
     assert!(matches!(
         service.oneshot(request(0, Duration::from_secs(30))).await,
-        Err(Error::Key(DomainError::InvalidEntity))
+        Err(tok_execution::Error::Inner(Error::Key(
+            DomainError::InvalidEntity
+        )))
     ));
     assert_eq!(observed.keys.lock().unwrap().len(), 1);
 }
@@ -184,11 +186,18 @@ async fn release_failure_preserves_domain_error_or_encoded_failure_and_overrides
         }));
         let result = service.oneshot(request(7, Duration::from_secs(30))).await;
         match mode {
-            0 => assert!(matches!(result, Err(Error::Inner(DomainError::Denied)))),
+            0 => assert!(matches!(
+                result,
+                Err(tok_execution::Error::Inner(Error::Inner(
+                    DomainError::Denied
+                )))
+            )),
             1 => assert!(!result.unwrap().accepted),
             _ => assert!(matches!(
                 result,
-                Err(Error::Release(contract::Error::Unavailable(_)))
+                Err(tok_execution::Error::Inner(Error::Release(
+                    contract::Error::Unavailable(_)
+                )))
             )),
         }
         assert_eq!(observed.releases.load(Ordering::SeqCst), 1);
@@ -217,12 +226,12 @@ async fn original_budget_and_cancellation_cover_acquire_without_executing_busine
     cancelled.context.cancellation().cancel();
     assert!(matches!(
         service.clone().oneshot(cancelled).await,
-        Err(Error::Stopped(StopReason::Cancelled))
+        Err(tok_execution::Error::Stopped(StopReason::Cancelled))
     ));
     assert!(observed.keys.lock().unwrap().is_empty());
     assert!(matches!(
         service.oneshot(request(7, Duration::from_millis(20))).await,
-        Err(Error::Stopped(StopReason::DeadlineExceeded))
+        Err(tok_execution::Error::Stopped(StopReason::DeadlineExceeded))
     ));
     assert_eq!(observed.keys.lock().unwrap().len(), 1);
     assert_eq!(observed.releases.load(Ordering::SeqCst), 0);
@@ -240,7 +249,9 @@ async fn backend_error_keeps_its_category_and_does_not_release_unacquired_lease(
     }));
     assert!(matches!(
         service.oneshot(request(7, Duration::from_secs(30))).await,
-        Err(Error::Acquire(contract::Error::CapacityExceeded))
+        Err(tok_execution::Error::Inner(Error::Acquire(
+            contract::Error::CapacityExceeded
+        )))
     ));
     assert_eq!(observed.releases.load(Ordering::SeqCst), 0);
 }
@@ -263,7 +274,86 @@ async fn late_non_cooperative_release_is_not_accepted_as_timely_success() {
     }));
     assert!(matches!(
         service.oneshot(request(7, Duration::from_secs(30))).await,
-        Err(Error::ReleaseTimeout)
+        Err(tok_execution::Error::Inner(Error::ReleaseTimeout))
+    ));
+    assert_eq!(observed.releases.load(Ordering::SeqCst), 1);
+}
+
+#[derive(Clone)]
+struct LateReady(Arc<AtomicUsize>);
+impl tower::Service<Request<Input>> for LateReady {
+    type Response = Reply;
+    type Error = DomainError;
+    type Future = std::future::Ready<Result<Reply, DomainError>>;
+    fn poll_ready(
+        &mut self,
+        _: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), DomainError>> {
+        std::thread::sleep(Duration::from_millis(30));
+        std::task::Poll::Ready(Ok(()))
+    }
+    fn call(&mut self, _: Request<Input>) -> Self::Future {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        std::future::ready(Ok(Reply {
+            accepted: true,
+            value: 42,
+        }))
+    }
+}
+#[tokio::test]
+async fn lock_execution_limit_stops_late_ready_before_business_and_releases_lease() {
+    let observed = Arc::new(Observed::default());
+    let calls = Arc::new(AtomicUsize::new(0));
+    let layer = Layer::new(
+        Arc::new(backend(&observed, false)),
+        Config {
+            execution_timeout: Duration::from_millis(5),
+            ..Default::default()
+        },
+        key,
+        success,
+    )
+    .unwrap();
+    let result = layer
+        .layer(LateReady(Arc::clone(&calls)))
+        .oneshot(request(7, Duration::from_secs(30)))
+        .await;
+    assert!(matches!(
+        result,
+        Err(tok_execution::Error::Inner(Error::ExecutionTimeout))
+    ));
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    assert_eq!(observed.releases.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn lock_composition_keeps_stops_and_concrete_failures_in_the_common_error() {
+    let observed = Arc::new(Observed::default());
+    let layer = Layer::new(
+        Arc::new(backend(&observed, false)),
+        Config::default(),
+        key,
+        success,
+    )
+    .unwrap();
+    let locked = layer.layer(tower::service_fn(|_: Request<Input>| async {
+        Err::<Reply, _>(DomainError::Denied)
+    }));
+    let protected = tok_execution::Layer
+        .layer(locked)
+        .map_err(tok_execution::Error::flatten);
+    let cancelled = request(7, Duration::from_secs(30));
+    cancelled.context.cancellation().cancel();
+    assert!(matches!(
+        protected.clone().oneshot(cancelled).await,
+        Err(tok_execution::Error::Stopped(StopReason::Cancelled))
+    ));
+    assert!(observed.keys.lock().unwrap().is_empty());
+    assert!(matches!(
+        protected.oneshot(request(7, Duration::from_secs(30))).await,
+        Err(tok_execution::Error::Inner(Error::Inner(
+            DomainError::Denied
+        )))
     ));
     assert_eq!(observed.releases.load(Ordering::SeqCst), 1);
 }

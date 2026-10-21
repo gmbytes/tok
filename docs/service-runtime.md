@@ -445,3 +445,12 @@ protobuf / message 适配保持这一层结构；自定义 RPC 注册器显式�
 默认构造保留默认映射。Error::map_inner 转换具体错误，Error::flatten 接续重复执行保护，
 停止原因、错误来源与请求/响应扩展保持不变。原生 Tower Layer 仍可适配任意内层错误，
 不要求第三方 Service 或后端采用共同返回类型。
+
+
+### 就绪与调用边界检查
+
+execution::Call::new 统一驱动单次 Service，不要求 Clone；Layer 克隆内层后使用相同驱动。
+原 Context 约束就绪等待、实际调用和结果接受；就绪成功后再次检查期限与取消，阻止已知停止后的新业务。
+gRPC 客户端只负责准备 Channel / metadata、收紧预算、协议映射和观察，复用共同驱动；
+失败日志显式关联执行 span。通用请求锁同样使用共同执行结果，Stopped 只在 execution::Error 外层表达，
+锁自身获取、租期余量、持锁执行和释放期限仍使用 lock::Error 的具体变体。

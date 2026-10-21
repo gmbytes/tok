@@ -440,3 +440,58 @@ fn execution_error_exposes_the_original_error_in_its_source_chain() {
     let source = std::error::Error::source(&error).unwrap();
     assert_eq!(source.downcast_ref::<Rejected>(), Some(&Rejected(41)));
 }
+
+#[derive(Clone)]
+struct LateReady {
+    token: CancellationToken,
+    calls: Arc<AtomicUsize>,
+    expire: bool,
+}
+impl Service<Request<()>> for LateReady {
+    type Response = ();
+    type Error = Rejected;
+    type Future = std::future::Ready<Result<(), Rejected>>;
+    fn poll_ready(&mut self, _: &mut TaskContext<'_>) -> Poll<Result<(), Rejected>> {
+        if self.expire {
+            std::thread::sleep(Duration::from_millis(30));
+        } else {
+            self.token.cancel();
+        }
+        Poll::Ready(Ok(()))
+    }
+    fn call(&mut self, _: Request<()>) -> Self::Future {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        ready(Ok(()))
+    }
+}
+#[tokio::test]
+async fn scope_stopped_during_readiness_never_starts_business() {
+    for expire in [false, true] {
+        let token = CancellationToken::new();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let context = context(
+            "late-ready",
+            if expire {
+                Duration::from_millis(5)
+            } else {
+                Duration::from_secs(1)
+            },
+            token.clone(),
+        );
+        let result = tok_execution::Layer
+            .layer(LateReady {
+                token,
+                calls: Arc::clone(&calls),
+                expire,
+            })
+            .oneshot(Request::new(context, ()))
+            .await;
+        let expected = if expire {
+            StopReason::DeadlineExceeded
+        } else {
+            StopReason::Cancelled
+        };
+        assert!(matches!(result, Err(Error::Stopped(reason)) if reason == expected));
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+}

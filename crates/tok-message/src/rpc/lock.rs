@@ -91,7 +91,18 @@ where
         Box::pin(async move { future.await.map_err(status) })
     }
 }
-fn status(error: lock::Error<Status>) -> Status {
+fn status(error: tok_execution::Error<lock::Error<Status>>) -> Status {
+    match error {
+        tok_execution::Error::Stopped(tok_execution::StopReason::Cancelled) => {
+            Status::cancelled("调用已取消")
+        }
+        tok_execution::Error::Stopped(tok_execution::StopReason::DeadlineExceeded) => {
+            Status::deadline_exceeded("调用预算已耗尽")
+        }
+        tok_execution::Error::Inner(error) => lock_status(error),
+    }
+}
+fn lock_status(error: lock::Error<Status>) -> Status {
     match error {
         lock::Error::Key(error) | lock::Error::Inner(error) => error,
         lock::Error::Acquire(error) => match error {
@@ -108,12 +119,6 @@ fn status(error: lock::Error<Status>) -> Status {
         lock::Error::ExecutionTimeout => Status::deadline_exceeded("持锁业务执行超时"),
         lock::Error::Release(_) | lock::Error::ReleaseTimeout => {
             Status::unavailable("请求锁释放结果不确定")
-        }
-        lock::Error::Stopped(tok_execution::StopReason::Cancelled) => {
-            Status::cancelled("调用已取消")
-        }
-        lock::Error::Stopped(tok_execution::StopReason::DeadlineExceeded) => {
-            Status::deadline_exceeded("调用预算已耗尽")
         }
     }
 }

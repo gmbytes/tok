@@ -6,11 +6,8 @@ use std::{
     task::{Context, Poll},
 };
 use tok_execution::Request;
-use tokio::time::{Instant, Timeout};
-use tokio_util::sync::WaitForCancellationFutureOwned;
 use tonic::Status;
 use tower::Service as TowerService;
-use tracing::{Instrument, instrument::Instrumented};
 
 /// 为协议发送器增加连接获取、期限、追踪与指标的标准 Tower Layer。
 ///
@@ -71,13 +68,9 @@ where
     }
 }
 
-type Work<S, T> = Instrumented<Timeout<Dispatch<S, T>>>;
 enum State<S: TowerService<Request<PreparedCall<T>>, Error = Status>, T> {
     Failed(Option<Status>),
-    Running {
-        deadline: Instant,
-        work: Pin<Box<Work<S, T>>>,
-    },
+    Running(Pin<Box<tok_execution::Call<S, PreparedCall<T>>>>),
     Done,
 }
 
@@ -88,7 +81,6 @@ pub struct ResponseFuture<S: TowerService<Request<PreparedCall<T>>, Error = Stat
     state: State<S, T>,
     metrics: Option<Metrics>,
     context: tok_execution::Context,
-    cancellation: Pin<Box<WaitForCancellationFutureOwned>>,
 }
 impl<S, T> ResponseFuture<S, T>
 where
@@ -106,35 +98,25 @@ where
             let budget =
                 crate::timeout::request_budget(call.request.metadata(), context.remaining())?;
             context = context.clone().with_budget_limit(budget);
-            let deadline = Instant::from_std(context.deadline());
             let channel = client.channel(&call.target)?;
             crate::propagation::inject(call.request.metadata_mut(), context.span());
-            let remaining = deadline.saturating_duration_since(Instant::now());
+            let remaining = context.remaining();
             if remaining.is_zero() {
                 return Err(expired());
             }
             call.request.set_timeout(remaining);
             let prepared = PreparedCall::new(call.target, channel, call.request);
-            let work = tokio::time::timeout_at(
-                deadline,
-                Dispatch::new(
-                    service,
-                    Request::from_parts(context.clone(), prepared, extensions),
-                ),
-            )
-            .instrument(context.span().clone());
-            Ok((deadline, work))
+            Ok(tok_execution::Call::new(
+                service,
+                Request::from_parts(context.clone(), prepared, extensions),
+            ))
         })() {
-            Ok((deadline, work)) => State::Running {
-                deadline,
-                work: Box::pin(work),
-            },
+            Ok(work) => State::Running(Box::pin(work)),
             Err(error) => State::Failed(Some(error)),
         };
         Self {
             state,
             metrics: Some(metrics),
-            cancellation: Box::pin(context.cancellation().cancelled_owned()),
             context,
         }
     }
@@ -146,91 +128,26 @@ where
     type Output = Result<S::Response, Status>;
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
-        let stop_error = this.context.check().err().map(stopped).or_else(|| {
-            this.cancellation
-                .as_mut()
-                .poll(cx)
-                .is_ready()
-                .then(|| Status::cancelled("调用已取消"))
-        });
-        let result = if let Some(error) = stop_error {
-            Err(error)
-        } else {
-            match &mut this.state {
-                State::Failed(error) => Err(error.take().unwrap_or_else(completed)),
-                State::Running { deadline, work } => {
-                    if Instant::now() >= *deadline {
-                        Err(expired())
-                    } else {
-                        let result = match work.as_mut().poll(cx) {
-                            Poll::Pending => return Poll::Pending,
-                            Poll::Ready(result) => result,
-                        };
-                        if Instant::now() >= *deadline {
-                            Err(expired())
-                        } else {
-                            result.unwrap_or_else(|_| Err(expired()))
-                        }
-                    }
-                }
-                State::Done => return Poll::Ready(Err(completed())),
-            }
+        let result = match &mut this.state {
+            State::Failed(error) => Err(error.take().unwrap_or_else(completed)),
+            State::Running(work) => match work.as_mut().poll(cx) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(result) => result.map_err(|error| match error {
+                    tok_execution::Error::Inner(error) => error,
+                    tok_execution::Error::Stopped(reason) => stopped(reason),
+                }),
+            },
+            State::Done => return Poll::Ready(Err(completed())),
         };
         let result = this.context.check().map_err(stopped).and(result);
         this.state = State::Done;
         if let Some(metrics) = this.metrics.take() {
-            metrics.record(&result);
+            this.context.span().in_scope(|| metrics.record(&result));
         }
         Poll::Ready(result)
     }
 }
 
-// 就绪后的分发必须再次检查截止点，避免单次阻塞 poll_ready 在超时后发出请求。
-struct Dispatch<S: TowerService<Request<PreparedCall<T>>>, T> {
-    ready: Option<Box<(S, Request<PreparedCall<T>>)>>,
-    running: Option<Pin<Box<S::Future>>>,
-}
-impl<S, T> Dispatch<S, T>
-where
-    S: TowerService<Request<PreparedCall<T>>>,
-{
-    fn new(service: S, call: Request<PreparedCall<T>>) -> Self {
-        Self {
-            ready: Some(Box::new((service, call))),
-            running: None,
-        }
-    }
-}
-impl<S, T> Future for Dispatch<S, T>
-where
-    S: TowerService<Request<PreparedCall<T>>, Error = Status>,
-{
-    type Output = Result<S::Response, Status>;
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let this = self.get_mut();
-        if let Some(ready) = this.ready.as_mut() {
-            match ready.0.poll_ready(cx) {
-                Poll::Pending => return Poll::Pending,
-                Poll::Ready(Err(error)) => {
-                    this.ready = None;
-                    return Poll::Ready(Err(error));
-                }
-                Poll::Ready(Ok(())) => {}
-            }
-        }
-        if let Some(ready) = this.ready.take() {
-            let (mut service, call) = *ready;
-            if let Err(error) = call.context.check().map_err(stopped) {
-                return Poll::Ready(Err(error));
-            }
-            this.running = Some(Box::pin(service.call(call)));
-        }
-        match this.running.as_mut() {
-            Some(future) => future.as_mut().poll(cx),
-            None => Poll::Ready(Err(completed())),
-        }
-    }
-}
 fn stopped(reason: tok_execution::StopReason) -> Status {
     match reason {
         tok_execution::StopReason::Cancelled => Status::cancelled("调用已取消"),
