@@ -7,7 +7,7 @@ pub use memory::Memory;
 pub use redis::{Redis, RedisConfig};
 
 use std::time::Duration;
-use tok_core::{Error, Result, coordination::LockKey};
+use tok_core::{Error, Result, lock::Key as LockKey};
 
 const RETRY: Duration = Duration::from_millis(10);
 const MAX_DURATION: Duration = Duration::from_secs(86_400);

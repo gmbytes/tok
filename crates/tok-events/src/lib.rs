@@ -31,7 +31,7 @@ pub enum DeliveryPolicy {
 pub enum Error {
     /// 执行范围已取消或期限耗尽。
     #[error(transparent)]
-    Stopped(tok_core::execution::StopReason),
+    Stopped(tok_service::StopReason),
     /// 后端连接、订阅或发布失败；不包含凭据和消息正文。
     #[error("事件后端不可用：{0}")]
     Unavailable(&'static str),

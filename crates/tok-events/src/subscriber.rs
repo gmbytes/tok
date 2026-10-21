@@ -8,7 +8,7 @@ use std::sync::Arc;
 #[derive(Clone)]
 pub struct Subscriber {
     pub(crate) service: tok_core::service::Identity,
-    pub(crate) extensions: tok_core::execution::Extensions,
+    pub(crate) extensions: tok_core::Extensions,
     pub(crate) handler: Arc<dyn Handler>,
     pub(crate) group: Option<String>,
     pub(crate) topics: TopicFilter,
@@ -29,7 +29,7 @@ impl Subscriber {
         }
         Ok(Self {
             service,
-            extensions: tok_core::execution::Extensions::default(),
+            extensions: tok_core::Extensions::default(),
             handler,
             topics,
             group: group.map(str::to_owned),
@@ -41,7 +41,7 @@ impl Subscriber {
         self
     }
     /// 安装本服务的本地能力，接收时复制到执行上下文，不向远端传播。
-    pub fn with_extensions(mut self, extensions: tok_core::execution::Extensions) -> Self {
+    pub fn with_extensions(mut self, extensions: tok_core::Extensions) -> Self {
         self.extensions = extensions;
         self
     }

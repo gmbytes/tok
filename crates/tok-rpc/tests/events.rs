@@ -231,13 +231,13 @@ async fn ordered_event_handlers_compose_timer_effects_without_client_payloads() 
             )
             .unwrap(),
         );
-        let execution = tok_core::execution::Context::new(
+        let execution = tok_service::Context::new(
             tok_core::service::Identity {
                 node_id: "node".into(),
                 service_name: "player".into(),
             },
             "event",
-            tok_core::execution::Source::Event {
+            tok_service::Source::Event {
                 event_id: id.to_string(),
             },
             Duration::from_secs(1),

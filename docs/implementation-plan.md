@@ -265,9 +265,55 @@ P1–P7 方向校正完成本轮验收，P7 随本次提交交付。后续功能
 
 本轮不重新编号 P1–P7。新增 tok-player 归集玩家会话、消息、计时需求、所有权与恢复凭证契约；tok-core 保留通用基础，tok-service 保留执行、生命周期与任务监督。RPC 专用 CallContext 下沉到 tok-rpc，调用者迁移到新路径，不保留兼容别名。通用计时触发来源留在 core，不包含玩家消息或调度策略。
 
-同步迁移网关、RPC、基础设施后端、测试与 demo；tok 门面导出 player，公开所有权路径按 Rust 模块风格提供 ownership::Store / Owner / Record。玩家专用错误从 core 移除，通用错误在 player::Error::Core 中保留。本轮已完成验收，随本次提交交付。
+同步迁移网关、RPC、基础设施后端、测试与 demo；tok 门面导出 player，公开所有权路径按 Rust 模块风格提供 ownership::Store / Owner / Record。玩家专用错误从 core 移除，通用错误在 player::Error::Core 中保留。玩家运行契约分库已完成验收并提交为 `9f32c91`。
 
 本轮 Windows 验收：`just verify docs` 通过，含 249 项工作区测试（12 项指南示例、2 项编译失败文档测试）、全目标 Clippy、格式检查和 rustdoc。application、execution、lifecycle、events、RPC、TCP 客户端及 NATS 七个 smoke 通过；真实 Redis 所有权 5 项及共享所有权/三进程交接 2 项外部专项通过。Cargo 依赖核对确认 tok-core 不依赖玩家契约，tok-service 与 tok-player 均只引用 tok-core 这一工作区基础库，tok-events 不依赖 tok-player。UTF-8/LF、内部文档链接及空白检查通过。按用户要求未做 release 构建；未运行 Linux、完整 NATS 专项或与迁移无关的发现/请求锁外部专项。本轮随本次提交交付。
+
+## 执行上下文归属校正（2026-10-21）
+
+将 Context / Source / StopReason 从 core 移至 tok-service 根导出，与 Request 和执行 Layer 聚合；Extensions 独立为 tok_core::Extensions，TimerTrigger 保留在 core。移除 tok-core 的 tokio-util / tracing 依赖，迁移原上下文测试、所有调用者与 rustdoc 示例，不保留旧 execution 路径。不增加抽象 trait 或新 crate，不修改执行行为。本轮已完成验收，随本次提交交付；按用户要求不做 release 构建。
+
+Windows 验收：`just verify docs` 通过，含 249 项工作区测试（12 项指南示例及 2 项编译失败文档测试）、全目标 Clippy、格式检查与 rustdoc。application、execution、lifecycle、events、RPC、TCP 客户端和真实 NATS 转发/广播七个 smoke 通过。依赖树确认 tok-core 只依赖 serde 与 thiserror，tok-player 不再通过 core 引入 tokio-util 或 tracing。198 个仓库文本文件 UTF-8/LF、83 处内部 Markdown 链接与锚点及 git diff 空白检查通过。按用户要求未做 release 构建；本轮未重复 Redis、完整 NATS 专项或 Linux 验证。改动随本次提交交付。
+
+## 请求锁模块命名校正（2026-10-21）
+
+将只剩请求锁契约的 tok-core::coordination 改为 tok-core::lock，并按模块限定名提供 Key / Lease / Backend / Operation。迁移 Memory/Redis 后端、RPC Layer、demo 和指南；实现侧必要时使用明确的本地导入别名区分自身 Lease 或 Backend 类型，不提供公共兼容别名。不改变锁算法。本次已完成验收，随本次提交交付；按用户要求不做 release 构建。
+
+本次 Windows 验收：15 项常规锁测试（Memory 4 项、Redis 参数/不可达 1 项、RPC 锁 Layer 10 项）、12 项指南文档测试与 5 项真实 Redis 锁专项通过；全目标 Clippy、workspace rustdoc、格式、UTF-8/LF、83 处内部链接与锚点及空白检查通过。未在这次命名调整后重复完整工作区测试或其他外部专项；前一轮上下文迁移的 249 项测试与七个 smoke 验收记录保留。按用户要求未做 release 构建；两项调整均随本次提交交付。
+
+## 后端操作命名校正（2026-10-21）
+
+锁及所有权契约中的 Future 别名由 Task 改为 Operation，公开路径为 tok_core::lock::Operation 与 tok_player::ownership::Operation，明确区别于受监督任务。迁移后端、自定义实现测试及指南，不改变执行行为或引入公共兼容别名。此项已完成验收，随本次提交交付；不做 release 构建。
+
+本次 Windows 验收：21 项相关常规测试（内存所有权/路由 5 项、Memory 锁 4 项、Redis 所有权与锁的参数/不可达各 1 项、RPC 锁 Layer 10 项）及 12 项指南文档测试通过；全目标 Clippy、workspace rustdoc、格式、UTF-8/LF、内部文档链接与空白检查通过。此次仅修改 Future 别名，未重复完整工作区、真实外部专项或 smoke；此前上下文和锁模块调整的验收记录保留。未做 release 构建，改动随本次提交交付。
+
+## core 职责与命名复核（2026-10-21）
+
+复核 tok-core 的模块与 trait：发现目录读取、注册写入与变更通知分别承担缓存查询、控制面发布及合并通知，拆分合理；路由只选择目标，锁只提供后端契约，均应继续独立。service::Identity 不携带地址，ServiceDescriptor 描述网络服务，两者不强制合并。Extensions 和通用 TimerTrigger 保留在 core，错误类型描述契约失败，core 仍只依赖 serde / thiserror。
+
+ServiceDirectory / ServiceRegistry / ServiceRouter / ServiceDescriptor 是根导出的公开角色名，前缀有辨识用途，不因统一模块风格而批量删除。Task 与 Operation 是语义选择，不是 Rust 强制规则；锁、所有权及发现的 Future 别名最终统一为 BoxFuture，具体迁移与验收见下节；不因角色名前缀而批量改动根导出的 trait。此次仅修正 DirectoryUnavailable 将后端误指为内存实现、NotImplemented 将组件能力缺失误写为工程骨架的说明与错误文本，不改变错误变体、分发或返回语义。
+
+本次不继续批量重命名 trait 或根导出；错误文本调整运行 core 编译与格式检查。未做 release 构建，既有改动随本次提交交付。
+
+## BoxFuture 统一（2026-10-21）
+
+在 tok-core 根提供 BoxFuture<'a, T>，T 为完整输出类型，不隐含 Result。锁、所有权与发现统一引用此别名，显式表达 core::Result 或 player::Result；移除各模块的 Operation 和 RegistrationTask，包括发现变更通知中重复写出的 boxed Future 类型。根导出的 ServiceDirectory / ServiceRegistry / DirectoryWatch / ServiceRouter / ServiceDescriptor 保留，不增加兼容别名或第三方依赖。此项已完成验收，随本次提交交付；不做 release 构建。
+
+本次 Windows 验收：tok-infra 与 tok-rpc 的 40 项常规测试、12 项指南文档测试通过；所有目标编译、全目标 Clippy、workspace rustdoc、格式、198 个文本文件的 UTF-8/LF、83 处内部链接与锚点及空白检查通过。锁、所有权、发现及自定义实现的错误类型保持原样，未新增第三方依赖。未重复完整工作区、真实 Redis/NATS 专项、smoke 或 Linux 验证，按用户要求未做 release 构建。此轮改动随本次提交交付。
+
+## core 错误契约校正（2026-10-21）
+
+按接口语义核对 Error 的覆盖面，保留共享的基础契约类别，不扩充为整个工程的错误全集。LockTimeout / LockCapacity / NotImplemented / DuplicateService / DirectoryUnavailable 分别改为 LockWaitTimeout / LockCapacityExceeded / Unsupported / RegistrationConflict / DirectoryStateUnavailable。保留已有 RPC 状态码映射，补全注册冲突中的节点/服务身份说明，发现失去租约归 DiscoveryUnavailable，注册容量耗尽归 RegistrationCapacityExceeded，不再冒充新注册冲突。
+
+同步迁移调用者，增强既有内存/Redis 测试的错误分类断言，并在 core rustdoc 列出各接口主要错误类别。未知的具体后端故障通过已定义类别表达，不引入 Redis 专有变体；玩家、RPC、游戏业务错误继续由所属 crate 管理。本次已完成验收，随本次提交交付；不做 release 构建。
+
+Windows 验收：infra/RPC 的 40 项常规测试与 12 项指南测试通过；真实 Redis 锁 5 项、发现 3 项通过。发现测试增强注册冲突/续租失效分类断言，新增容量耗尽、重复身份优先识别及撤销后恢复注册的边界用例；最终全目标 Clippy、workspace rustdoc、格式和空白检查通过。错误覆盖面按契约语义维护，不以 Rust enum 的穷尽匹配冒充外部故障覆盖证明。未重复完整工作区、其他外部专项、smoke 或 Linux 验证；未做 release 构建，改动随本次提交交付。
+
+## 公开 API 规则落地（2026-10-21）
+
+将有官方依据的公开 API 组织规则写入 AGENTS.md，明确根重导出与公开模块可并存，不以形式统一删除前缀或路径。按规则审查 tok-core/lib.rs：保留 discovery / lock / routing / service 功能命名空间，将 error 设为私有，错误覆盖说明迁到公开 Error 上，补充 Identity 根入口；Extensions / TimerTrigger / BoxFuture 维持根入口。同步设计、指南与状态，检验公开导入、rustdoc 链接和文档示例。本次已完成验收，随本次提交交付；不做 release 构建。
+
+本次 Windows 验收：全目标 Clippy、workspace rustdoc、格式与 12 项指南文档测试通过；指南验证 Identity 根导入。检查生成的 tok-core 文档确认根页提供 Identity、私有 error 模块不作为公开入口，公开 Error 页保留完整分类表。198 个仓库文本文件 UTF-8/LF、84 处内部文档链接与锚点及空白检查通过。本次仅调整公开入口与文档，未重复完整工作区、外部专项或 smoke；未做 release 构建，全部改动随本次提交交付。
 
 ## 本轮不并入的工作
 

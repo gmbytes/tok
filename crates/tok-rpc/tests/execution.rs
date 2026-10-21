@@ -7,10 +7,7 @@ use std::{
     task::{Context as TaskContext, Poll},
     time::Duration,
 };
-use tok_core::{
-    execution::{Context, Source},
-    service::Identity,
-};
+use tok_core::service::Identity;
 use tok_events::{Envelope, Event, EventId, Input};
 use tok_rpc::CallContext;
 use tok_rpc::{
@@ -18,6 +15,7 @@ use tok_rpc::{
     protocol::internal::v1::{self as proto, Payload},
 };
 use tok_service::Request;
+use tok_service::{Context, Source};
 use tokio_util::sync::CancellationToken;
 use tower::{Layer, Service};
 #[derive(Clone, PartialEq, prost::Message)]
@@ -267,7 +265,7 @@ async fn deferred_rpc_is_initialized_once_by_its_own_factory_and_stops_with_serv
         CancellationToken::new(),
     )
     .unwrap();
-    let mut extensions = tok_core::execution::Extensions::default();
+    let mut extensions = tok_core::Extensions::default();
     extensions.insert(42u32);
     let identity = Identity {
         node_id: "node".into(),
@@ -331,7 +329,7 @@ fn initialization_binding_is_not_retained_in_its_own_execution_extensions() {
             .unwrap();
     let marker = Arc::new(AtomicUsize::new(0));
     let weak = Arc::downgrade(&marker);
-    let mut extensions = tok_core::execution::Extensions::default();
+    let mut extensions = tok_core::Extensions::default();
     extensions.insert(marker);
     extensions.insert(binding.clone());
     let init = tok_service::lifecycle::Init {

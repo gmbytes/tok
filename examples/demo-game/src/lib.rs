@@ -33,7 +33,7 @@ pub fn application(config: AppConfig) -> Result<Application, Error> {
 /// 显式注入独立的公会请求锁后端；多进程共享业务须使用 Redis 等共享后端。
 pub fn application_with_locks(
     config: AppConfig,
-    locks: Arc<dyn tok::core::coordination::LockBackend>,
+    locks: Arc<dyn tok::core::lock::Backend>,
 ) -> Result<Application, Error> {
     let mut app = Application::new(config.clone())?;
     let ownership: Arc<dyn tok::player::ownership::Store> = match config.ownership {
@@ -98,7 +98,7 @@ pub fn application_with_locks(
                 }
             }
             "scene-ingress" => {
-                return Err(tok::core::Error::NotImplemented("Scene 网关接入组件").into());
+                return Err(tok::core::Error::Unsupported("Scene 网关接入组件").into());
             }
             "player" | "guild" | "gateway-rpc" => {
                 if endpoint.protocol != "grpc" {

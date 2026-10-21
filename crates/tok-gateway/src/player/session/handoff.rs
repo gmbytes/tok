@@ -292,7 +292,7 @@ impl SessionManager {
                     body: session.extension.snapshot(tok_service::Request::new(
                         SessionHandle(Arc::clone(&session)).context(
                             "player/session/snapshot".into(),
-                            tok_core::execution::Source::Internal,
+                            tok_service::Source::Internal,
                         )?,
                         SessionHandle(Arc::clone(&session)),
                     ))?,

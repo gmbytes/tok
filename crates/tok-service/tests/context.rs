@@ -6,10 +6,8 @@ use std::{
     },
     time::Duration,
 };
-use tok_core::{
-    execution::{Context, Source, StopReason},
-    service::Identity,
-};
+use tok_core::service::Identity;
+use tok_service::{Context, Source, StopReason};
 use tokio_util::sync::CancellationToken;
 
 fn context(cancellation: CancellationToken) -> Context {

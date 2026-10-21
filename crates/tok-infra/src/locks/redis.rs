@@ -1,9 +1,10 @@
 use super::{MAX_DURATION, RETRY, unavailable, validate};
 use redis::{Client, Script, aio::MultiplexedConnection};
 use std::{sync::Arc, time::Duration};
+use tok_core::BoxFuture;
 use tok_core::{
     Error, Result,
-    coordination::{CoordinationTask, LockBackend, LockKey, LockLease},
+    lock::{Backend as LockBackend, Key as LockKey, Lease as LockLease},
 };
 use tokio::{
     sync::Semaphore,
@@ -103,13 +104,13 @@ impl LockBackend for Redis {
         key: LockKey,
         wait: Duration,
         ttl: Duration,
-    ) -> CoordinationTask<'_, Box<dyn LockLease>> {
+    ) -> BoxFuture<'_, tok_core::Result<Box<dyn LockLease>>> {
         Box::pin(async move {
             validate(&key, wait, ttl)?;
             let _permit = self
                 .pending
                 .try_acquire()
-                .map_err(|_| Error::LockCapacity)?;
+                .map_err(|_| Error::LockCapacityExceeded)?;
             let started = Instant::now();
             let deadline = started + wait;
             let operation = self.config.operation_timeout;
@@ -125,7 +126,7 @@ impl LockBackend for Redis {
             loop {
                 // wait=0 仍允许一次有限获取；后续竞争尝试不能超出总等待期限。
                 if !first && Instant::now() >= deadline {
-                    return Err(Error::LockTimeout);
+                    return Err(Error::LockWaitTimeout);
                 }
                 let budget = if first && wait.is_zero() {
                     operation
@@ -134,7 +135,7 @@ impl LockBackend for Redis {
                 };
                 first = false;
                 if budget.is_zero() {
-                    return Err(Error::LockTimeout);
+                    return Err(Error::LockWaitTimeout);
                 }
                 let attempt_started = Instant::now();
                 let acquired: Option<String> = timeout(
@@ -162,7 +163,7 @@ impl LockBackend for Redis {
                     }) as Box<dyn LockLease>);
                 }
                 if Instant::now() >= deadline {
-                    return Err(Error::LockTimeout);
+                    return Err(Error::LockWaitTimeout);
                 }
                 tokio::time::sleep_until(deadline.min(Instant::now() + RETRY)).await;
             }
@@ -179,7 +180,7 @@ impl LockLease for Lease {
     fn token(&self) -> &str {
         &self.token
     }
-    fn release(mut self: Box<Self>) -> CoordinationTask<'static, ()> {
+    fn release(mut self: Box<Self>) -> BoxFuture<'static, tok_core::Result<()>> {
         Box::pin(async move {
             let _: i64 = timeout(
                 self.operation,

@@ -6,7 +6,8 @@ use std::{
     },
     time::Duration,
 };
-use tok_core::coordination::{CoordinationTask, LockBackend, LockKey, LockLease};
+use tok_core::BoxFuture;
+use tok_core::lock::{Backend as LockBackend, Key as LockKey, Lease as LockLease};
 use tok_proto::internal::v1::{CallResponse, Payload};
 use tok_rpc::CallContext;
 use tok_rpc::{
@@ -51,13 +52,13 @@ fn handler(
     })
 }
 fn execution<T>(input: T) -> tok_service::Request<T> {
-    let context = tok_core::execution::Context::new(
+    let context = tok_service::Context::new(
         tok_core::service::Identity {
             node_id: "node-a".into(),
             service_name: "guild".into(),
         },
         "test",
-        tok_core::execution::Source::Rpc { request_id: 1 },
+        tok_service::Source::Rpc { request_id: 1 },
         Duration::from_secs(30),
         tokio_util::sync::CancellationToken::new(),
     )
@@ -86,7 +87,7 @@ impl LockLease for Lease {
     fn token(&self) -> &str {
         "test"
     }
-    fn release(self: Box<Self>) -> CoordinationTask<'static, ()> {
+    fn release(self: Box<Self>) -> BoxFuture<'static, tok_core::Result<()>> {
         Box::pin(async move {
             self.released.fetch_add(1, Ordering::SeqCst);
             tokio::time::sleep(self.delay).await;
@@ -104,7 +105,7 @@ impl LockBackend for Backend {
         _: LockKey,
         _: Duration,
         _: Duration,
-    ) -> CoordinationTask<'_, Box<dyn LockLease>> {
+    ) -> BoxFuture<'_, tok_core::Result<Box<dyn LockLease>>> {
         Box::pin(async move {
             tokio::time::sleep(self.acquire_delay).await;
             Ok(Box::new(Lease {
@@ -470,7 +471,7 @@ impl LockBackend for LateBackend {
         _: LockKey,
         _: Duration,
         _: Duration,
-    ) -> CoordinationTask<'_, Box<dyn LockLease>> {
+    ) -> BoxFuture<'_, tok_core::Result<Box<dyn LockLease>>> {
         Box::pin(async move {
             // 模拟后端 future 在一次 poll 内阻塞，直到期限后才返回成功。
             std::thread::sleep(Duration::from_millis(20));

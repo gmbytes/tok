@@ -1,4 +1,5 @@
 //! 真实 TCP/gRPC 双网关交接与失败边界；常规测试不依赖外部服务。
+use tok_core::BoxFuture;
 #[path = "support/topics.rs"]
 mod topic_support;
 
@@ -42,7 +43,7 @@ impl OwnershipStore for TransferFault {
     fn lookup(
         &self,
         player: &str,
-    ) -> tok_player::ownership::Task<'_, Option<tok_player::ownership::Record>> {
+    ) -> BoxFuture<'_, tok_player::Result<Option<tok_player::ownership::Record>>> {
         self.inner.lookup(player)
     }
     fn acquire(
@@ -52,20 +53,20 @@ impl OwnershipStore for TransferFault {
         owner: SessionOwner,
         expected: Option<u64>,
         ttl: Duration,
-    ) -> tok_player::ownership::Task<'_, tok_player::ownership::Record> {
+    ) -> BoxFuture<'_, tok_player::Result<tok_player::ownership::Record>> {
         self.inner.acquire(player, session, owner, expected, ttl)
     }
     fn renew(
         &self,
         value: tok_player::ownership::Record,
         ttl: Duration,
-    ) -> tok_player::ownership::Task<'_, ()> {
+    ) -> BoxFuture<'_, tok_player::Result<()>> {
         self.inner.renew(value, ttl)
     }
     fn release(
         &self,
         value: tok_player::ownership::Record,
-    ) -> tok_player::ownership::Task<'_, bool> {
+    ) -> BoxFuture<'_, tok_player::Result<bool>> {
         self.inner.release(value)
     }
     fn transfer(
@@ -73,7 +74,7 @@ impl OwnershipStore for TransferFault {
         value: tok_player::ownership::Record,
         target: SessionOwner,
         ttl: Duration,
-    ) -> tok_player::ownership::Task<'_, tok_player::ownership::Record> {
+    ) -> BoxFuture<'_, tok_player::Result<tok_player::ownership::Record>> {
         Box::pin(async move {
             if self.committed_error {
                 self.inner.transfer(value, target, ttl).await?;
@@ -1054,8 +1055,8 @@ impl tok_gateway::player::session::extension::Factory for SessionExtension {
     fn initialize(
         &self,
         request: tok_service::Request<tok_player::SessionIdentity>,
-    ) -> tok_gateway::Result<tok_core::execution::Extensions> {
-        let mut extensions = tok_core::execution::Extensions::default();
+    ) -> tok_gateway::Result<tok_core::Extensions> {
+        let mut extensions = tok_core::Extensions::default();
         extensions.insert(ExtensionData {
             value: std::sync::atomic::AtomicU64::new(0),
             node: request.context.service().node_id.clone(),
@@ -1090,14 +1091,14 @@ impl tok_gateway::player::session::extension::Factory for SessionExtension {
     fn restore(
         &self,
         request: tok_service::Request<(tok_player::SessionIdentity, &[u8])>,
-    ) -> tok_gateway::Result<tok_core::execution::Extensions> {
+    ) -> tok_gateway::Result<tok_core::Extensions> {
         self.validate(request.input.1)?;
         if matches!(self.mode, ExtensionMode::RejectRestore) {
             return Err(tok_gateway::ErrorCode::Internal.into());
         }
         let mut bytes = [0; 8];
         bytes.copy_from_slice(request.input.1);
-        let mut extensions = tok_core::execution::Extensions::default();
+        let mut extensions = tok_core::Extensions::default();
         extensions.insert(ExtensionData {
             value: std::sync::atomic::AtomicU64::new(u64::from_le_bytes(bytes)),
             node: request.context.service().node_id.clone(),

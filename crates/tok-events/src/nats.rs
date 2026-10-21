@@ -380,7 +380,7 @@ impl Bus {
 /// 已完成当前连接订阅就绪确认的独立订阅；必须交给运行时监督，不自行 spawn。
 pub struct Subscription {
     service: tok_core::service::Identity,
-    extensions: tok_core::execution::Extensions,
+    extensions: tok_core::Extensions,
     bus: Bus,
     topics: crate::TopicFilter,
     subscribers: SelectAll<Subscriber>,
@@ -434,9 +434,9 @@ impl Subscription {
                         #[expect(clippy::let_underscore_must_use, reason="追踪关联失败不能阻断有效业务事件。")]
                         let _ = span.set_parent(parent);
                     }
-                    let mut context = tok_core::execution::Context::new(
+                    let mut context = tok_service::Context::new(
                         self.service.clone(), format!("event/{}", message.event_type),
-                        tok_core::execution::Source::Event { event_id: message.event_id.to_string() },
+                        tok_service::Source::Event { event_id: message.event_id.to_string() },
                         Duration::from_millis(self.bus.config.handler_timeout_ms), shutdown.child_token(),
                     ).map_err(|_| Error::InvalidInput("事件执行上下文无效"))?.with_span(span.clone());
                     *context.extensions_mut() = self.extensions.clone();

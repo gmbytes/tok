@@ -27,7 +27,7 @@ pub(super) struct SessionState {
     pub(super) extension: Arc<dyn super::extension::Factory>,
     pub(super) closing_notified: AtomicBool,
     pub(super) manager: std::sync::Weak<super::manager::ManagerState>,
-    pub(super) extensions: tok_core::execution::Extensions,
+    pub(super) extensions: tok_core::Extensions,
     pub(super) pipeline: Arc<crate::player::Pipeline>,
     pub(super) execution_budget: std::time::Duration,
     pub(super) topic_gate: tokio::sync::Mutex<()>,

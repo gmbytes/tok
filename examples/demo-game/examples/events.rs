@@ -1,12 +1,9 @@
 //! 同一事件注册链的本地借用和远程解码适配，不需要启动 NATS。
 use std::{sync::Arc, time::Duration};
 use tok::{
-    core::{
-        execution::{Context, Source},
-        service::Identity,
-    },
+    core::service::Identity,
     events::{Envelope, Event, EventId, Message, Outcome, Registry},
-    service::Request,
+    service::{Context, Request, Source},
 };
 use tokio_util::sync::CancellationToken;
 #[derive(Clone, PartialEq, prost::Message)]

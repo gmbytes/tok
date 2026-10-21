@@ -9,6 +9,7 @@ use std::{
     },
     time::Duration,
 };
+use tok_core::BoxFuture;
 use tok_gateway::{
     ErrorCode, Gateway,
     codec::{FrameCodec, VERSION},
@@ -21,10 +22,7 @@ use tok_gateway::{
 use tok_infra::ownership::MemoryOwnership;
 use tok_player::{
     LogicalMessage, MessageKind,
-    ownership::{
-        Owner as SessionOwner, Record as SessionOwnership, Store as OwnershipStore,
-        Task as OwnershipTask,
-    },
+    ownership::{Owner as SessionOwner, Record as SessionOwnership, Store as OwnershipStore},
 };
 use tokio::{
     io::AsyncWriteExt,
@@ -314,7 +312,7 @@ struct DelayedRenew {
     renewals: Arc<AtomicUsize>,
 }
 impl OwnershipStore for DelayedRenew {
-    fn lookup(&self, player: &str) -> OwnershipTask<'_, Option<SessionOwnership>> {
+    fn lookup(&self, player: &str) -> BoxFuture<'_, tok_player::Result<Option<SessionOwnership>>> {
         self.memory.lookup(player)
     }
     fn acquire(
@@ -324,10 +322,14 @@ impl OwnershipStore for DelayedRenew {
         owner: SessionOwner,
         expected: Option<u64>,
         ttl: Duration,
-    ) -> OwnershipTask<'_, SessionOwnership> {
+    ) -> BoxFuture<'_, tok_player::Result<SessionOwnership>> {
         self.memory.acquire(player, session, owner, expected, ttl)
     }
-    fn renew(&self, record: SessionOwnership, ttl: Duration) -> OwnershipTask<'_, ()> {
+    fn renew(
+        &self,
+        record: SessionOwnership,
+        ttl: Duration,
+    ) -> BoxFuture<'_, tok_player::Result<()>> {
         Box::pin(async move {
             self.memory.renew(record, ttl).await?;
             self.renewals.fetch_add(1, Ordering::SeqCst);
@@ -338,7 +340,7 @@ impl OwnershipStore for DelayedRenew {
             Ok(())
         })
     }
-    fn release(&self, record: SessionOwnership) -> OwnershipTask<'_, bool> {
+    fn release(&self, record: SessionOwnership) -> BoxFuture<'_, tok_player::Result<bool>> {
         self.memory.release(record)
     }
 }
@@ -2003,13 +2005,13 @@ async fn built_in_event_handlers_and_custom_components_compose_independently() {
 }
 
 fn event_request<T>(input: T) -> tok_service::Request<T> {
-    let context = tok_core::execution::Context::new(
+    let context = tok_service::Context::new(
         tok_core::service::Identity {
             node_id: "test".into(),
             service_name: "gateway".into(),
         },
         "test",
-        tok_core::execution::Source::Rpc { request_id: 1 },
+        tok_service::Source::Rpc { request_id: 1 },
         Duration::from_secs(5),
         CancellationToken::new(),
     )

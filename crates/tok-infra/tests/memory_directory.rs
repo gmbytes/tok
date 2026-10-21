@@ -47,7 +47,9 @@ fn duplicate_registration_preserves_original_service() {
     directory.register(original.clone()).unwrap();
     let mut replacement = original.clone();
     replacement.address = "127.0.0.1:8001".parse().unwrap();
-    assert!(directory.register(replacement).is_err());
+    assert!(
+        matches!(directory.register(replacement), Err(tok_core::Error::RegistrationConflict(reason)) if reason.contains("player-1") && reason.contains("player"))
+    );
     assert_eq!(directory.snapshot("player").unwrap(), vec![original]);
 }
 

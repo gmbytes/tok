@@ -1,10 +1,10 @@
 use crate::Request;
+use crate::{Context as ExecutionContext, StopReason};
 use std::{
     future::Future,
     pin::Pin,
     task::{Context, Poll},
 };
-use tok_core::execution::{Context as ExecutionContext, StopReason};
 use tokio::time::Timeout;
 use tokio_util::sync::WaitForCancellationFutureOwned;
 use tower::{ServiceExt, util::Oneshot};

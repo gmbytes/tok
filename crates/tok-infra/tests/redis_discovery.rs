@@ -64,7 +64,9 @@ async fn registration_cache_watch_expiry_restart_and_old_instance_safety() {
     observer.initialize().await.unwrap();
     isolated.initialize().await.unwrap();
     first.register(service(17001)).await.unwrap();
-    assert!(replacement.register(service(17002)).await.is_err());
+    assert!(
+        matches!(replacement.register(service(17002)).await, Err(tok_core::Error::RegistrationConflict(reason)) if reason.contains("game"))
+    );
     let stop = CancellationToken::new();
     let mut tasks = JoinSet::new();
     let running = run(&mut tasks, &first, &stop);
@@ -110,7 +112,10 @@ async fn lost_lease_fails_worker_and_stale_cache_is_not_usable_forever() {
     tokio::time::sleep(Duration::from_millis(config.lease_ttl_ms + 50)).await;
     assert!(first.snapshot("guild").is_err());
     replacement.register(service(17004)).await.unwrap();
-    assert!(first.run(CancellationToken::new()).await.is_err());
+    assert!(matches!(
+        first.run(CancellationToken::new()).await,
+        Err(tok_core::Error::DiscoveryUnavailable)
+    ));
     assert!(first.snapshot("guild").is_err());
     first.withdraw().await.unwrap();
     replacement.initialize().await.unwrap();
@@ -119,4 +124,33 @@ async fn lost_lease_fails_worker_and_stale_cache_is_not_usable_forever() {
         17004
     );
     replacement.withdraw().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "需要真实 Redis；通过 just redis-test 显式运行"]
+async fn registration_capacity_is_distinct_from_conflict_and_recovers_after_removal() {
+    let mut config = config();
+    config.lease_ttl_ms = 3000;
+    config.operation_timeout_ms = 500;
+    let directory = RedisDirectory::new(config, "game").unwrap();
+    for index in 0..64 {
+        let mut entry = service(17005);
+        entry.service_name = format!("service-{index}");
+        directory.register(entry).await.unwrap();
+    }
+    let mut duplicate = service(17005);
+    duplicate.service_name = "service-0".into();
+    assert!(matches!(
+        directory.register(duplicate).await,
+        Err(tok_core::Error::RegistrationConflict(_))
+    ));
+    let mut extra = service(17006);
+    extra.service_name = "extra".into();
+    assert!(matches!(
+        directory.register(extra.clone()).await,
+        Err(tok_core::Error::RegistrationCapacityExceeded)
+    ));
+    assert!(directory.unregister("game", "service-0").await.unwrap());
+    directory.register(extra).await.unwrap();
+    directory.withdraw().await.unwrap();
 }

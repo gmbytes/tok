@@ -10,7 +10,7 @@ use std::{
     task::{Context, Poll},
     time::Duration,
 };
-use tok_core::coordination::{LockBackend, LockKey};
+use tok_core::lock::{Backend as LockBackend, Key as LockKey};
 use tok_proto::internal::v1::{CallResponse, Payload};
 use tokio::time::{Instant, timeout};
 use tonic::Status;
@@ -186,8 +186,8 @@ where
 fn status(error: tok_core::Error) -> Status {
     match error {
         tok_core::Error::InvalidInput(_) => Status::invalid_argument("请求锁参数无效"),
-        tok_core::Error::LockTimeout => Status::deadline_exceeded("请求锁获取超时"),
-        tok_core::Error::LockCapacity => Status::resource_exhausted("请求锁容量已满"),
+        tok_core::Error::LockWaitTimeout => Status::deadline_exceeded("请求锁获取超时"),
+        tok_core::Error::LockCapacityExceeded => Status::resource_exhausted("请求锁容量已满"),
         _ => Status::unavailable("请求锁后端不可用"),
     }
 }

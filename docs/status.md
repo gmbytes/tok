@@ -2,11 +2,31 @@
 
 核对日期：2026-10-21。P6 已提交为 `06d9dd2`，P7 应用组装与接口清理已提交为 `017a9ea`。框架的“服务 + 处理链”方向校正已完成[七批计划](implementation-plan.md)本轮验收，历史结果见[实施历史](implementation-history.md)；本页只维护当前能力和边界。
 
-## crate 边界校正
+## crate 与基础契约
 
-新增 [tok-player](../crates/tok-player/src/lib.rs)，只依赖 tok-core，集中会话身份、逻辑消息、玩家计时需求、所有权及恢复凭证契约。所有权接口为 ownership::Store / Owner / Record，专用错误归 player::Error，通用错误以 Core 保留。RPC 的 CallContext 移至 [tok-rpc](../crates/tok-rpc/src/context.rs)。tok 门面增加 player 导出，不保留旧 core 路径别名。
+玩家运行契约已独立为 [tok-player](../crates/tok-player/src/lib.rs)，分库提交为 `9f32c91`；RPC 的 CallContext 位于 [tok-rpc](../crates/tok-rpc/src/context.rs)。Context / Source / StopReason 归 tok-service，Extensions 独立为 tok_core::Extensions。core 删除 tokio-util 与 tracing 依赖，当前只依赖 serde / thiserror。
 
-tok-core 保留服务身份、通用执行上下文、计时触发来源、发现、路由与请求锁；tok-service 的 execution / lifecycle / task 和 tok-events 均不依赖 tok-player。gateway、RPC 与 infra 的玩家部分显式引用新契约。只调整 Rust API 归属，不更改客户端或内部 protobuf 线协议、Redis 键、租约与调用语义。本轮校正已完成验收，随本次提交交付；249 项工作区测试、Clippy、rustdoc、七个 smoke 和七项真实 Redis 专项通过。按用户要求未做 release 构建，验证范围见实施计划。
+| core 范围 | 当前职责与接口 |
+| --- | --- |
+| service | Identity 表示无地址的服务身份，ServiceDescriptor 表示可发现的网络服务 |
+| discovery | ServiceDirectory 读本地快照，ServiceRegistry 发布/撤销，DirectoryWatch 合并变更通知 |
+| routing | ServiceRouter 根据服务名与业务 ID 选点，不负责发现写入或自动重试 |
+| lock | Key / Lease / Backend 定义请求级租约，后端在 infra、中间件在 RPC |
+| 根导出 | Extensions 是类型化能力集合，TimerTrigger 是通用计时来源，BoxFuture 是不隐含 Result 的 Send Future 别名 |
+
+锁、所有权和发现统一使用 BoxFuture，并显式保留 core::Result 或 player::Result。原 Operation 与 RegistrationTask 别名移除；根导出的 ServiceDirectory 等角色名前缀有辨识用途，继续保留。DirectoryStateUnavailable 表达目录本地状态不可用，Unsupported 表达当前组件不支持能力；错误类别按 core 声明的契约定义，不收集 Redis、RPC 或玩家业务专有错误。
+
+此轮上下文、锁模块及 Future 别名校正随本次提交交付。客户端与内部 protobuf、Redis 键、期限、取消、追踪及租约行为均保持原语义。此前验收记录保留在实施历史和计划；本次 BoxFuture 统一已通过 40 项 infra/RPC 常规测试、12 项指南测试、全目标 Clippy 和 rustdoc；未重复其他外部专项或完整工作区测试，按用户要求未做 release 构建。
+
+## core 错误契约
+
+Error 保留为通用基础契约的错误类型，不承担整个工程的错误全集。锁竞争等待、容量耗尽、能力不支持、注册冲突和本地目录状态分别使用 LockWaitTimeout / LockCapacityExceeded / Unsupported / RegistrationConflict / DirectoryStateUnavailable。InvalidInput / InvalidConfig / NoAvailableService / CoordinationUnavailable / DiscoveryUnavailable 保留明确用途，后端将具体故障映射到契约类别。
+
+发现首次注册冲突、资源容量耗尽与租约失效分别报告 RegistrationConflict、RegistrationCapacityExceeded 和 DiscoveryUnavailable，容量或续租失败不再误报重复注册。各接口的主要错误类别见 core::Error 的 rustdoc 表；类型分类用于处理，错误文本用于诊断，不向客户端直接泄漏底层凭据。本次已完成验收，随本次提交交付：40 项 infra/RPC 常规测试、12 项指南测试、3 项真实 Redis 发现及 5 项真实 Redis 锁专项通过；最终 Clippy、rustdoc、格式检查通过。
+
+## 公开入口规则落地
+
+AGENTS.md 已记录有官方依据的 API 组织规则：功能命名空间公开、实现模块默认私有、主要入口可根重导出、允许双路径。core 保留四个功能模块，error 模块改为私有，错误分类表移到公开 Error 上；Identity 增加根导出，与 service::Identity 指向同一类型。已有角色名前缀及有使用价值的双路径保留。本次已完成验收，随本次提交交付：全目标 Clippy、rustdoc、12 项指南测试及生成文档的公开入口检查通过。未做 release 构建。
 
 ## 当前能力
 
@@ -14,7 +34,7 @@ tok-core 保留服务身份、通用执行上下文、计时触发来源、发�
 | --- | --- | --- |
 | 应用组装 | [Application](../crates/tok/src/application.rs) 复用共同 Factory / Builder，配置驱动共享监听、发现、就绪与退出；[RPC 组装](../crates/tok/src/application/rpc.rs) 自动注入初始化绑定 | 自定义 protobuf 可逐服务绑定，或显式注册完整端点；同一端点不混用两种方式 |
 | 无端点服务 | ServiceConfig.endpoint 可省略，纯事件/后台服务使用同一生命周期 | 不发布网络地址，不注入 application::Binding；需要发现查询时由组装层注入 |
-| 执行与中间件 | [execution::Context](../crates/tok-core/src/execution/context.rs)、[Request / Tower Layer](../crates/tok-service/src/lib.rs) 用于 RPC、事件、timer 与网关消息链 | 保留具体协议、输入/结果类型、可信入口校验和调度边界，无通用路由器/熔断器 |
+| 执行与中间件 | [service::Context](../crates/tok-service/src/context.rs)、[Request / Tower Layer](../crates/tok-service/src/lib.rs) 用于 RPC、事件、timer 与网关消息链 | 保留具体协议、输入/结果类型、可信入口校验和调度边界，无通用路由器/熔断器 |
 | 服务生命周期 | Factory / Init 初始化，Builder → Prepared → Running 消费式编排；task::Supervisor 驱动有界工作 | 主任务、后台故障及退出期限由所有者监督，不创建隐藏的任务运行时 |
 | RPC | [tok-rpc](../crates/tok-rpc/src/lib.rs) 共享端点、类型化分发、追踪、请求级锁和无自动重试客户端 | RPC 工厂初始化必须安装处理链，未安装不发布；同一端点不能覆盖同名 protobuf 服务 |
 | 事件 | [Registry](../crates/tok-events/src/registry.rs) 本地借用及远程解码共用处理表，有序多处理者、原始错误及 Arc 保留 | 本地 dispatch 显式等待；远程发布不等待业务结果，不提供事务或隐式去重 |

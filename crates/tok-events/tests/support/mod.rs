@@ -1,9 +1,7 @@
 use std::time::Duration;
-use tok_core::{
-    execution::{Context, Source},
-    service::Identity,
-};
+use tok_core::service::Identity;
 use tok_service::Request;
+use tok_service::{Context, Source};
 use tokio_util::sync::CancellationToken;
 pub fn context() -> Context {
     Context::new(

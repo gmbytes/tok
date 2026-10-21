@@ -7,7 +7,7 @@ use std::{
     },
     time::Duration,
 };
-use tok_core::{execution::Extensions, service::Identity};
+use tok_core::{Extensions, service::Identity};
 use tokio::task::{JoinError, JoinSet};
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, instrument::WithSubscriber};
@@ -103,7 +103,7 @@ impl From<task::Error> for Error {
 ///
 /// ```compile_fail
 /// use std::{sync::Arc, time::Duration};
-/// use tok_core::execution::Extensions;
+/// use tok_core::Extensions;
 /// use tok_service::lifecycle::{Factory, Builder};
 /// async fn build_twice(builder: Builder, factory: Arc<dyn Factory>) {
 ///     let first = builder.build(Arc::clone(&factory), Extensions::default(), Duration::from_secs(1)).await;

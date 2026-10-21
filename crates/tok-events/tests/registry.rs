@@ -153,7 +153,7 @@ async fn local_and_remote_execute_same_handlers_and_wire_metadata_does_not_leak_
     let mut registry = Registry::<u32, Outcome, tok_events::Error>::new(2).unwrap();
     registry.register::<GuildChanged,_>(|request| Box::pin(async move {
         assert_eq!(request.context.deadline(),*request.context.extensions().get::<std::time::Instant>().unwrap());
-        assert!(matches!(request.context.source(),tok_core::execution::Source::Event{event_id} if event_id==request.input.event.event_id.as_str()));
+        assert!(matches!(request.context.source(),tok_service::Source::Event{event_id} if event_id==request.input.event.event_id.as_str()));
         if let Some(message)=request.context.extensions().get::<Arc<Message>>() {
             assert_eq!(message.event_id,request.input.event.event_id);
         }

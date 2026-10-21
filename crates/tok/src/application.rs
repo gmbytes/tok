@@ -4,8 +4,8 @@ mod rpc;
 use std::{collections::BTreeMap, future::Future, sync::Arc, time::Duration};
 
 use tok_core::discovery::ServiceRegistry;
+use tok_core::{Extensions, service::Identity};
 use tok_core::{ServiceDescriptor, ServiceDirectory};
-use tok_core::{execution::Extensions, service::Identity};
 use tok_infra::discovery::{MemoryDirectory, redis::RedisDirectory};
 use tok_rpc::{RpcEndpoint, RpcReadiness};
 use tok_service::{
@@ -130,7 +130,7 @@ impl Application {
     pub fn new(config: AppConfig) -> Result<Self, Error> {
         config.validate()?;
         if config.discovery == DiscoveryBackend::Kubernetes {
-            return Err(tok_core::Error::NotImplemented("Kubernetes 服务发现").into());
+            return Err(tok_core::Error::Unsupported("Kubernetes 服务发现").into());
         }
         let directory = MemoryDirectory::default();
         let redis = if config.discovery == DiscoveryBackend::Redis {

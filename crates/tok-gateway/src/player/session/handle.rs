@@ -46,7 +46,7 @@ impl BoundSession {
         let original = (request.kind, request.request_id, request.message_id);
         let context = self.session.context_with_cancellation(
             format!("player/admission/{}", request.message_id),
-            tok_core::execution::Source::Client {
+            tok_service::Source::Client {
                 request_id: request.request_id,
                 message_id: request.message_id,
             },
@@ -229,7 +229,7 @@ impl SessionHandle {
     pub(super) fn changed(&self, change: super::extension::Change) {
         let Ok(context) = self.context(
             "player/session/change".into(),
-            tok_core::execution::Source::Internal,
+            tok_service::Source::Internal,
         ) else {
             return;
         };
@@ -246,22 +246,22 @@ impl SessionHandle {
         }
     }
     /// 当前会话工厂安装的本地能力；不会隐式写入远端上下文。
-    pub fn extensions(&self) -> &tok_core::execution::Extensions {
+    pub fn extensions(&self) -> &tok_core::Extensions {
         &self.0.extensions
     }
     pub(super) fn context(
         &self,
         operation: String,
-        source: tok_core::execution::Source,
-    ) -> Result<tok_core::execution::Context> {
+        source: tok_service::Source,
+    ) -> Result<tok_service::Context> {
         self.context_with_cancellation(operation, source, self.0.cancel.child_token())
     }
     // 停止新业务后仍按原预算收束在途执行；会话取消信号通过 SessionHandle 单独提供。
     pub(super) fn execution_context(
         &self,
         operation: String,
-        source: tok_core::execution::Source,
-    ) -> Result<tok_core::execution::Context> {
+        source: tok_service::Source,
+    ) -> Result<tok_service::Context> {
         if self.0.cancel.is_cancelled() {
             return Err(ErrorCode::SessionClosed.into());
         }
@@ -270,11 +270,11 @@ impl SessionHandle {
     fn context_with_cancellation(
         &self,
         operation: String,
-        source: tok_core::execution::Source,
+        source: tok_service::Source,
         cancellation: CancellationToken,
-    ) -> Result<tok_core::execution::Context> {
+    ) -> Result<tok_service::Context> {
         let owner = &self.0.ownership.owner;
-        let mut context = tok_core::execution::Context::new(
+        let mut context = tok_service::Context::new(
             tok_core::service::Identity {
                 node_id: owner.node_id.clone(),
                 service_name: owner.service_name.clone(),
@@ -444,7 +444,7 @@ impl SessionHandle {
         );
         let context = self.context_with_cancellation(
             format!("player/downlink/{}", message.message_id),
-            tok_core::execution::Source::Internal,
+            tok_service::Source::Internal,
             cancellation,
         )?;
         let session = self.clone();

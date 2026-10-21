@@ -9,7 +9,7 @@ tok 是实验性的 Rust 游戏服务器框架。游戏通过本 crate 组装组
 | 范围 | 接口与边界 |
 | --- | --- |
 | 服务构建与运行 | Factory / Init / Builder / Running；Application 按配置组装，Gateway 作为扩展 |
-| 统一处理协议 | Request / execution::Context / Tower Layer；保留各入口的输入、结果及调度约束 |
+| 统一处理协议 | Request / service::Context / Tower Layer；保留各入口的输入、结果及调度约束 |
 | RPC 与事件 | 配置驱动的 RPC 工厂、统一事件 Registry，本地借用与远程解码共用处理链 |
 | 主题兴趣 | Event::topic 决定路由，Pool 聚合固定与会话兴趣，group 属于订阅组件 |
 | 生命周期扩展 | 网关、管理器、会话快照与结束等待，会话状态工厂及显式交接适配 |
@@ -39,33 +39,43 @@ tok-gateway 是这套基础设施的内置扩展，增加连接、认证、sessi
 
 | 使用入口 | 职责 |
 | --- | --- |
-| [`core`] / tok-core | 服务身份、执行上下文、发现、路由和通用请求锁契约 |
-| [`service`] / tok-service | Request、Tower 执行、服务工厂、生命周期和有界任务监督 |
+| [`core`] / tok-core | 服务身份、Extensions、发现、路由和通用请求锁契约 |
+| [`service`] / tok-service | Context / Source / StopReason、Request、Tower 执行、服务工厂、生命周期和有界任务监督 |
 | [`player`] / tok-player | SessionIdentity、LogicalMessage、TimerSpec / TimerUpdate、所有权与恢复凭证契约 |
 | [`rpc`] / tok-rpc | CallContext、RPC 编解码、客户端和处理链适配 |
 | [`gateway`] / tok-gateway | 连接、session FIFO、计时调度、下行和恢复的运行实现 |
 
 通用服务层不依赖 tok-player。tok-player 只依赖 tok-core，供 RPC、网关和基础设施后端共同使用，不能反向依赖 gateway 或门面。[`core::TimerTrigger`] 只表达通用调度来源；玩家具体调用哪个消息、携带什么正文以及如何更新计时集合，由 player 的计时需求表达。
 
-所有权使用 [`player::ownership::Store`]、[`player::ownership::Owner`]、[`player::ownership::Record`]；恢复凭证使用 [`player::credentials::ResumeTokenCodec`]。它们的结果为 [`player::Result`]，所有权冲突与本地凭证不可用属于 [`player::Error`]；通用参数或后端错误保留在 Error::Core 中。请求锁仍使用 core::coordination，不要求玩家会话。
+所有权使用 [`player::ownership::Store`]、[`player::ownership::Owner`]、[`player::ownership::Record`]；恢复凭证使用 [`player::credentials::ResumeTokenCodec`]。它们的结果为 [`player::Result`]，所有权冲突与本地凭证不可用属于 [`player::Error`]；通用参数或后端错误保留在 Error::Core 中。请求锁仍使用 core::lock，不要求玩家会话。锁、所有权与发现接口统一使用 [`core::BoxFuture`]，其中输出参数是完整类型，不隐含 Result。锁与发现返回 `BoxFuture<'a, core::Result<T>>`，所有权返回 `BoxFuture<'a, player::Result<T>>`。此别名不会自行排队、启动或监督任务；service::task::Task 继续表达交给监督范围的工作。原 Operation 与 RegistrationTask 别名已移除。
 
-迁移时将旧 core 下的玩家类型改从 player 导入，将 CallContext 改从 rpc 导入；不保留旧路径兼容别名。rpc::player 是 PlayerRpc 客户端适配，gateway::player 是会话运行实现，顶层 player 是共享契约，职责不同。
+迁移时将旧 core 下的玩家类型改从 player 导入，将 CallContext 改从 rpc 导入；Context / Source / StopReason 改从 service 导入，Extensions 改从 core 根导入；不保留旧路径兼容别名。rpc::player 是 PlayerRpc 客户端适配，gateway::player 是会话运行实现，顶层 player 是共享契约，职责不同。
+
+## 公开路径与内部模块
+
+公开 API 按使用者的功能概念组织，内部文件组织通过 mod 隐藏，主要入口可以由 pub use 重导出。此规则来自 Rust 官方对公开 API 与内部结构解耦的指导，不是固定目录模板。公开模块路径与根路径可以同时存在，指向同一定义，不要求只保留一个路径。
+
+core::discovery / lock / routing / service 是功能命名空间；常用的 Identity、ServiceDescriptor、ServiceDirectory、ServiceRegistry、DirectoryWatch 和 ServiceRouter 同时可从 core 根导入。Error / Result、Extensions、TimerTrigger 和 BoxFuture 直接从根访问，其实现模块私有。通常可导入主要类型；使用锁接口等一组相关项时保留模块限定名，避免 Key / Lease 等通用名字失去上下文。
+
+例如服务身份既可使用 `use tok::core::Identity`，也可使用 `use tok::core::service::Identity`；错误分类说明位于公开的 Error 类型文档，不需要访问内部 error 模块。根导出的角色名前缀按辨识价值保留，不因路径形式机械删改。
+
+## 错误边界
+
+[`core::Error`] 只表达基础契约可解释的失败，具体后端按契约映射；它不覆盖所有 RPC、玩家或游戏业务错误。核心接口的主要失败类别见 [`core::Error`] 的文档。例如请求锁区分 LockWaitTimeout、LockCapacityExceeded 与 CoordinationUnavailable，服务发现区分 RegistrationConflict、RegistrationCapacityExceeded、DirectoryStateUnavailable 和 DiscoveryUnavailable；不支持可选能力使用 Unsupported。
+
+调用方根据变体判断，不解析 Display 文本。新增错误类别应对应新的处理语义；增加一种底层网络错误通常仍映射到既有不可用类别。其他领域继续使用自己的错误类型，例如 player::Error、rpc::Error 或 tonic::Status；跨领域转换由适配层负责。内置后端的错误信息隐藏凭据，不将底层 URL 或 token 作为诊断正文。
 
 ## 通用执行与处理链
 
-使用 [`core::execution::Context`]、类型化 [`service::Request`] 与共同的 [`service::Layer`]。
+使用 [`service::Context`]、类型化 [`service::Request`] 与共同的 [`service::Layer`]。
 上下文的 `service()` 表示当前执行所属服务，`operation()` 是入口适配器填写的稳定操作标识，不拼接实体或请求 ID。业务实体身份、路由输入等按需使用类型化输入或扩展携带；当前未提供通用路由器或熔断器。
-共同上下文位于 tok-core，类型化执行与生命周期位于 tok-service；普通服务与 gateway 共用，网关另行增加会话能力及专用协议状态机。
+执行上下文、类型化执行与生命周期统一位于 tok-service，类型化能力容器使用 tok_core::Extensions；普通服务与 gateway 共用，网关另行增加会话能力及专用协议状态机。
 
 以下普通 Rust 输入不要求 protobuf，本地状态直接借用，经过 await 后仍在当前任务中修改：
 
 ```rust
 use std::{io, time::Duration};
-use tok::{
-    core::{execution::{Context, Source}, service::Identity},
-    application::CancellationToken,
-    service::{Layer as ExecutionLayer, Request},
-};
+use tok::{service::{Context, Source, Layer as ExecutionLayer, Request}, core::Identity, application::CancellationToken};
 use tower::{Layer, ServiceExt, service_fn};
 
 async fn update(request: Request<&mut u64>) -> io::Result<u64> {
@@ -188,8 +198,7 @@ Application 通过类型化 [`application::Binding`] 扩展注入端点和发现
 
 ```rust
 use std::{sync::Arc, time::Duration};
-use tok::{core::{execution::Extensions, service::Identity}, application::CancellationToken,
-    service::{lifecycle::{Init, Factory, Phase, InitTask, Builder}, task::Task}};
+use tok::{core::{Extensions, service::Identity}, application::CancellationToken, service::{lifecycle::{Init, Factory, Phase, InitTask, Builder}, task::Task}};
 
 fn initialize(init: Init) -> InitTask {
     Box::pin(async move {
@@ -377,7 +386,7 @@ service_name = "audit"
 
 [`infra::locks::Memory`] 提供有界单进程请求锁，克隆共享状态；
 [`infra::locks::Redis`] 提供跨进程请求锁，配置为 [`infra::locks::RedisConfig`]。
-两者实现 [`core::coordination::LockBackend`]，返回显式释放的 [`core::coordination::LockLease`]。
+两者实现 [`core::lock::Backend`]，返回显式释放的 [`core::lock::Lease`]。
 Redis 后端使用有限 TTL 和唯一持有者标识，Lua 比较身份后释放；旧租约不能删除新锁。
 后端不续租，取消后不在 Drop 中异步释放，依靠 TTL 兜底。
 
@@ -388,13 +397,13 @@ Redis 后端使用有限 TTL 和唯一持有者标识，Lua 比较身份后释�
 ```rust
 use std::sync::Arc;
 use tok::{
-    core::coordination::LockBackend,
+    core::lock::Backend,
     infra::locks,
     rpc::{CallHandler, HandlerRegistry, RpcService, TowerHandler, lock, tower::{self, Layer}},
 };
 
 # fn example() -> Result<(), Box<dyn std::error::Error>> {
-let backend: Arc<dyn LockBackend> = Arc::new(locks::Memory::new(1024)?);
+let backend: Arc<dyn Backend> = Arc::new(locks::Memory::new(1024)?);
 let registry = Arc::new(HandlerRegistry::new()); // 在此注册业务 handler。
 let service = tower::service_fn(move |request| {
     let registry = Arc::clone(&registry);
@@ -935,7 +944,7 @@ RPC 默认服务执行上限为 30 秒，可用 `with_execution` 显式设置；
 
 ```rust
 use std::time::Duration;
-use tok::{core::{execution::{Context, Source}, service::Identity}, events::{Event, Envelope, EventId, Registry}, service::Request};
+use tok::{service::{Context, Source, Request}, core::service::Identity, events::{Event, Envelope, EventId, Registry}};
 use tokio_util::sync::CancellationToken;
 struct Changed { delta: i64 }
 impl Event for Changed { const NAME: &'static str = "game.value.changed.v1"; }
@@ -1276,7 +1285,7 @@ fn pipeline(executor: Arc<dyn Executor>) -> Pipeline {
 | --- | --- |
 | [`config`] | TOML 加载、校验与端点引用 |
 | [`application`] | 服务工厂、启动监督与退出 |
-| [`core`] | 共享类型、错误、执行上下文和组件契约 |
+| [`core`] | 共享类型、错误、Extensions 和基础组件契约 |
 | [`service`] | 类型化执行与预算/取消 Layer，以及公共工厂、任务监督和生命周期 |
 | [`infra`] | 服务目录、路由及协调后端 |
 | [`rpc`] | 内部 RPC 与 Tower 组装 |

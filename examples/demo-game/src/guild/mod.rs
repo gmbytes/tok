@@ -25,7 +25,7 @@ pub fn handlers() -> Result<HandlerRegistry, tok::rpc::Error> {
 /// 用给定请求锁后端包住公会分发；跨节点部署时须注入共享后端。
 pub fn locked_handler(
     namespace: &str,
-    backend: std::sync::Arc<dyn tok::core::coordination::LockBackend>,
+    backend: std::sync::Arc<dyn tok::core::lock::Backend>,
 ) -> Result<std::sync::Arc<dyn tok::rpc::CallHandler>, tok::rpc::Error> {
     use std::sync::Arc;
     use tok::rpc::{

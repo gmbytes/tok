@@ -3,7 +3,7 @@
 use crate::Handle;
 use crate::{ErrorCode, Result, transport::GatewayTransport};
 use std::{future::Future, pin::Pin, sync::Arc};
-use tok_core::{execution::Extensions, service::Identity};
+use tok_core::{Extensions, service::Identity};
 use tok_service::{lifecycle::Init, task::Supervisor};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;

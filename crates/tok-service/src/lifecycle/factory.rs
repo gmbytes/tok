@@ -1,7 +1,7 @@
 use super::Handle;
 use crate::task::{BoxError, Task};
 use std::{future::Future, pin::Pin};
-use tok_core::{execution::Extensions, service::Identity};
+use tok_core::{Extensions, service::Identity};
 
 /// 初始化状态、入口与处理链，成功后返回服务主任务。
 pub type InitTask = Pin<Box<dyn Future<Output = Result<Task, BoxError>> + Send>>;

@@ -1,14 +1,11 @@
 use crate::CallContext;
 use prost::Message;
 use std::{collections::BTreeMap, future::Future, pin::Pin, sync::Arc, time::Duration};
-use tok_core::{
-    TimerTrigger,
-    execution::{Context, Source, StopReason},
-    service::Identity,
-};
+use tok_core::{TimerTrigger, service::Identity};
 use tok_player::{SessionIdentity, TimerUpdate};
 use tok_proto::internal::v1::{self as proto, CallRequest, CallResponse, Payload};
 use tok_service::Request as ExecutionRequest;
+use tok_service::{Context, Source, StopReason};
 use tonic::{Request, Response, Status};
 use tower::{Layer as _, Service, ServiceExt};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
@@ -399,7 +396,7 @@ pub struct RpcService {
     handler: Arc<dyn CallHandler>,
     budget: Duration,
     cancellation: tokio_util::sync::CancellationToken,
-    extensions: tok_core::execution::Extensions,
+    extensions: tok_core::Extensions,
 }
 
 impl RpcService {
@@ -420,7 +417,7 @@ impl RpcService {
             handler,
             budget: Duration::from_secs(30),
             cancellation: tokio_util::sync::CancellationToken::new(),
-            extensions: tok_core::execution::Extensions::default(),
+            extensions: tok_core::Extensions::default(),
         })
     }
 
@@ -446,7 +443,7 @@ impl RpcService {
         mut self,
         budget: Duration,
         cancellation: tokio_util::sync::CancellationToken,
-        extensions: tok_core::execution::Extensions,
+        extensions: tok_core::Extensions,
     ) -> Result<Self, crate::Error> {
         if budget.is_zero() || budget > Duration::from_secs(86_400) {
             return Err(crate::Error::Configuration(

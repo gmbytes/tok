@@ -5,13 +5,11 @@ use std::{
     sync::Mutex,
     time::{Duration, Instant},
 };
+use tok_core::BoxFuture;
 use tok_player::{Error, Result};
 use tok_player::{
     SessionIdentity,
-    ownership::{
-        Owner as SessionOwner, Record as SessionOwnership, Store as OwnershipStore,
-        Task as OwnershipTask,
-    },
+    ownership::{Owner as SessionOwner, Record as SessionOwnership, Store as OwnershipStore},
 };
 
 struct Record {
@@ -61,7 +59,7 @@ impl MemoryOwnership {
         expected_epoch: Option<u64>,
         expected_session_id: Option<String>,
         ttl: Duration,
-    ) -> OwnershipTask<'_, SessionOwnership> {
+    ) -> BoxFuture<'_, tok_player::Result<SessionOwnership>> {
         Box::pin(async move {
             if [
                 player_id.as_str(),
@@ -169,7 +167,7 @@ impl OwnershipStore for MemoryOwnership {
         expected: SessionOwnership,
         target: SessionOwner,
         ttl: Duration,
-    ) -> OwnershipTask<'_, SessionOwnership> {
+    ) -> BoxFuture<'_, tok_player::Result<SessionOwnership>> {
         Box::pin(async move {
             let expires = expiration(ttl)?;
             if target.node_id.trim().is_empty() || target.service_name.trim().is_empty() {
@@ -206,7 +204,10 @@ impl OwnershipStore for MemoryOwnership {
             Ok(ownership)
         })
     }
-    fn lookup(&self, player_id: &str) -> OwnershipTask<'_, Option<SessionOwnership>> {
+    fn lookup(
+        &self,
+        player_id: &str,
+    ) -> BoxFuture<'_, tok_player::Result<Option<SessionOwnership>>> {
         let player_id = player_id.to_owned();
         Box::pin(async move {
             let mut state = self.state()?;
@@ -227,7 +228,7 @@ impl OwnershipStore for MemoryOwnership {
         owner: SessionOwner,
         expected_epoch: Option<u64>,
         ttl: Duration,
-    ) -> OwnershipTask<'_, SessionOwnership> {
+    ) -> BoxFuture<'_, tok_player::Result<SessionOwnership>> {
         self.acquire_checked(player_id, session_id, owner, expected_epoch, None, ttl)
     }
     fn acquire_for_relogin(
@@ -237,7 +238,7 @@ impl OwnershipStore for MemoryOwnership {
         owner: SessionOwner,
         expected_epoch: Option<u64>,
         ttl: Duration,
-    ) -> OwnershipTask<'_, SessionOwnership> {
+    ) -> BoxFuture<'_, tok_player::Result<SessionOwnership>> {
         self.acquire_checked(
             previous.player_id,
             session_id,
@@ -248,7 +249,11 @@ impl OwnershipStore for MemoryOwnership {
         )
     }
 
-    fn renew(&self, ownership: SessionOwnership, ttl: Duration) -> OwnershipTask<'_, ()> {
+    fn renew(
+        &self,
+        ownership: SessionOwnership,
+        ttl: Duration,
+    ) -> BoxFuture<'_, tok_player::Result<()>> {
         Box::pin(async move {
             let mut state = self.state()?;
             let expires = expiration(ttl)?;
@@ -264,7 +269,7 @@ impl OwnershipStore for MemoryOwnership {
         })
     }
 
-    fn release(&self, ownership: SessionOwnership) -> OwnershipTask<'_, bool> {
+    fn release(&self, ownership: SessionOwnership) -> BoxFuture<'_, tok_player::Result<bool>> {
         Box::pin(async move {
             let mut state = self.state()?;
             let key = &ownership.identity.player_id;

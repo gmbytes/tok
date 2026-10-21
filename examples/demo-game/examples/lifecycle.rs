@@ -10,13 +10,10 @@ use std::{
 };
 use tok::{
     application::CancellationToken,
-    core::{
-        execution::{Context as ExecutionContext, Extensions, Source},
-        service::Identity,
-    },
+    core::{Extensions, service::Identity},
     gateway::{Gateway, GatewayConfig, GatewayIngress, GatewayTask},
     service::{
-        Layer as ExecutionLayer, Request,
+        Context as ExecutionContext, Layer as ExecutionLayer, Request, Source,
         lifecycle::{Builder, Factory, Init, InitTask},
         task::{BoxError, Task},
     },

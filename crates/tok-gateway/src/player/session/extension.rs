@@ -1,7 +1,7 @@
 //! 会话作用域状态及生命周期观察；迁移必须显式定义快照格式。
 use super::SessionHandle;
 use crate::{ErrorCode, Result};
-use tok_core::execution::Extensions;
+use tok_core::Extensions;
 use tok_player::SessionIdentity;
 use tok_service::Request;
 

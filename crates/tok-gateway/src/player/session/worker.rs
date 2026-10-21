@@ -10,9 +10,9 @@ use std::{
     sync::{Arc, atomic::Ordering},
     time::Duration,
 };
-use tok_core::execution::Source;
 use tok_player::{LogicalMessage, MessageKind, ownership::Store as OwnershipStore};
 use tok_service::Request;
+use tok_service::Source;
 use tokio::sync::{mpsc, oneshot};
 use tower::{Layer as _, ServiceExt};
 
@@ -270,10 +270,10 @@ pub(super) fn execution_error(
 ) -> crate::GatewayError {
     match error {
         tok_service::Error::Inner(error) => error,
-        tok_service::Error::Stopped(tok_core::execution::StopReason::Cancelled) => {
+        tok_service::Error::Stopped(tok_service::StopReason::Cancelled) => {
             ErrorCode::SessionClosed.into()
         }
-        tok_service::Error::Stopped(tok_core::execution::StopReason::DeadlineExceeded) => {
+        tok_service::Error::Stopped(tok_service::StopReason::DeadlineExceeded) => {
             ErrorCode::Timeout.into()
         }
     }

@@ -2,7 +2,7 @@
 use std::{sync::Arc, time::Duration};
 use tok_core::{
     Error,
-    coordination::{LockBackend, LockKey},
+    lock::{Backend as LockBackend, Key as LockKey},
 };
 use tok_infra::locks::{Redis, RedisConfig};
 
@@ -37,7 +37,7 @@ async fn independent_clients_compete_and_stale_release_preserves_new_lease() {
     let token = old.token().to_owned();
     assert!(matches!(
         second.acquire(key("guild", "1"), Duration::ZERO, TTL).await,
-        Err(Error::LockTimeout)
+        Err(Error::LockWaitTimeout)
     ));
     let different_bid = second
         .acquire(key("guild", "2"), Duration::ZERO, TTL)
@@ -60,7 +60,7 @@ async fn independent_clients_compete_and_stale_release_preserves_new_lease() {
         first
             .acquire(key("guild", "1"), Duration::from_millis(20), TTL)
             .await,
-        Err(Error::LockTimeout)
+        Err(Error::LockWaitTimeout)
     ));
     current.release().await.unwrap();
     first
@@ -83,7 +83,9 @@ async fn contention_has_one_winner_and_abandoned_lease_expires() {
         b.acquire(key("guild", "1"), Duration::ZERO, TTL)
     );
     let lease = match (a_result, b_result) {
-        (Ok(lease), Err(Error::LockTimeout)) | (Err(Error::LockTimeout), Ok(lease)) => lease,
+        (Ok(lease), Err(Error::LockWaitTimeout)) | (Err(Error::LockWaitTimeout), Ok(lease)) => {
+            lease
+        }
         _ => panic!("必须恰好一个持有者"),
     };
     lease.release().await.unwrap();
@@ -294,7 +296,7 @@ async fn separate_processes_share_the_same_lock() {
             .acquire(key("guild", "1"), Duration::from_millis(20), TTL)
             .await;
         match std::env::var("TOK_LOCK_CHILD_MODE").unwrap().as_str() {
-            "blocked" => assert!(matches!(result, Err(Error::LockTimeout))),
+            "blocked" => assert!(matches!(result, Err(Error::LockWaitTimeout))),
             "free" => result.unwrap().release().await.unwrap(),
             _ => panic!("非法子进程测试模式"),
         }

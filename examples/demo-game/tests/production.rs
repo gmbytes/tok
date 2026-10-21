@@ -231,13 +231,13 @@ async fn local_production_error_reaches_the_original_call_without_partial_state_
 }
 
 fn execution<T>(input: T) -> tok::service::Request<T> {
-    let context = tok::core::execution::Context::new(
+    let context = tok::service::Context::new(
         tok::core::service::Identity {
             node_id: "node".into(),
             service_name: "player".into(),
         },
         "test",
-        tok::core::execution::Source::Rpc { request_id: 1 },
+        tok::service::Source::Rpc { request_id: 1 },
         std::time::Duration::from_secs(5),
         tokio_util::sync::CancellationToken::new(),
     )

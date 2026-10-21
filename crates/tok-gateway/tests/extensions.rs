@@ -11,7 +11,7 @@ use std::{
     task::{Context as TaskContext, Poll},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use tok_core::{execution::Extensions, service::Identity};
+use tok_core::{Extensions, service::Identity};
 use tok_gateway::{
     ErrorCode, Gateway, GatewayError, Result,
     codec::{FrameCodec, VERSION},

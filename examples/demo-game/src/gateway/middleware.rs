@@ -8,7 +8,7 @@ use std::{
 use tok::observability::tracing;
 use tok::rpc::tower::{Layer, Service, ServiceExt};
 use tok::{
-    core::execution::Extensions,
+    core::Extensions,
     gateway::{
         ErrorCode, GatewayError, Result,
         player::{

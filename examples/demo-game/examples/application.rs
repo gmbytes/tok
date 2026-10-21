@@ -16,14 +16,13 @@ use std::{
 use tok::{
     AppConfig,
     application::Application,
-    core::execution::{Context, Source},
     events::{self, Envelope, Event, EventId, Outcome, Registry},
     rpc::{
         CallContext, HandlerRegistry, HandlerReply, RpcClients, RpcService,
         protocol::internal::v1::Payload, tonic::Status,
     },
     service::{
-        Request,
+        Context, Request, Source,
         lifecycle::{Init, InitTask},
         sync_handler,
         task::{BoxError, Task},

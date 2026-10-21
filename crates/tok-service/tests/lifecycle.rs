@@ -7,7 +7,7 @@ use std::{
     },
     time::Duration,
 };
-use tok_core::{execution::Extensions, service::Identity};
+use tok_core::{Extensions, service::Identity};
 use tok_service::{
     lifecycle::{Builder, Error, Factory, Init, InitTask, Phase},
     task::Task,

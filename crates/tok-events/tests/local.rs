@@ -163,17 +163,15 @@ async fn cancellation_and_deadline_are_not_renewed_for_nested_events() {
         registry
             .dispatch(&mut (), Request::new(context, &changed(1)))
             .await,
-        Err(DispatchError::Stopped(
-            tok_core::execution::StopReason::Cancelled
-        ))
+        Err(DispatchError::Stopped(tok_service::StopReason::Cancelled))
     ));
-    let context = tok_core::execution::Context::new(
+    let context = tok_service::Context::new(
         tok_core::service::Identity {
             node_id: "n".into(),
             service_name: "s".into(),
         },
         "parent",
-        tok_core::execution::Source::Rpc { request_id: 1 },
+        tok_service::Source::Rpc { request_id: 1 },
         std::time::Duration::ZERO,
         tokio_util::sync::CancellationToken::new(),
     )
@@ -184,7 +182,7 @@ async fn cancellation_and_deadline_are_not_renewed_for_nested_events() {
             .dispatch(&mut (), Request::new(context, &changed(1)))
             .await,
         Err(DispatchError::Stopped(
-            tok_core::execution::StopReason::DeadlineExceeded
+            tok_service::StopReason::DeadlineExceeded
         ))
     ));
 }

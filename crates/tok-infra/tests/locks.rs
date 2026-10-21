@@ -2,7 +2,7 @@
 use std::{sync::Arc, time::Duration};
 use tok_core::{
     Error,
-    coordination::{LockBackend, LockKey},
+    lock::{Backend as LockBackend, Key as LockKey},
 };
 use tok_infra::locks::Memory;
 use tokio::time::{advance, timeout};
@@ -65,14 +65,14 @@ async fn stale_release_cannot_delete_replacement_and_drop_waits_for_ttl() {
         backend
             .acquire(key("guild", "1"), Duration::ZERO, TTL)
             .await,
-        Err(Error::LockTimeout)
+        Err(Error::LockWaitTimeout)
     ));
     drop(current);
     assert!(matches!(
         backend
             .acquire(key("guild", "1"), Duration::ZERO, TTL)
             .await,
-        Err(Error::LockTimeout)
+        Err(Error::LockWaitTimeout)
     ));
     advance(TTL).await;
     backend
@@ -95,7 +95,7 @@ async fn wait_is_finite_and_cancelled_waiter_returns_capacity() {
         backend
             .acquire(key("guild", "2"), Duration::ZERO, TTL)
             .await,
-        Err(Error::LockCapacity)
+        Err(Error::LockCapacityExceeded)
     ));
     let pending = Arc::clone(&backend);
     let task = tokio::spawn(async move { pending.acquire(key("guild", "1"), TTL, TTL).await });
@@ -104,7 +104,7 @@ async fn wait_is_finite_and_cancelled_waiter_returns_capacity() {
         backend
             .acquire(key("guild", "1"), Duration::ZERO, TTL)
             .await,
-        Err(Error::LockCapacity)
+        Err(Error::LockCapacityExceeded)
     ));
     task.abort();
     assert!(matches!(task.await, Err(error) if error.is_cancelled()));
@@ -112,7 +112,7 @@ async fn wait_is_finite_and_cancelled_waiter_returns_capacity() {
         backend
             .acquire(key("guild", "1"), Duration::from_millis(50), TTL)
             .await,
-        Err(Error::LockTimeout)
+        Err(Error::LockWaitTimeout)
     ));
     held.release().await.unwrap();
     let lease = timeout(

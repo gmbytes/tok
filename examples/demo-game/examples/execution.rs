@@ -4,15 +4,11 @@
 use std::{io, sync::Arc, time::Duration};
 use tok::{
     application::CancellationToken,
-    core::{
-        TimerTrigger,
-        execution::{Context, Source},
-        service::Identity,
-    },
+    core::{TimerTrigger, service::Identity},
     gateway::{Gateway, player},
     infra::ownership::MemoryOwnership,
     player::ownership::Owner as SessionOwner,
-    service::{Layer as ExecutionLayer, Request, task},
+    service::{Context, Layer as ExecutionLayer, Request, Source, task},
 };
 use tower::{Layer, ServiceExt, service_fn};
 

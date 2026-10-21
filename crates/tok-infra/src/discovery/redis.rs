@@ -7,9 +7,9 @@ use std::{
     sync::{Arc, RwLock},
     time::{Duration, Instant},
 };
+use tok_core::BoxFuture;
 use tok_core::{
-    DirectoryWatch, Error, Result, ServiceDescriptor, ServiceDirectory,
-    discovery::{RegistrationTask, ServiceRegistry},
+    DirectoryWatch, Error, Result, ServiceDescriptor, ServiceDirectory, discovery::ServiceRegistry,
 };
 use tokio::sync::{Mutex, watch};
 use tokio_util::sync::CancellationToken;
@@ -193,7 +193,12 @@ impl RedisDirectory {
                 .await
                 .map_err(|_| Error::DiscoveryUnavailable)?;
             if success != 1 {
-                return Err(Error::DuplicateService(self.node_id.clone()));
+                return Err(if acquired {
+                    // 续租被拒绝表示原注册租约已失效，不是新的注册身份冲突。
+                    Error::DiscoveryUnavailable
+                } else {
+                    Error::RegistrationConflict(format!("节点 {} 已被其他实例注册", self.node_id))
+                });
             }
             Ok(())
         })
@@ -313,7 +318,7 @@ impl RedisDirectory {
         let mut cache = self
             .cache
             .write()
-            .map_err(|_| Error::DirectoryUnavailable)?;
+            .map_err(|_| Error::DirectoryStateUnavailable)?;
         let changed = cache.refreshed.is_none() || cache.services != services;
         cache.services = services;
         cache.refreshed = Some(Instant::now());
@@ -361,7 +366,7 @@ impl RedisDirectory {
 }
 
 impl ServiceRegistry for RedisDirectory {
-    fn register(&self, service: ServiceDescriptor) -> RegistrationTask<'_, ()> {
+    fn register(&self, service: ServiceDescriptor) -> BoxFuture<'_, tok_core::Result<()>> {
         Box::pin(async move {
             if service.node_id != self.node_id
                 || service.address.ip().is_unspecified()
@@ -372,8 +377,14 @@ impl ServiceRegistry for RedisDirectory {
                 return Err(Error::InvalidInput("注册身份或发布地址无效".into()));
             }
             let mut owned = self.owned.lock().await;
-            if owned.services.contains_key(&service.service_name) || owned.services.len() >= 64 {
-                return Err(Error::DuplicateService(service.service_name));
+            if owned.services.contains_key(&service.service_name) {
+                return Err(Error::RegistrationConflict(format!(
+                    "节点 {} 的服务 {} 已注册",
+                    self.node_id, service.service_name
+                )));
+            }
+            if owned.services.len() >= 64 {
+                return Err(Error::RegistrationCapacityExceeded);
             }
             let mut next = owned.services.clone();
             next.insert(service.service_name.clone(), service);
@@ -387,7 +398,7 @@ impl ServiceRegistry for RedisDirectory {
         &'a self,
         node_id: &'a str,
         service_name: &'a str,
-    ) -> RegistrationTask<'a, bool> {
+    ) -> BoxFuture<'a, tok_core::Result<bool>> {
         Box::pin(async move {
             let mut owned = self.owned.lock().await;
             if node_id != self.node_id || !owned.services.contains_key(service_name) {
@@ -408,7 +419,7 @@ impl ServiceRegistry for RedisDirectory {
 }
 struct Changes(watch::Receiver<u64>);
 impl DirectoryWatch for Changes {
-    fn changed(&mut self) -> RegistrationTask<'_, ()> {
+    fn changed(&mut self) -> BoxFuture<'_, tok_core::Result<()>> {
         Box::pin(async move {
             self.0
                 .changed()
@@ -419,7 +430,10 @@ impl DirectoryWatch for Changes {
 }
 impl ServiceDirectory for RedisDirectory {
     fn snapshot(&self, service_name: &str) -> Result<Vec<ServiceDescriptor>> {
-        let cache = self.cache.read().map_err(|_| Error::DirectoryUnavailable)?;
+        let cache = self
+            .cache
+            .read()
+            .map_err(|_| Error::DirectoryStateUnavailable)?;
         if !cache.refreshed.is_some_and(|updated| {
             updated.elapsed() < Duration::from_millis(self.config.lease_ttl_ms)
         }) {

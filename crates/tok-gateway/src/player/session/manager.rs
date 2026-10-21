@@ -63,7 +63,7 @@ pub(super) struct ManagerState {
     pub(super) owner: SessionOwner,
     pub(super) ownership_store: Arc<dyn OwnershipStore>,
     pub(super) pipeline: Arc<crate::player::Pipeline>,
-    pub(super) extensions: tok_core::execution::Extensions,
+    pub(super) extensions: tok_core::Extensions,
     pub(super) tasks: task::Handle,
     pub(super) gateway: crate::Handle,
     pub(super) shutdown: CancellationToken,
@@ -213,14 +213,11 @@ impl SessionManager {
         Arc::make_mut(&mut self.inner).extension = extension;
         Ok(self)
     }
-    pub(super) fn extension_context(
-        &self,
-        operation: &str,
-    ) -> Result<tok_core::execution::Context> {
-        let mut context = tok_core::execution::Context::new(
+    pub(super) fn extension_context(&self, operation: &str) -> Result<tok_service::Context> {
+        let mut context = tok_service::Context::new(
             self.inner.gateway.identity().clone(),
             operation,
-            tok_core::execution::Source::Internal,
+            tok_service::Source::Internal,
             Duration::from_millis(self.inner.config.rpc_timeout_ms),
             self.inner.shutdown.child_token(),
         )
@@ -235,16 +232,13 @@ impl SessionManager {
         self
     }
     /// 玩家管理器作用域的能力，与消息及事件的执行上下文共用。
-    pub fn extensions(&self) -> tok_core::execution::Extensions {
+    pub fn extensions(&self) -> tok_core::Extensions {
         let mut extensions = self.inner.extensions.clone();
         extensions.insert(self.inner.gateway.clone());
         extensions.insert(self.clone());
         extensions
     }
-    pub(in crate::player) fn with_extensions(
-        mut self,
-        extensions: tok_core::execution::Extensions,
-    ) -> Self {
+    pub(in crate::player) fn with_extensions(mut self, extensions: tok_core::Extensions) -> Self {
         Arc::make_mut(&mut self.inner)
             .extensions
             .extend(&extensions);
@@ -682,7 +676,7 @@ impl SessionManager {
                 let topics = policy(tok_service::Request::new(
                     handle.context(
                         "player/session/topics".into(),
-                        tok_core::execution::Source::Internal,
+                        tok_service::Source::Internal,
                     )?,
                     handle.identity().clone(),
                 ))?;

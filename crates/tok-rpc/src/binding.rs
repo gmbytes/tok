@@ -2,7 +2,7 @@
 use crate::CallContext;
 use crate::{CallHandler, CallTask, EventTask};
 use std::sync::{Arc, OnceLock};
-use tok_core::{execution::Extensions, service::Identity};
+use tok_core::{Extensions, service::Identity};
 use tok_proto::internal::v1::Payload;
 use tok_service::{
     Request,

@@ -7,8 +7,8 @@ use std::{
     sync::Arc,
     task::{Context as TaskContext, Poll},
 };
-use tok_core::execution::{Context, Source, StopReason};
 use tok_service::Request;
+use tok_service::{Context, Source, StopReason};
 use tower::{Layer as _, ServiceExt};
 
 /// 当前处理阶段的结果；转发完成不代表后续 session 业务已完成。

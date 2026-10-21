@@ -9,11 +9,8 @@ use std::{
     task::{Context as TaskContext, Poll},
     time::Duration,
 };
-use tok_core::{
-    TimerTrigger,
-    execution::{Context, Source, StopReason},
-    service::Identity,
-};
+use tok_core::{TimerTrigger, service::Identity};
+use tok_service::{Context, Source, StopReason};
 use tok_service::{Error, Request};
 use tokio_util::sync::CancellationToken;
 use tower::{Layer, Service, ServiceExt, service_fn};

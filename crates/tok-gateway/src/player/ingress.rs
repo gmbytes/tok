@@ -63,7 +63,7 @@ impl Ingress {
         self
     }
     /// 初始化玩家管理器作用域能力；开始接入前完成安装。
-    pub fn with_extensions(mut self, extensions: tok_core::execution::Extensions) -> Self {
+    pub fn with_extensions(mut self, extensions: tok_core::Extensions) -> Self {
         self.sessions = self.sessions.with_extensions(extensions);
         self
     }

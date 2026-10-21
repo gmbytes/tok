@@ -8,7 +8,7 @@
 | --- | --- | --- |
 | 组装与运行 | Application 复用 Factory / Init；RPC 按配置自动绑定，纯事件服务可无端点 | 端点、发现和处理链就绪分别检查，初始化失败不发布 |
 | 扩展能力 | 网关、manager、session 身份、快照、状态工厂、停止和等待 | 不暴露内部锁，不将具体游戏状态放入通用核心 |
-| 处理链 | Request / execution::Context / Tower Layer 覆盖 RPC、事件、timer 与网关业务 | 保留各入口的协议和结果边界、FIFO 及所有权检查 |
+| 处理链 | Request / service::Context / Tower Layer 覆盖 RPC、事件、timer 与网关业务 | 保留各入口的协议和结果边界、FIFO 及所有权检查 |
 | 事件路由 | Event::topic 默认全局，可固定或由正文派生；NATS 负责安全 subject 编码 | group 属于订阅组件，不强制广播或提供玩家归属路由 |
 | 主题兴趣 | Pool 按组件和主题聚合独立引用，异步成员操作，初始策略和交接就绪 | 逻辑会话宽限期/冻结保留兴趣，不补收即时事件 |
 
@@ -76,7 +76,7 @@ RPC 调用产生对应回应，事件产生当前 handler 的执行结果或允�
 
 ## P1 已验证的基础与适用边界
 
-架构中的 ExecutionContext 在当前 Rust 原型中使用 `tok_core::execution::Context`，采用模块限定名；同模块提供 Source、Extensions 和 StopReason。服务身份使用 `tok_core::service::Identity`，不携带网络地址。
+执行上下文使用 `tok_service::Context`，同 crate 提供 Source 和 StopReason，负责调用期限、取消传播及追踪范围。类型化能力容器独立使用 `tok_core::Extensions`，只依赖标准库。服务身份使用 `tok_core::service::Identity`，不携带网络地址。
 
 实际执行设施放在 tok-service，使用既有 Tower 协议，不增加平行 Handler trait：Request<T> 可携带 owned 输入或局部借用，Layer 返回 Service<S>，调用 future 保留真实输入生命周期。执行核心只依赖基础契约、Tokio、Tower、tracing 等通用设施，不依赖 gateway、RPC、事件或 NATS。tok 门面统一导出；gateway 能力在游戏示例的组装层注入，不形成反向依赖。
 

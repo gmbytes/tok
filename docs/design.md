@@ -24,9 +24,9 @@ RPC 返回回应，事件返回当前处理阶段的结果，不自动生成客�
 
 | 层次 | 职责 | 边界 |
 | --- | --- | --- |
-| tok-core 基础契约 | 服务身份、执行上下文、通用计时来源、发现、路由及请求锁契约 | 不依赖玩家运行契约、gateway、具体 RPC 协议或 NATS |
+| tok-core 基础契约 | 服务身份、Extensions、通用计时来源、发现、路由及请求锁契约 | 不依赖玩家运行契约、gateway、具体 RPC 协议或 NATS |
 | tok-player 玩家运行契约 | 会话身份、逻辑消息、计时需求、所有权与恢复凭证 | 只依赖 tok-core，不实现网络、调度或存储后端 |
-| 通用构建与运行设施 | 状态、路由、处理链、生命周期与监督 | tok-service，门面及扩展共同依赖 |
+| 通用构建与运行设施 | 执行上下文、处理链、服务构建、生命周期与监督 | tok-service，门面及扩展共同依赖 |
 | 通信与事件适配 | 协议、编解码、发布订阅与结果映射 | 复用共同执行核心，不各建中间件引擎 |
 | tok-gateway | 连接、认证、session、FIFO、timer、下行恢复与交接 | 通用服务的内置扩展，不是普通服务的必选基类 |
 | tok 门面及应用组装 | 统一导出、节点配置、端点和整应用组装 | 可以依赖上述组件，供游戏便捷使用 |
@@ -47,11 +47,17 @@ flowchart TD
     infra --> player
 ```
 
-依赖方向为“门面/游戏组装 → 扩展与适配 → 共同设施 → 基础契约”。实际依赖允许按用途引用更下层组件，禁止形成循环或反向依赖具体游戏。P1 已采用 tok-core 放通用上下文，tok-service 放类型化执行与 Layer；P2 已将公共工厂与生命周期沿这一落点下沉，P3 已将 RPC/事件及 RPC timer 路由接入共同处理链；P4 已接入 gateway/session 能力、状态工厂与业务消息 Layer。共同设施不能长期留在门面，再由 gateway 复制实现；也不为分层图预先增加空 crate。
+依赖方向为“门面/游戏组装 → 扩展与适配 → 共同设施 → 基础契约”。实际依赖允许按用途引用更下层组件，禁止形成循环或反向依赖具体游戏。P1 最初将上下文放在 tok-core；当前 Context / Source / StopReason 已归 tok-service，与类型化执行和 Layer 放在一起，Extensions 独立为 core 的基础容器；P2 已将公共工厂与生命周期沿这一落点下沉，P3 已将 RPC/事件及 RPC timer 路由接入共同处理链；P4 已接入 gateway/session 能力、状态工厂与业务消息 Layer。共同设施不能长期留在门面，再由 gateway 复制实现；也不为分层图预先增加空 crate。
 
 Gateway 复用构建、上下文、Layer、任务监督和退出设施；监听、session 调度、恢复与交接保留各自状态机，不强制合并成一个循环。通用设施不能到处判断 player/scene。tok-service 与 tok-events 不依赖 tok-player；RPC 和 gateway 按需消费玩家契约，tok-infra 提供相应后端。RPC 专用 CallContext 归 tok-rpc，不能因跨模块共享再放回 core。游戏自定义服务与内置 gateway 使用相同扩展契约。
 
 Application / Gateway 已复用同一 Factory 与生命周期，RPC、事件及网关业务入口使用共同 Request / Tower 协议。协议适配仍保留 CallHandler、Executor 等不同输入与结果，不另建平行的执行或事件中间件系统；具体能力与未实现范围以实现状态为准。
+
+## 公开 API 与内部模块
+
+公开 API 按使用者概念组织，内部模块按实现需要组织，通过 pub use 解耦；规则与依据维护在 [AGENTS.md](../AGENTS.md#rust-公开-api-与模块组织)。实现文件默认不构成公开路径；需要理解、组合或扩展的功能提供公开模块，主要入口可根重导出。公开模块与根重导出可以并存，不因双路径或角色名前缀做机械重构。
+
+core 的 discovery / lock / routing / service 是功能命名空间，常用身份、发现与路由契约同时根导出。error / extensions / timer 是内部文件，Error / Result / Extensions / TimerTrigger 从根访问，错误契约表位于公开的 Error 文档。BoxFuture 也是根上的基础入口。公开 API 不要求复刻文件树，也不要求所有模块同一种可见性。
 
 ## 身份、路由与作用域
 
