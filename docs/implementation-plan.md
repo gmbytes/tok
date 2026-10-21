@@ -445,7 +445,7 @@ RPC 的 lock::Layer::new(backend, namespace, config) 只校验固定服务与 bi
 
 ## gRPC Tower 扩展入口（2026-10-21）
 
-新增 Client::execute_service 与 Outgoing，为自定义协议提供类型化出站 Tower 处理链入口。execute 保留 FnOnce 回调，两个入口共用预算、追踪、连接和指标实现。就绪等待计入原期限，过期或迟到就绪不再分发；发送器用 Outgoing::into_parts 检查并扣减远端预算，保留更短 metadata 期限。内置协议客户端继续使用原便捷入口，不宣称自动配置了出站中间件。
+新增 Client::execute_service 与 PreparedCall，为自定义协议提供类型化出站 Tower 处理链入口。execute 保留 FnOnce 回调，两个入口共用预算、追踪、连接和指标实现。就绪等待计入原期限，过期或迟到就绪不再分发；发送器用 PreparedCall::into_parts 检查并扣减远端预算，保留更短 metadata 期限。内置协议客户端继续使用原便捷入口，不宣称自动配置了出站中间件。
 
 Listener::from_server 已支持带 Tower Layer 的 Tonic Server。内部改为 Routes 与类型擦除的监听工厂，对外 Listener 和 Application 注册无需泛型变更；共享服务就绪控制、绑定校验和传输参数保持原约束。指南展示显式出站链和监听级 Layer；不新增自动重试、路由、熔断默认策略或并行执行模型。
 
@@ -454,7 +454,7 @@ Listener::from_server 已支持带 Tower Layer 的 Tonic Server。内部改为 R
 
 ## gRPC 执行标准 Layer 化（2026-10-21）
 
-已提供 client::{Call, Layer, Service, ResponseFuture} 与 server::{Layer, Service, ResponseFuture} 功能命名空间，Client / Server 保留主要根入口。客户端 Layer 将准备前的 Call 转换为 Outgoing，直接组合时保留完整回应；execute_service 与 FnOnce execute 复用相同执行 Future，仍允许非 Clone 单次 Service 与借用。服务端 Layer 复用 execution 约束，Server::execute 仅作便捷调用，metadata 转换保留在 Server::context。
+已提供 client::{Call, Layer, Service, ResponseFuture} 与 server::{Layer, Service, ResponseFuture} 功能命名空间，Client / Server 保留主要根入口。客户端 Layer 将准备前的 Call 转换为 PreparedCall，直接组合时保留完整回应；execute_service 与 FnOnce execute 复用相同执行 Future，仍允许非 Clone 单次 Service 与借用。服务端 Layer 复用 execution 约束，Server::execute 仅作便捷调用，metadata 转换保留在 Server::context。
 
 客户端预算从 Layer 的 call 开始，覆盖连接准备、内层就绪和发送；外层策略可提前拒绝或选点，其等待须独立约束。可重复 Service 克隆内层，共享策略状态须显式共享；指南使用标准 Layer / ServiceBuilder，说明预算放置与共享规则。Client 克隆共享工厂与缓存，invalidate 影响共享克隆，替换工厂建立独立配置。准备失败也计入 Layer 的调用指标，不主动增加重试或后台任务。
 
@@ -465,7 +465,7 @@ Listener::from_server 已支持带 Tower Layer 的 Tonic Server。内部改为 R
 
 依据[连续性规范](service-runtime.md#执行上下文连续性规范)与[源码审查](status.md#执行上下文连续性审查2026-10-21)，按以下依赖顺序修正。这是 P1–P7 形成的处理链在真实边界上的校正，不重启旧阶段编号。以下四项均已实施，具体边界与验收见 status.md 的“执行上下文连续性修复”；此前 Layer 化的验收不能代替本轮端到端验证。
 
-1. **通用 gRPC 出站承载（已实施）。** 使框架出站 Layer / Service 与便捷入口接续 execution::Request<T> / Context，协议 Call / Outgoing 只表达传输所需内容，避免重复保存可漂移的预算与追踪。已有范围使用原截止点和本地配置共同限制，根调用显式建范围；Context.service 保持本地身份。若重复的输入转换需要公共辅助方法，在 tok-execution 提供保留 Context 的转换，具体 API 以实现审查为准。验收外层策略到发送器的自定义扩展、取消、排队和准备耗时、剩余 grpc-timeout、借用及完整回应。
+1. **通用 gRPC 出站承载（已实施）。** 使框架出站 Layer / Service 与便捷入口接续 execution::Request<T> / Context，协议 Call / PreparedCall 只表达传输所需内容，避免重复保存可漂移的预算与追踪。已有范围使用原截止点和本地配置共同限制，根调用显式建范围；Context.service 保持本地身份。若重复的输入转换需要公共辅助方法，在 tok-execution 提供保留 Context 的转换，具体 API 以实现审查为准。验收外层策略到发送器的自定义扩展、取消、排队和准备耗时、剩余 grpc-timeout、借用及完整回应。
 2. **游戏 RPC 与网关执行接续（已实施）。** 改造 business / player 客户端、普通 call 与内部事件编码和 RpcExecutor 的请求/事件/timer 三条路径。协议 CallContext 与执行 Context 保持分工。验收从网关执行中间件到本地出站策略的扩展保留、原预算和追踪；真实网络对端仅重建允许元数据与自身能力，不取得源 SessionHandle。
 3. **网关调度、事件投递与下行范围（已实施）。** 校正 admission 输出、RequestJob / EventJob、deliver 与新下行适配，显式定义准入、已接受工作和下行发布是否属于同一范围，以及何时派生新范围。同一范围队列携带 Context 并扣减等待时间；独立范围声明新的有限预算、停止关系和扩展筛选。验收准入标记抵达执行、队列过期不执行业务、断线后的在途收束、消费处理到通知的范围、独立事件入队后不依赖发布者存活、fan-out 目标能力正确和补发不重复执行中间件。
 4. **内部交接 RPC 与事件发布边界（已实施）。** GatewayRpcService 接入标准服务端执行适配，协调端复用出站承载；预算取现有调用与交接限制的较小者，必要补偿保持独立有界并受监督。NATS 原生出口外提供显式的执行发布适配，继承当前本地范围约束并提取允许追踪；订阅消费仍独立。验收四个交接接口的 metadata / Context、原状态机失败恢复、取消后的必要补偿、本地发布取消/超时和独立消费能力，不新增 broker 确认、重试或远端取消承诺。
@@ -506,3 +506,23 @@ protobuf / message 适配保持这一层结构；自定义 RPC 注册器显式�
 不要求第三方 Service 或后端采用共同返回类型。
 
 本次错误契约校正已完成；工作区 326 项测试、Clippy、rustdoc 与三个 smoke 通过，验收详情见 status.md。
+
+
+### gRPC 调用准备阶段命名校正（2026-10-21）
+
+Outgoing 更名为 client::PreparedCall，根同时重导出 PreparedCall，不保留旧名称别名。
+连接准备前使用 client::Call，客户端 Layer 准备 Channel 和元数据后向内层发送器传递 PreparedCall。
+Prepared 只描述本地准备阶段，不承诺远端已连通或就绪；取消、预算与发送行为保持不变。
+
+验收：tok-grpc / tok-message 共 51 项测试、21 项指南示例通过；全工作区全目标 Clippy、无警告 rustdoc、格式与空白检查通过，223 个文本文件 UTF-8/LF、119 处相对文档路径检查通过。未执行 release 构建。
+
+模块聚合：Call / PreparedCall 共同位于 client/call.rs，不为同一调用概念的两个阶段单独拆分实现模块。
+
+
+### 通用 gRPC 调用移除业务关联序号（2026-10-21）
+
+Call / PreparedCall 不再携带 request_id；Client::execute / execute_service 移除关联序号参数，
+通用失败日志保留目标、状态与关联追踪。业务协议中的 request_id、回应编号校验及玩家会话语义仍由
+tok-message 等上层维护；可选本地关联信息使用 Request 扩展或 span，不自动传播到网络。
+
+移除通用关联序号验收：全工作区串行测试 326 项通过、32 项外部专项默认跳过，包含 21 项指南示例；全目标 Clippy、无警告 rustdoc、格式与空白检查通过。222 个文本文件 UTF-8/LF、119 处相对文档路径检查通过，未执行 release 构建。

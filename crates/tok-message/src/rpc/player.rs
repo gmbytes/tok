@@ -61,7 +61,6 @@ impl Client {
             .connections
             .execute(
                 target,
-                request_id,
                 tok_execution::Request::from_parts(execution.with_span(span), request, extensions),
                 |channel, request| async move {
                     proto::player_rpc_client::PlayerRpcClient::new(channel)

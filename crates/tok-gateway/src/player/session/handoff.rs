@@ -786,7 +786,6 @@ async fn remote_call(
     client
         .execute(
             target,
-            0,
             context.map(|()| tonic::Request::new(request)),
             move |channel, request| async move {
                 let mut client = proto::gateway_rpc_client::GatewayRpcClient::new(channel)

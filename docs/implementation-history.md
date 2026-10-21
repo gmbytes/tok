@@ -683,3 +683,25 @@ trait 对象、玩家 timer 隔离及重复保护不增加错误层级。
 本轮 Windows 验收：全工作区串行测试 326 项通过、32 项外部专项按默认规则跳过，其中包括 21 项指南示例。
 全目标 Clippy、无警告 workspace rustdoc、本地分发 / RPC / 客户端 TCP 三个 smoke、格式与空白检查通过；
 223 个文本文件 UTF-8/LF、119 处相对文档路径检查通过。未运行真实 Redis/NATS、Linux 或 release 构建。
+
+
+## gRPC 已准备调用更名（2026-10-21）
+
+Outgoing 更名为 client::PreparedCall，并保留 PreparedCall 根重导出。实现移动到 client/prepared_call.rs，
+与连接准备前的 Call 形成阶段区分；不保留旧名别名。文档明确本地准备不等于远端连通或就绪，
+发送、预算和取消语义不变，调用处与指南同步迁移。
+
+验收：tok-grpc / tok-message 共 51 项测试、21 项指南示例通过；全工作区全目标 Clippy、无警告 rustdoc、格式与空白检查通过，223 个文本文件 UTF-8/LF、119 处相对文档路径检查通过。未执行 release 构建。
+
+后续模块聚合：将 PreparedCall 与 Call 合并至 client/call.rs，公开路径保持不变。
+
+模块聚合验收：tok-grpc 19 项测试、全目标 Clippy 与无警告 rustdoc 通过。
+
+
+## 通用 gRPC 调用移除关联序号（2026-10-21）
+
+Call / PreparedCall、客户端指标观察结构与 execute / execute_service 参数移除 request_id；
+失败日志保留目标、状态与追踪。业务 RPC 的请求编号与回应匹配仍由 tok-message 管理，
+网关交接不再向通用传输层传入占位序号。相关协议调用、测试、指南和设计契约同步更新。
+
+移除通用关联序号验收：全工作区串行测试 326 项通过、32 项外部专项默认跳过，包含 21 项指南示例；全目标 Clippy、无警告 rustdoc、格式与空白检查通过。222 个文本文件 UTF-8/LF、119 处相对文档路径检查通过，未执行 release 构建。

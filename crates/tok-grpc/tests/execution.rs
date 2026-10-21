@@ -71,7 +71,6 @@ async fn arbitrary_client_protocol_gets_a_deadline_without_business_types() {
     let result = clients
         .execute(
             &target,
-            7,
             root(tonic::Request::new("custom"), tracing::Span::none()),
             |_, request| async move {
                 assert!(request.metadata().contains_key("grpc-timeout"));
@@ -112,7 +111,6 @@ async fn client_preserves_shorter_request_budget_and_rejects_invalid_or_expired_
     client
         .execute(
             &target(),
-            1,
             root(request, tracing::Span::none()),
             |_, request| async move {
                 // 使用服务端同一解析入口核对发送预算，避免依赖 tonic 选择的编码单位。
@@ -135,7 +133,6 @@ async fn client_preserves_shorter_request_budget_and_rejects_invalid_or_expired_
         let error = client
             .execute(
                 &target(),
-                1,
                 root(request, tracing::Span::none()),
                 |_, _| -> std::future::Ready<Result<tonic::Response<()>, tonic::Status>> {
                     panic!("invalid or expired request must not be sent")
@@ -154,7 +151,6 @@ async fn client_rejects_late_results_from_non_cooperative_work() {
         let error = client
             .execute(
                 &target(),
-                1,
                 root(tonic::Request::new(()), tracing::Span::none()),
                 |_, _| {
                     // 同步构造和单次 poll 内阻塞两种情况均不得延长预算。
@@ -176,7 +172,6 @@ async fn client_rejects_late_results_from_non_cooperative_work() {
     let error = client
         .execute(
             &target(),
-            1,
             root(tonic::Request::new(()), tracing::Span::none()),
             |_, _| async {
                 std::future::pending::<Result<tonic::Response<()>, tonic::Status>>().await
@@ -231,7 +226,7 @@ async fn custom_endpoint_factory_uses_cache_and_can_be_replaced() {
 }
 
 async fn borrowed_sender(
-    call: tok_execution::Request<tok_grpc::Outgoing<&mut String>>,
+    call: tok_execution::Request<tok_grpc::PreparedCall<&mut String>>,
 ) -> Result<tok_execution::Response<tonic::Response<usize>>, tonic::Status> {
     let (_, request) = call.input.into_parts(&call.context)?;
     assert_eq!(request.metadata().get("x-policy").unwrap(), "checked");
@@ -246,27 +241,27 @@ async fn borrowed_sender(
 }
 
 #[tokio::test]
-async fn outgoing_tower_chain_receives_target_and_can_mutate_borrowed_input() {
-    use tok_grpc::Outgoing;
+async fn prepared_call_tower_chain_receives_target_and_can_mutate_borrowed_input() {
+    use tok_grpc::PreparedCall;
     let client = Client::new(Duration::from_secs(1), 1).unwrap();
     let mut value = String::from("source");
     let service = tower::ServiceBuilder::new()
-        .map_request(|mut call: tok_execution::Request<Outgoing<&mut String>>| {
-            assert_eq!(call.input.target().service_name, "custom");
-            assert_eq!(call.input.request_id(), 17);
-            assert!(call.input.request.metadata().contains_key("grpc-timeout"));
-            call.input
-                .request
-                .metadata_mut()
-                .insert("x-policy", "checked".parse().unwrap());
-            call.input.request.get_mut().push_str(" middleware");
-            call
-        })
+        .map_request(
+            |mut call: tok_execution::Request<PreparedCall<&mut String>>| {
+                assert_eq!(call.input.target().service_name, "custom");
+                assert!(call.input.request.metadata().contains_key("grpc-timeout"));
+                call.input
+                    .request
+                    .metadata_mut()
+                    .insert("x-policy", "checked".parse().unwrap());
+                call.input.request.get_mut().push_str(" middleware");
+                call
+            },
+        )
         .service(tower::service_fn(borrowed_sender));
     let result = client
         .execute_service(
             &target(),
-            17,
             root(tonic::Request::new(&mut value), tracing::Span::none()),
             service,
         )
@@ -285,7 +280,7 @@ struct ReadinessProbe {
     mode: u8,
     calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
-impl tower::Service<tok_execution::Request<tok_grpc::Outgoing<()>>> for ReadinessProbe {
+impl tower::Service<tok_execution::Request<tok_grpc::PreparedCall<()>>> for ReadinessProbe {
     type Response = tok_execution::Response<tonic::Response<()>>;
     type Error = tonic::Status;
     type Future = std::future::Ready<Result<Self::Response, Self::Error>>;
@@ -302,14 +297,14 @@ impl tower::Service<tok_execution::Request<tok_grpc::Outgoing<()>>> for Readines
             }
         }
     }
-    fn call(&mut self, _: tok_execution::Request<tok_grpc::Outgoing<()>>) -> Self::Future {
+    fn call(&mut self, _: tok_execution::Request<tok_grpc::PreparedCall<()>>) -> Self::Future {
         self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         std::future::ready(Ok(tok_execution::Response::new(tonic::Response::new(()))))
     }
 }
 
 #[tokio::test]
-async fn outgoing_readiness_is_bounded_and_late_ready_or_rejection_never_dispatches() {
+async fn prepared_call_readiness_is_bounded_and_late_ready_or_rejection_never_dispatches() {
     use std::sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -322,7 +317,6 @@ async fn outgoing_readiness_is_bounded_and_late_ready_or_rejection_never_dispatc
         let error = client
             .execute_service(
                 &target(),
-                1,
                 root(request, tracing::Span::none()),
                 ReadinessProbe {
                     mode,
@@ -344,10 +338,11 @@ async fn outgoing_readiness_is_bounded_and_late_ready_or_rejection_never_dispatc
 }
 
 #[tokio::test]
-async fn outgoing_sender_shortens_remote_budget_after_middleware_wait_and_keeps_shorter_metadata() {
+async fn prepared_call_sender_shortens_remote_budget_after_middleware_wait_and_keeps_shorter_metadata()
+ {
     let client = Client::new(Duration::from_secs(1), 1).unwrap();
     let service = tower::service_fn(
-        |call: tok_execution::Request<tok_grpc::Outgoing<()>>| async move {
+        |call: tok_execution::Request<tok_grpc::PreparedCall<()>>| async move {
             let before = server(CancellationToken::new())
                 .context(call.input.request.metadata(), "before")
                 .unwrap()
@@ -366,7 +361,7 @@ async fn outgoing_sender_shortens_remote_budget_after_middleware_wait_and_keeps_
     request.set_timeout(Duration::from_millis(200));
     assert!(
         client
-            .execute_service(&target(), 1, root(request, tracing::Span::none()), service)
+            .execute_service(&target(), root(request, tracing::Span::none()), service)
             .await
             .unwrap()
             .output
@@ -374,7 +369,7 @@ async fn outgoing_sender_shortens_remote_budget_after_middleware_wait_and_keeps_
     );
     // 中间件主动缩短的远端期限不被发送器放大。
     let service = tower::service_fn(
-        |mut call: tok_execution::Request<tok_grpc::Outgoing<()>>| async move {
+        |mut call: tok_execution::Request<tok_grpc::PreparedCall<()>>| async move {
             call.input.request.set_timeout(Duration::from_millis(5));
             let (_, request) = call.input.into_parts(&call.context)?;
             let remaining = server(CancellationToken::new())
@@ -388,14 +383,13 @@ async fn outgoing_sender_shortens_remote_budget_after_middleware_wait_and_keeps_
     client
         .execute_service(
             &target(),
-            2,
             root(tonic::Request::new(()), tracing::Span::none()),
             service,
         )
         .await
         .unwrap();
     let service = tower::service_fn(
-        |mut call: tok_execution::Request<tok_grpc::Outgoing<()>>| async move {
+        |mut call: tok_execution::Request<tok_grpc::PreparedCall<()>>| async move {
             call.context = call.context.with_budget_limit(Duration::from_millis(5));
             let (_, request) = call.input.into_parts(&call.context)?;
             let remaining = server(CancellationToken::new())
@@ -409,7 +403,6 @@ async fn outgoing_sender_shortens_remote_budget_after_middleware_wait_and_keeps_
     client
         .execute_service(
             &target(),
-            3,
             root(tonic::Request::new(()), tracing::Span::none()),
             service,
         )
@@ -418,7 +411,7 @@ async fn outgoing_sender_shortens_remote_budget_after_middleware_wait_and_keeps_
 }
 
 #[tokio::test]
-async fn outgoing_work_timeout_is_not_retried_and_invalid_budget_skips_readiness() {
+async fn prepared_call_work_timeout_is_not_retried_and_invalid_budget_skips_readiness() {
     use std::sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -426,15 +419,17 @@ async fn outgoing_work_timeout_is_not_retried_and_invalid_budget_skips_readiness
     let client = Client::new(Duration::from_millis(20), 1).unwrap();
     let calls = Arc::new(AtomicUsize::new(0));
     let observed = Arc::clone(&calls);
-    let service = tower::service_fn(move |_: tok_execution::Request<tok_grpc::Outgoing<()>>| {
-        observed.fetch_add(1, Ordering::SeqCst);
-        std::future::pending::<Result<tok_execution::Response<tonic::Response<()>>, tonic::Status>>(
-        )
-    });
+    let service = tower::service_fn(
+        move |_: tok_execution::Request<tok_grpc::PreparedCall<()>>| {
+            observed.fetch_add(1, Ordering::SeqCst);
+            std::future::pending::<
+                Result<tok_execution::Response<tonic::Response<()>>, tonic::Status>,
+            >()
+        },
+    );
     let error = client
         .execute_service(
             &target(),
-            1,
             root(tonic::Request::new(()), tracing::Span::none()),
             service,
         )
@@ -449,7 +444,6 @@ async fn outgoing_work_timeout_is_not_retried_and_invalid_budget_skips_readiness
     let error = client
         .execute_service(
             &target(),
-            2,
             root(request, tracing::Span::none()),
             ReadinessProbe {
                 mode: 2,
@@ -464,7 +458,7 @@ async fn outgoing_work_timeout_is_not_retried_and_invalid_budget_skips_readiness
 
 #[tokio::test]
 async fn client_layer_preserves_borrowed_input_and_response_metadata() {
-    use tok_grpc::{Outgoing, client::Call};
+    use tok_grpc::{PreparedCall, client::Call};
     use tower::ServiceExt as _;
     let client = Client::new(Duration::from_secs(1), 1).unwrap();
     let service = tower::ServiceBuilder::new()
@@ -474,14 +468,16 @@ async fn client_layer_preserves_borrowed_input_and_response_metadata() {
             call
         })
         .layer(client.layer())
-        .map_request(|mut call: tok_execution::Request<Outgoing<&mut String>>| {
-            assert_eq!(call.input.target().service_name, "selected");
-            call.input
-                .request
-                .metadata_mut()
-                .insert("x-policy", "checked".parse().unwrap());
-            call
-        })
+        .map_request(
+            |mut call: tok_execution::Request<PreparedCall<&mut String>>| {
+                assert_eq!(call.input.target().service_name, "selected");
+                call.input
+                    .request
+                    .metadata_mut()
+                    .insert("x-policy", "checked".parse().unwrap());
+                call
+            },
+        )
         .map_response(
             |mut response: tok_execution::Response<tonic::Response<usize>>| {
                 response
@@ -497,7 +493,6 @@ async fn client_layer_preserves_borrowed_input_and_response_metadata() {
         .oneshot(root(
             Call {
                 target: target(),
-                request_id: 17,
                 request: tonic::Request::new(&mut value),
             },
             tracing::Span::none(),
@@ -514,7 +509,7 @@ async fn client_layer_preserves_borrowed_input_and_response_metadata() {
 
 #[tokio::test]
 async fn outer_client_policy_can_reject_before_connection_preparation() {
-    use tok_grpc::{Outgoing, client::Call};
+    use tok_grpc::{PreparedCall, client::Call};
     use tower::ServiceExt as _;
     let client = Client::new(Duration::from_secs(1), 1)
         .unwrap()
@@ -522,7 +517,7 @@ async fn outer_client_policy_can_reject_before_connection_preparation() {
     let service = tower::ServiceBuilder::new()
         .layer(client.layer())
         .service(tower::service_fn(
-            |_: tok_execution::Request<Outgoing<()>>| async {
+            |_: tok_execution::Request<PreparedCall<()>>| async {
                 panic!("rejected call must not dispatch");
                 #[allow(unreachable_code)]
                 Ok::<_, tonic::Status>(tok_execution::Response::new(tonic::Response::new(())))
@@ -541,7 +536,6 @@ async fn outer_client_policy_can_reject_before_connection_preparation() {
         .oneshot(root(
             Call {
                 target: target(),
-                request_id: 1,
                 request: tonic::Request::new(()),
             },
             tracing::Span::none(),
@@ -579,7 +573,7 @@ async fn cloned_client_layer_shares_cache_and_bounds_inner_readiness() {
             held,
         ))
         .service(tower::service_fn(
-            |_: tok_execution::Request<tok_grpc::Outgoing<()>>| async {
+            |_: tok_execution::Request<tok_grpc::PreparedCall<()>>| async {
                 panic!("no permit available");
                 #[allow(unreachable_code)]
                 Ok::<_, tonic::Status>(tok_execution::Response::new(tonic::Response::new(())))
@@ -592,7 +586,6 @@ async fn cloned_client_layer_shares_cache_and_bounds_inner_readiness() {
             .oneshot(root(
                 Call {
                     target: target(),
-                    request_id: 1,
                     request,
                 },
                 tracing::Span::none(),
@@ -666,7 +659,6 @@ async fn convenience_callback_can_consume_non_clone_capture_and_borrowed_input()
     let size = client
         .execute(
             &target(),
-            1,
             root(tonic::Request::new(&mut value), tracing::Span::none()),
             move |_, request| async move {
                 let suffix = owned.into_inner().unwrap();
@@ -700,7 +692,7 @@ fn root<T>(input: T, span: tracing::Span) -> tok_execution::Request<T> {
 }
 
 #[tokio::test]
-async fn outgoing_context_keeps_local_identity_extensions_and_elapsed_upstream_budget() {
+async fn prepared_call_context_keeps_local_identity_extensions_and_elapsed_upstream_budget() {
     let client = Client::new(Duration::from_secs(2), 1).unwrap();
     let mut request = root(tonic::Request::new(()), tracing::Span::none());
     request.context = request
@@ -712,7 +704,7 @@ async fn outgoing_context_keeps_local_identity_extensions_and_elapsed_upstream_b
     let original = request.context.deadline();
     tokio::time::sleep(Duration::from_millis(30)).await;
     let service = tower::service_fn(
-        move |call: tok_execution::Request<tok_grpc::Outgoing<()>>| async move {
+        move |call: tok_execution::Request<tok_grpc::PreparedCall<()>>| async move {
             assert_eq!(call.context.service().service_name, "test-caller");
             assert_eq!(call.extensions().get::<String>().unwrap(), "outer-policy");
             assert!(call.context.deadline() <= original);
@@ -726,7 +718,7 @@ async fn outgoing_context_keeps_local_identity_extensions_and_elapsed_upstream_b
         },
     );
     client
-        .execute_service(&target(), 1, request, service)
+        .execute_service(&target(), request, service)
         .await
         .unwrap();
 }
@@ -741,7 +733,7 @@ async fn upstream_stop_prevents_preparation_and_interrupts_inner_readiness() {
         .clone()
         .with_endpoint_factory(|_| panic!("expired upstream must not prepare"));
     let error = guarded
-        .execute(&target(), 1, request, |_, _| async {
+        .execute(&target(), request, |_, _| async {
             Ok(tonic::Response::new(()))
         })
         .await
@@ -759,7 +751,6 @@ async fn upstream_stop_prevents_preparation_and_interrupts_inner_readiness() {
         .layer(probe)
         .oneshot(request.map(|request| tok_grpc::client::Call {
             target: target(),
-            request_id: 1,
             request,
         }));
     let stopped = async {

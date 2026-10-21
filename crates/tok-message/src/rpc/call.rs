@@ -55,7 +55,6 @@ where
     let response = client
         .execute(
             target,
-            request_id,
             tok_execution::Request::from_parts(execution.with_span(span), request, extensions),
             send,
         )

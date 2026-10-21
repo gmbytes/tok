@@ -195,7 +195,7 @@ RPC 的 lock::Layer::new(backend, namespace, config) 只校验固定服务与 bi
 
 ## gRPC Tower 扩展入口（2026-10-21）
 
-新增 Client::execute_service 与 Outgoing，为自定义协议提供类型化出站 Tower 处理链入口。execute 保留 FnOnce 回调，两个入口共用预算、追踪、连接和指标实现。就绪等待计入原期限，过期或迟到就绪不再分发；发送器用 Outgoing::into_parts 检查并扣减远端预算，保留更短 metadata 期限。内置协议客户端继续使用原便捷入口，不宣称自动配置了出站中间件。
+新增 Client::execute_service 与 PreparedCall，为自定义协议提供类型化出站 Tower 处理链入口。execute 保留 FnOnce 回调，两个入口共用预算、追踪、连接和指标实现。就绪等待计入原期限，过期或迟到就绪不再分发；发送器用 PreparedCall::into_parts 检查并扣减远端预算，保留更短 metadata 期限。内置协议客户端继续使用原便捷入口，不宣称自动配置了出站中间件。
 
 Listener::from_server 已支持带 Tower Layer 的 Tonic Server。内部改为 Routes 与类型擦除的监听工厂，对外 Listener 和 Application 注册无需泛型变更；共享服务就绪控制、绑定校验和传输参数保持原约束。指南展示显式出站链和监听级 Layer；不新增自动重试、路由、熔断默认策略或并行执行模型。
 
@@ -204,7 +204,7 @@ Listener::from_server 已支持带 Tower Layer 的 Tonic Server。内部改为 R
 
 ## gRPC 执行标准 Layer 化（2026-10-21）
 
-已提供 client::{Call, Layer, Service, ResponseFuture} 与 server::{Layer, Service, ResponseFuture} 功能命名空间，Client / Server 保留主要根入口。客户端 Layer 将准备前的 Call 转换为 Outgoing，直接组合时保留完整回应；execute_service 与 FnOnce execute 复用相同执行 Future，仍允许非 Clone 单次 Service 与借用。服务端 Layer 复用 execution 约束，Server::execute 仅作便捷调用，metadata 转换保留在 Server::context。
+已提供 client::{Call, Layer, Service, ResponseFuture} 与 server::{Layer, Service, ResponseFuture} 功能命名空间，Client / Server 保留主要根入口。客户端 Layer 将准备前的 Call 转换为 PreparedCall，直接组合时保留完整回应；execute_service 与 FnOnce execute 复用相同执行 Future，仍允许非 Clone 单次 Service 与借用。服务端 Layer 复用 execution 约束，Server::execute 仅作便捷调用，metadata 转换保留在 Server::context。
 
 客户端预算从 Layer 的 call 开始，覆盖连接准备、内层就绪和发送；外层策略可提前拒绝或选点，其等待须独立约束。可重复 Service 克隆内层，共享策略状态须显式共享；指南使用标准 Layer / ServiceBuilder，说明预算放置与共享规则。Client 克隆共享工厂与缓存，invalidate 影响共享克隆，替换工厂建立独立配置。准备失败也计入 Layer 的调用指标，不主动增加重试或后台任务。
 
@@ -219,7 +219,7 @@ Listener::from_server 已支持带 Tower Layer 的 Tonic Server。内部改为 R
 
 | 优先顺序 | 修复前代码与事实 | 契约差异及调整方向 |
 | --- | --- | --- |
-| 1 | [gRPC 客户端输入](../crates/tok-grpc/src/client/call.rs)、[执行 Layer](../crates/tok-grpc/src/client/middleware.rs)、[Outgoing](../crates/tok-grpc/src/outgoing.rs) 和 [便捷入口](../crates/tok-grpc/src/client.rs)：Call 只带目标、序号、请求和 Span，Layer 根据 Client timeout / metadata 新建本地截止点，Outgoing 没有 execution Context | 在本地出站处理链承接 Request<T> / Context，保留适用扩展和取消，并以已有截止点和客户端配置共同限制预算。保留目标独立于 Context.service；根调用须显式建立范围，便捷入口不能要求调用方拆散后再拼接上游 Context。现有外层 execution Layer 可约束本地结果，但不能让被丢弃的扩展重新可见，也不能保证远端取得上游剩余预算 |
+| 1 | [gRPC 客户端输入](../crates/tok-grpc/src/client/call.rs)、[执行 Layer](../crates/tok-grpc/src/client/middleware.rs)、[PreparedCall](../crates/tok-grpc/src/client/call.rs) 和 [便捷入口](../crates/tok-grpc/src/client.rs)：Call 只带目标、序号、请求和 Span，Layer 根据 Client timeout / metadata 新建本地截止点，PreparedCall 没有 execution Context | 在本地出站处理链承接 Request<T> / Context，保留适用扩展和取消，并以已有截止点和客户端配置共同限制预算。保留目标独立于 Context.service；根调用须显式建立范围，便捷入口不能要求调用方拆散后再拼接上游 Context。现有外层 execution Layer 可约束本地结果，但不能让被丢弃的扩展重新可见，也不能保证远端取得上游剩余预算 |
 | 2 | [游戏 RPC 编码](../crates/tok-message/src/rpc/call.rs)、[普通业务客户端](../crates/tok-message/src/rpc/business.rs)、[玩家客户端](../crates/tok-message/src/rpc/player.rs)：只接收协议 CallContext / payload，自建发送 Span；[RpcExecutor](../crates/tok-gateway/src/player/executor.rs) 取 request.input 后不传 request.context | 游戏客户端承接执行请求，在编码正文时保留本地 Context，并交给通用 gRPC 出站适配。CallContext 继续表达远端目标、玩家与协议关联，不代替执行 Context。请求、事件、timer 三条 RpcExecutor 路径均需迁移，避免只修普通 call |
 | 3 | [玩家准入链](../crates/tok-gateway/src/player/pipeline.rs) 的 admission 输出仅 LogicalMessage；[BoundSession::submit](../crates/tok-gateway/src/player/session/handle.rs) 准入后只将正文入队；[RequestJob / worker](../crates/tok-gateway/src/player/session/worker.rs) 出队后重建执行 Context | 准入中写入的自定义扩展无法进入请求执行链；队列没有携带截止点，执行预算从出队后重新开始。需要保留执行承载并明确准入与已接受工作的范围边界；保留断线后在途业务收束的既有语义，不能直接将连接取消令牌替换为所有阶段共同取消令牌。即使声明准入与执行为独立范围，也须明确扩展转移及预算起点，不能静默丢弃 |
 | 4 | [事件转发/通知组件](../crates/tok-gateway/src/player/events.rs) 调 deliver 时只传 Delivery；[SessionManager::deliver](../crates/tok-gateway/src/player/session/events.rs) 不接收 Context；EventJob 只保留事件与当前 Span；[下行入口](../crates/tok-gateway/src/player/session/handle.rs) 每次新建 Context | 事件中间件写入的本地扩展与消费期限无法接续到投递/下行；异步玩家事件执行只继承部分追踪。应将投递与下行适配接入共同执行承载，区分当前订阅者等待的准入范围与成功入队后的独立 session 工作。跨 session fan-out 由目标安装自身能力并显式筛选源元信息，不复制源 SessionHandle；补发仍不重复执行新下行中间件 |
@@ -290,3 +290,25 @@ protobuf / message 适配保持这一层结构；自定义 RPC 注册器显式�
 本轮 Windows 验收：全工作区串行测试 326 项通过、32 项外部专项按默认规则跳过，其中包括 21 项指南示例。
 全目标 Clippy、无警告 workspace rustdoc、本地分发 / RPC / 客户端 TCP 三个 smoke、格式与空白检查通过；
 223 个文本文件 UTF-8/LF、119 处相对文档路径检查通过。未运行真实 Redis/NATS、Linux 或 release 构建。
+
+
+### gRPC 调用准备阶段命名校正（2026-10-21）
+
+Outgoing 更名为 client::PreparedCall，根同时重导出 PreparedCall，不保留旧名称别名。
+连接准备前使用 client::Call，客户端 Layer 准备 Channel 和元数据后向内层发送器传递 PreparedCall。
+Prepared 只描述本地准备阶段，不承诺远端已连通或就绪；取消、预算与发送行为保持不变。
+
+验收：tok-grpc / tok-message 共 51 项测试、21 项指南示例通过；全工作区全目标 Clippy、无警告 rustdoc、格式与空白检查通过，223 个文本文件 UTF-8/LF、119 处相对文档路径检查通过。未执行 release 构建。
+
+Call 与 PreparedCall 的实现聚合在 client/call.rs，分别表达连接准备前后；公开路径和执行行为不变。
+
+模块聚合验收：tok-grpc 19 项测试、全目标 Clippy 与无警告 rustdoc 通过。
+
+
+### 通用 gRPC 调用移除业务关联序号（2026-10-21）
+
+Call / PreparedCall 不再携带 request_id；Client::execute / execute_service 移除关联序号参数，
+通用失败日志保留目标、状态与关联追踪。业务协议中的 request_id、回应编号校验及玩家会话语义仍由
+tok-message 等上层维护；可选本地关联信息使用 Request 扩展或 span，不自动传播到网络。
+
+移除通用关联序号验收：全工作区串行测试 326 项通过、32 项外部专项默认跳过，包含 21 项指南示例；全目标 Clippy、无警告 rustdoc、格式与空白检查通过。222 个文本文件 UTF-8/LF、119 处相对文档路径检查通过，未执行 release 构建。

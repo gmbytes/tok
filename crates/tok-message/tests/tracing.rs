@@ -151,7 +151,7 @@ async fn trace_context_is_propagated_across_the_network_call() {
         });
         let sender = tower::service_fn(
             |call: tok_execution::Request<
-                tok_grpc::Outgoing<tok_proto::internal::v1::CallRequest>,
+                tok_grpc::PreparedCall<tok_proto::internal::v1::CallRequest>,
             >| async move {
                 assert!(call.input.request.metadata().contains_key("traceparent"));
                 let (channel, request) = call.input.into_parts(&call.context)?;
@@ -167,7 +167,6 @@ async fn trace_context_is_propagated_across_the_network_call() {
             .oneshot(root_request(
                 tok_grpc::client::Call {
                     target: target.clone(),
-                    request_id: 2,
                     request,
                 },
                 root,

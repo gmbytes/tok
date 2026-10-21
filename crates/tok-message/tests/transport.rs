@@ -520,7 +520,7 @@ async fn listener_tower_layers_cover_shared_routes_and_preserve_readiness() {
     };
     let sender = || {
         tower::service_fn(
-            |call: tok_execution::Request<tok_grpc::Outgoing<CallRequest>>| async move {
+            |call: tok_execution::Request<tok_grpc::PreparedCall<CallRequest>>| async move {
                 let (channel, request) = call.input.into_parts(&call.context)?;
                 let response =
                     tok_proto::internal::v1::business_rpc_client::BusinessRpcClient::new(channel)
@@ -536,7 +536,7 @@ async fn listener_tower_layers_cover_shared_routes_and_preserve_readiness() {
     };
     assert_eq!(
         client
-            .execute_service(&guild, 99, root(request(), tracing::Span::none()), sender())
+            .execute_service(&guild, root(request(), tracing::Span::none()), sender())
             .await
             .unwrap_err()
             .code(),
@@ -545,7 +545,7 @@ async fn listener_tower_layers_cover_shared_routes_and_preserve_readiness() {
     assert!(ready.set("guild", true));
     assert!(ready.set("player", true));
     let response = client
-        .execute_service(&guild, 99, root(request(), tracing::Span::none()), sender())
+        .execute_service(&guild, root(request(), tracing::Span::none()), sender())
         .await
         .unwrap();
     assert_eq!(

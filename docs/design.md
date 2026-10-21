@@ -236,7 +236,7 @@ tok-message::rpc::lock 是薄协议适配，校验固定逻辑服务与 CallCont
 
 gRPC 的连接缓存、监听、metadata 转换保留为边界组件；执行范围通过 client::{Layer, Service} 和 server::{Layer, Service} 表达。主要配置入口 Client / Server 保持根导出，功能命名空间公开，内部执行 Future 的实现模块私有。Client::execute、execute_service 与 Server::execute 是同一执行链的便捷方法，内置协议适配器不会自动获得用户出站策略。
 
-客户端 Layer 将 Request<client::Call<T>> 转换为 Request<Outgoing<T>>，保留 Context，允许外层策略在连接获取前选择目标或拒绝调用；本地预算沿用原截止点，Client 与 metadata 限制只能收紧；已发生的外层等待扣减剩余时间，外层等待期间的及时停止由外层保护负责。Outgoing 提供已选定目标、关联序号与类型化 tonic::Request，Context.service 保持本地身份，发送器通过 into_parts(&context) 校验当前停止条件并缩短远端期限，不重复保存一份执行期限。可重复调用的 Service 克隆内层，需要跨请求共享的策略状态由策略显式共享。便捷客户端方法同样接收执行 Request，可消费非 Clone Service / FnOnce 回调，支持借用输入和 Future，不另设执行循环，不主动重试。
+客户端 Layer 将 Request<client::Call<T>> 转换为 Request<PreparedCall<T>>，保留 Context，允许外层策略在连接获取前选择目标或拒绝调用；本地预算沿用原截止点，Client 与 metadata 限制只能收紧；已发生的外层等待扣减剩余时间，外层等待期间的及时停止由外层保护负责。PreparedCall 提供已选定目标与类型化 tonic::Request，Context.service 保持本地身份，发送器通过 into_parts(&context) 校验当前停止条件并缩短远端期限，不重复保存一份执行期限。可重复调用的 Service 克隆内层，需要跨请求共享的策略状态由策略显式共享。便捷客户端方法同样接收执行 Request，可消费非 Clone Service / FnOnce 回调，支持借用输入和 Future，不另设执行循环，不主动重试。
 
 服务端 Layer 接收 execution::Request<T>，校验服务身份、复用 execution 执行约束并映射停止原因与指标。Server::context 继续负责 metadata 转换，Layer 不新建期限或进行认证。Client 克隆共享配置与 Channel 缓存，更换工厂为该实例建立独立配置。Listener::from_server 接收带 Layer 的 Tonic Server，Listener 与 Application 注册保持非泛型，服务绑定和就绪规则不变。
 

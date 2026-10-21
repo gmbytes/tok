@@ -1,5 +1,5 @@
 use super::{Call, Client};
-use crate::Outgoing;
+use crate::PreparedCall;
 use std::{
     future::Future,
     pin::Pin,
@@ -14,7 +14,7 @@ use tracing::{Instrument, instrument::Instrumented};
 
 /// 为协议发送器增加连接获取、期限、追踪与指标的标准 Tower Layer。
 ///
-/// 外层输入为 `Request<Call<T>>`，内层为 `Request<Outgoing<T>>`，保留原执行范围，不重试；
+/// 外层输入为 `Request<Call<T>>`，内层为 `Request<PreparedCall<T>>`，保留原执行范围，不重试；
 /// 每次调用克隆内层 Service，不要求输入或 Future 为 static，支持借用调用。
 /// 原 Context 的截止点覆盖已发生的等待，客户端与 metadata 上限只能收紧预算。
 /// 外层等待期间的及时停止仍由外层执行保护负责；本层约束准备、内层就绪与发送。
@@ -51,14 +51,14 @@ impl<S> Service<S> {
     // 便捷方法消费单次处理者，允许保留 FnOnce 和非 Clone Service，而不增加另一套执行循环。
     pub(super) fn call_once<T>(self, call: Request<Call<T>>) -> ResponseFuture<S, T>
     where
-        S: TowerService<Request<Outgoing<T>>, Error = Status>,
+        S: TowerService<Request<PreparedCall<T>>, Error = Status>,
     {
         ResponseFuture::new(&self.client, self.inner, call)
     }
 }
 impl<S, T> TowerService<Request<Call<T>>> for Service<S>
 where
-    S: TowerService<Request<Outgoing<T>>, Error = Status> + Clone,
+    S: TowerService<Request<PreparedCall<T>>, Error = Status> + Clone,
 {
     type Response = S::Response;
     type Error = Status;
@@ -72,7 +72,7 @@ where
 }
 
 type Work<S, T> = Instrumented<Timeout<Dispatch<S, T>>>;
-enum State<S: TowerService<Request<Outgoing<T>>, Error = Status>, T> {
+enum State<S: TowerService<Request<PreparedCall<T>>, Error = Status>, T> {
     Failed(Option<Status>),
     Running {
         deadline: Instant,
@@ -84,7 +84,7 @@ enum State<S: TowerService<Request<Outgoing<T>>, Error = Status>, T> {
 /// 一次客户端执行的 Future，包含内部就绪等待，保留输入和处理者的真实生命周期。
 ///
 /// 丢弃后不继续驱动内层 Future，不保证回滚远端副作用；不启动后台任务或自动重试。
-pub struct ResponseFuture<S: TowerService<Request<Outgoing<T>>, Error = Status>, T> {
+pub struct ResponseFuture<S: TowerService<Request<PreparedCall<T>>, Error = Status>, T> {
     state: State<S, T>,
     metrics: Option<Metrics>,
     context: tok_execution::Context,
@@ -92,14 +92,13 @@ pub struct ResponseFuture<S: TowerService<Request<Outgoing<T>>, Error = Status>,
 }
 impl<S, T> ResponseFuture<S, T>
 where
-    S: TowerService<Request<Outgoing<T>>, Error = Status>,
+    S: TowerService<Request<PreparedCall<T>>, Error = Status>,
 {
     fn new(client: &Client, service: S, request: Request<Call<T>>) -> Self {
         let (mut context, mut call, extensions) = request.into_parts();
         context = context.with_budget_limit(client.timeout());
         let metrics = Metrics {
             target: call.target.clone(),
-            request_id: call.request_id,
             started: std::time::Instant::now(),
         };
         let state = match (|| {
@@ -115,12 +114,12 @@ where
                 return Err(expired());
             }
             call.request.set_timeout(remaining);
-            let outgoing = Outgoing::new(call.target, call.request_id, channel, call.request);
+            let prepared = PreparedCall::new(call.target, channel, call.request);
             let work = tokio::time::timeout_at(
                 deadline,
                 Dispatch::new(
                     service,
-                    Request::from_parts(context.clone(), outgoing, extensions),
+                    Request::from_parts(context.clone(), prepared, extensions),
                 ),
             )
             .instrument(context.span().clone());
@@ -142,7 +141,7 @@ where
 }
 impl<S, T> Future for ResponseFuture<S, T>
 where
-    S: TowerService<Request<Outgoing<T>>, Error = Status>,
+    S: TowerService<Request<PreparedCall<T>>, Error = Status>,
 {
     type Output = Result<S::Response, Status>;
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
@@ -187,15 +186,15 @@ where
 }
 
 // 就绪后的分发必须再次检查截止点，避免单次阻塞 poll_ready 在超时后发出请求。
-struct Dispatch<S: TowerService<Request<Outgoing<T>>>, T> {
-    ready: Option<Box<(S, Request<Outgoing<T>>)>>,
+struct Dispatch<S: TowerService<Request<PreparedCall<T>>>, T> {
+    ready: Option<Box<(S, Request<PreparedCall<T>>)>>,
     running: Option<Pin<Box<S::Future>>>,
 }
 impl<S, T> Dispatch<S, T>
 where
-    S: TowerService<Request<Outgoing<T>>>,
+    S: TowerService<Request<PreparedCall<T>>>,
 {
-    fn new(service: S, call: Request<Outgoing<T>>) -> Self {
+    fn new(service: S, call: Request<PreparedCall<T>>) -> Self {
         Self {
             ready: Some(Box::new((service, call))),
             running: None,
@@ -204,7 +203,7 @@ where
 }
 impl<S, T> Future for Dispatch<S, T>
 where
-    S: TowerService<Request<Outgoing<T>>, Error = Status>,
+    S: TowerService<Request<PreparedCall<T>>, Error = Status>,
 {
     type Output = Result<S::Response, Status>;
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
@@ -246,7 +245,6 @@ fn completed() -> Status {
 }
 struct Metrics {
     target: tok_core::ServiceDescriptor,
-    request_id: u64,
     started: std::time::Instant,
 }
 impl Metrics {
@@ -254,7 +252,7 @@ impl Metrics {
         metrics::histogram!("tok_grpc_client_duration_seconds", "service_name" => self.target.service_name.clone()).record(self.started.elapsed().as_secs_f64());
         metrics::counter!("tok_grpc_client_calls_total", "service_name" => self.target.service_name.clone(), "result" => if result.is_ok() { "ok" } else { "error" }).increment(1);
         if let Err(status) = result {
-            tracing::error!(node_id = %self.target.node_id, service_name = %self.target.service_name, request_id = self.request_id, code = ?status.code(), "内部 RPC 失败，未自动重试");
+            tracing::error!(node_id = %self.target.node_id, service_name = %self.target.service_name, code = ?status.code(), "内部 RPC 失败，未自动重试");
         }
     }
 }

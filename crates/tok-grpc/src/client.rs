@@ -1,12 +1,11 @@
 //! 客户端连接管理与可组合的 gRPC 执行处理链。
 //!
-//! `Request<Call<T>>` 是连接准备前的输入，Layer 保留 Context 并将正文转换为 Outgoing。
+//! `Request<Call<T>>` 是连接准备前的输入，Layer 保留 Context 并将正文转换为 PreparedCall。
 //! Service 每次调用克隆内层；共享限额和其他状态应由内层策略显式共享。
 mod call;
 mod middleware;
 mod sender;
-use crate::Outgoing;
-pub use call::Call;
+pub use call::{Call, PreparedCall};
 pub use middleware::{Layer, ResponseFuture, Service};
 use std::future::Future;
 use std::{
@@ -142,20 +141,19 @@ impl Client {
     /// 执行已组装 Tower 中间件的出站调用；就绪等待和调用共用原有限期限。
     ///
     /// 目标已解析，Channel 复用、追踪注入及整体期限由本客户端负责；中间件接收
-    /// `Request<Outgoing>`，可读取原上下文、目标和关联序号并修改请求。路由选点在调用前完成。
+    /// `Request<PreparedCall>`，可读取原上下文和目标并修改请求。路由选点在调用前完成。
     /// 不要求输入或 Service 为 static，可使用借用；中间件自行决定是否引入队列或重试。
     /// 返回 `Response<Res>` 并保留本地输出扩展；转换时只消费原生 tonic 回应正文。
     /// 原生 metadata 需要由发送 Service 显式解释，不自动转为本地扩展，不主动添加重试。
     pub async fn execute_service<Req, Res, S>(
         &self,
         target: &ServiceDescriptor,
-        request_id: u64,
         request: tok_execution::Request<Request<Req>>,
         service: S,
     ) -> Result<tok_execution::Response<Res>, Status>
     where
         S: tower::Service<
-                tok_execution::Request<Outgoing<Req>>,
+                tok_execution::Request<PreparedCall<Req>>,
                 Response = tok_execution::Response<Response<Res>>,
                 Error = Status,
             >,
@@ -164,7 +162,6 @@ impl Client {
             .layer(service)
             .call_once(request.map(|request| Call {
                 target: target.clone(),
-                request_id,
                 request,
             }))
             .await
@@ -179,7 +176,6 @@ impl Client {
     pub async fn execute<Req, Res, F, Fut>(
         &self,
         target: &ServiceDescriptor,
-        request_id: u64,
         request: tok_execution::Request<Request<Req>>,
         send: F,
     ) -> Result<tok_execution::Response<Res>, Status>
@@ -187,7 +183,7 @@ impl Client {
         F: FnOnce(Channel, Request<Req>) -> Fut,
         Fut: Future<Output = Result<Response<Res>, Status>>,
     {
-        self.execute_service(target, request_id, request, sender::Sender::new(send))
+        self.execute_service(target, request, sender::Sender::new(send))
             .await
     }
 }

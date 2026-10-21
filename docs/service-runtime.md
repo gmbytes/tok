@@ -387,9 +387,9 @@ execution::lock::Layer 显式注入 Backend、Config、取键函数和结果判�
 
 ## gRPC 客户端与监听处理链（2026-10-21）
 
-Client::layer 返回 client::Layer；输入 Request<client::Call<T>> 将 Context 与待准备连接的目标、序号及原 gRPC 请求分开。Layer 获取共享连接、按 Context 注入追踪并将 Request<Outgoing<T>> 交给内层 Service；外层策略可在连接获取前拒绝或调整目标，内层策略可修改 metadata 和类型化请求。直接调用保留内层完整响应；execute_service 消费单次内层 Service 并返回 tonic 响应正文，execute 保留 FnOnce 回调，三者共用执行 Future。输入与 Future 支持借用，不固定生成协议，不主动重试。
+Client::layer 返回 client::Layer；输入 Request<client::Call<T>> 将 Context 与待准备连接的目标及原 gRPC 请求分开。Layer 获取共享连接、按 Context 注入追踪并将 Request<PreparedCall<T>> 交给内层 Service；外层策略可在连接获取前拒绝或调整目标，内层策略可修改 metadata 和类型化请求。直接调用保留内层完整响应；execute_service 消费单次内层 Service 并返回 tonic 响应正文，execute 保留 FnOnce 回调，三者共用执行 Future。输入与 Future 支持借用，不固定生成协议，不主动重试。
 
-客户端本地期限继承 Context，Client 配置与 grpc-timeout 只能收紧，覆盖准备连接、内层就绪等待和执行；外层已发生的等待不获得新预算，正在等待时的及时停止须由外层执行保护负责。非协作式 poll_ready 迟到后不调用发送器；Outgoing::into_parts 在发送前检查截止点并缩短 grpc-timeout，保留更短 metadata 期限。超时或丢弃 Future 不保证回滚副作用。准备失败和执行结果均计入客户端 Layer 指标；未进入 Layer 的外层拒绝由外层负责观察。
+客户端本地期限继承 Context，Client 配置与 grpc-timeout 只能收紧，覆盖准备连接、内层就绪等待和执行；外层已发生的等待不获得新预算，正在等待时的及时停止须由外层执行保护负责。非协作式 poll_ready 迟到后不调用发送器；PreparedCall::into_parts 在发送前检查截止点并缩短 grpc-timeout，保留更短 metadata 期限。超时或丢弃 Future 不保证回滚副作用。准备失败和执行结果均计入客户端 Layer 指标；未进入 Layer 的外层拒绝由外层负责观察。
 
 可重复调用的 client::Service 每次克隆内层，server::Service 沿用 execution::Layer 的相同规则；共享限额等状态应显式共享，不承诺普通 Clone 会自动共享任意策略状态。Client 本身克隆共享工厂与缓存，invalidate 对所有共享克隆生效；with_endpoint_factory 建立独立配置与空缓存，其他克隆不受影响。
 
