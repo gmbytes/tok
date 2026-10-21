@@ -17,7 +17,19 @@ pub struct Report {
 impl SessionManager {
     /// 异步分发至本地会话；主题只查询反向索引，每 64 个目标让出调度。
     /// 显式玩家列表去重，未知玩家不创建会话或所有权。取消后已准入的投递不回滚。
-    pub async fn deliver(&self, delivery: &Delivery) -> Result<Report> {
+    pub async fn deliver(&self, request: tok_execution::Request<Delivery>) -> Result<Report> {
+        use tower::{Layer as _, ServiceExt as _};
+        tok_execution::Layer
+            .layer(tower::service_fn(|request| self.deliver_inner(request)))
+            .oneshot(request)
+            .await
+            .map_err(super::worker::execution_error)
+    }
+    async fn deliver_inner(&self, request: tok_execution::Request<Delivery>) -> Result<Report> {
+        let tok_execution::Request {
+            context,
+            input: delivery,
+        } = request;
         delivery
             .validate(self.inner.config.max_frame_size.min(1_048_576))
             .map_err(|_| ErrorCode::InvalidRequest)?;
@@ -44,11 +56,18 @@ impl SessionManager {
             if position > 0 && position % 64 == 0 {
                 tokio::task::yield_now().await;
             }
+            context.check().map_err(|reason| {
+                super::worker::execution_error(tok_execution::Error::Stopped(reason))
+            })?;
             let result = match &delivery.action {
                 Action::Notify { message_id, body } => {
-                    session.notify_event(*message_id, body, topic).await
+                    session
+                        .notify_event(*message_id, body, topic, &context)
+                        .await
                 }
-                Action::Forward(event) => session.enqueue_event(Arc::clone(event), topic),
+                Action::Forward(event) => {
+                    session.enqueue_event(Arc::clone(event), topic, Some(&context))
+                }
             };
             match result {
                 Ok(()) => report.admitted += 1,

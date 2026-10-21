@@ -398,17 +398,44 @@ async fn business_rpc_on_two_nodes_shares_locks_after_target_validation() {
     missing.bid = None;
     assert_eq!(
         business_client
-            .call(&nodes[0], missing, payload())
+            .call(
+                &nodes[0],
+                root((missing, payload()), tracing::Span::current())
+            )
             .await
             .unwrap_err()
             .code(),
         Code::InvalidArgument
     );
     let (a, b, c, d) = tokio::join!(
-        business_client.call(&nodes[0], context_for(&nodes[0], "7"), payload()),
-        business_client.call(&nodes[1], context_for(&nodes[1], "7"), payload()),
-        business_client.call(&nodes[0], context_for(&nodes[0], "8"), payload()),
-        business_client.call(&nodes[1], context_for(&nodes[1], "9"), payload()),
+        business_client.call(
+            &nodes[0],
+            root(
+                (context_for(&nodes[0], "7"), payload()),
+                tracing::Span::current()
+            )
+        ),
+        business_client.call(
+            &nodes[1],
+            root(
+                (context_for(&nodes[1], "7"), payload()),
+                tracing::Span::current()
+            )
+        ),
+        business_client.call(
+            &nodes[0],
+            root(
+                (context_for(&nodes[0], "8"), payload()),
+                tracing::Span::current()
+            )
+        ),
+        business_client.call(
+            &nodes[1],
+            root(
+                (context_for(&nodes[1], "9"), payload()),
+                tracing::Span::current()
+            )
+        ),
     );
     for result in [a, b, c, d] {
         assert_eq!(result.unwrap().request_id, 1);
@@ -536,4 +563,21 @@ async fn late_ready_futures_cannot_bypass_acquire_or_execution_deadlines() {
         Code::DeadlineExceeded
     );
     assert_eq!(released.load(Ordering::SeqCst), 2);
+}
+
+fn root<T>(input: T, span: tracing::Span) -> tok_execution::Request<T> {
+    tok_execution::Request::new(
+        tok_execution::Context::new(
+            tok_core::Identity {
+                node_id: "local".into(),
+                service_name: "test-caller".into(),
+            },
+            "test-call",
+            std::time::Duration::from_secs(30),
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .unwrap()
+        .with_span(span),
+        input,
+    )
 }

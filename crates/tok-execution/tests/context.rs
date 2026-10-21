@@ -91,3 +91,26 @@ fn zero_budget_is_already_expired_and_invalid_metadata_is_rejected() {
         ContextError::InvalidService
     );
 }
+
+#[test]
+fn request_mapping_and_explicit_stop_boundary_preserve_deadline_and_extensions() {
+    let stop = CancellationToken::new();
+    let mut original = context(stop.clone());
+    original.extensions_mut().insert(String::from("marker"));
+    let deadline = original.deadline();
+    let request = tok_execution::Request::new(original, 1).map(|value| value.to_string());
+    let narrowed = request.context.with_budget_limit(Duration::MAX);
+    assert_eq!(narrowed.deadline(), deadline);
+    let independent_stop = CancellationToken::new();
+    let narrowed = narrowed
+        .with_deadline_limit(deadline)
+        .with_budget_limit(Duration::from_millis(10))
+        .with_cancellation(independent_stop.clone());
+    assert!(narrowed.deadline() < deadline);
+    assert_eq!(narrowed.extensions().get::<String>().unwrap(), "marker");
+    stop.cancel();
+    assert!(narrowed.check().is_ok());
+    independent_stop.cancel();
+    assert_eq!(narrowed.check(), Err(StopReason::Cancelled));
+    assert_eq!(request.input, "1");
+}

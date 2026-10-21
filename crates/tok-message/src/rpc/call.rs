@@ -31,14 +31,17 @@ pub(crate) fn encode_context(context: CallContext) -> proto::CallContext {
 pub(crate) async fn call<F, Fut>(
     client: &Client,
     target: &ServiceDescriptor,
-    mut context: CallContext,
-    payload: Payload,
+    request: tok_execution::Request<(CallContext, Payload)>,
     send: F,
 ) -> Result<CallResponse, Status>
 where
     F: FnOnce(Channel, Request<CallRequest>) -> Fut,
     Fut: Future<Output = Result<Response<CallResponse>, Status>>,
 {
+    let tok_execution::Request {
+        context: execution,
+        input: (mut context, payload),
+    } = request;
     validate_target(target, &context)?;
     let request_id = context.request_id;
     let timer = context.timer.take().map(|timer| proto::TimerTrigger {
@@ -51,9 +54,14 @@ where
         context: Some(encode_context(context)),
         payload: Some(payload),
     });
-    let span = tracing::info_span!("rpc_client", node_id = %target.node_id, service_name = %target.service_name, request_id);
+    let span = tracing::info_span!(parent: execution.span(), "rpc_client", node_id = %target.node_id, service_name = %target.service_name, request_id);
     let response = client
-        .execute(target, request_id, request, span, send)
+        .execute(
+            target,
+            request_id,
+            tok_execution::Request::new(execution.with_span(span), request),
+            send,
+        )
         .await?;
     if response.request_id != request_id {
         return Err(Status::data_loss("RPC 回应序号不匹配"));

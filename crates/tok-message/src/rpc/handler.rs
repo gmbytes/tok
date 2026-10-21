@@ -88,11 +88,11 @@ impl HandlerRegistry {
     where
         Req: Message + Default + Send + 'static,
         Resp: Message + Send + 'static,
-        F: Fn(CallContext, Req) -> Fut + Send + Sync + 'static,
+        F: Fn(ExecutionRequest<(CallContext, Req)>) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<Resp, Status>> + Send + 'static,
     {
-        self.register_with_timers(request_id, response_id, move |context, input| {
-            let future = handler(context, input);
+        self.register_with_timers(request_id, response_id, move |request| {
+            let future = handler(request);
             async move {
                 Ok(HandlerReply {
                     message: future.await?,
@@ -101,7 +101,7 @@ impl HandlerRegistry {
             }
         })
     }
-    /// 注册可返回 timer 更新的回调；需要执行元信息或中间件时使用 register_service。
+    /// 注册可返回 timer 更新的回调，保留执行上下文；需要组合中间件时使用 register_service。
     pub fn register_with_timers<Req, Resp, F, Fut>(
         &mut self,
         request_id: u32,
@@ -111,7 +111,7 @@ impl HandlerRegistry {
     where
         Req: Message + Default + Send + 'static,
         Resp: Message + Send + 'static,
-        F: Fn(CallContext, Req) -> Fut + Send + Sync + 'static,
+        F: Fn(ExecutionRequest<(CallContext, Req)>) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<HandlerReply<Resp>, Status>> + Send + 'static,
     {
         let handler = Arc::new(handler);
@@ -120,7 +120,7 @@ impl HandlerRegistry {
             response_id,
             tower::service_fn(move |request: ExecutionRequest<(CallContext, Req)>| {
                 let handler = Arc::clone(&handler);
-                async move { handler(request.input.0, request.input.1).await }
+                async move { handler(request).await }
             }),
         )
     }
@@ -189,7 +189,7 @@ impl HandlerRegistry {
     ) -> Result<(), super::Error>
     where
         Req: Message + Default + Send + 'static,
-        F: Fn(CallContext, Req) -> Fut + Send + Sync + 'static,
+        F: Fn(ExecutionRequest<(CallContext, Req)>) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<Option<TimerUpdate>, Status>> + Send + 'static,
     {
         let handler = Arc::new(handler);
@@ -197,7 +197,7 @@ impl HandlerRegistry {
             message_id,
             tower::service_fn(move |request: ExecutionRequest<(CallContext, Req)>| {
                 let handler = Arc::clone(&handler);
-                async move { handler(request.input.0, request.input.1).await }
+                async move { handler(request).await }
             }),
         )
     }

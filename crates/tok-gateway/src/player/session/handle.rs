@@ -56,7 +56,7 @@ impl BoundSession {
             });
         let pipeline = Arc::clone(&self.session.0.pipeline);
         use tower::{Layer as _, ServiceExt};
-        let request = tok_execution::Layer
+        let mut request = tok_execution::Layer
             .layer(tower::service_fn(move |request| {
                 let pipeline = Arc::clone(&pipeline);
                 async move { pipeline.admit(request).await }
@@ -64,11 +64,20 @@ impl BoundSession {
             .oneshot(tok_execution::Request::new(context, request))
             .await
             .map_err(super::worker::execution_error)?;
-        if (request.kind, request.request_id, request.message_id) != original
-            || request.server_seq.is_some()
+        if (
+            request.input.kind,
+            request.input.request_id,
+            request.input.message_id,
+        ) != original
+            || request.input.server_seq.is_some()
         {
             return Err(ErrorCode::InvalidRequest.into());
         }
+        request.context.check().map_err(|reason| {
+            super::worker::execution_error(tok_execution::Error::Stopped(reason))
+        })?;
+        // 准入完成后由 session 收束已接受工作，连接替换不取消在途业务；保留原截止点与扩展。
+        request.context = request.context.with_cancellation(CancellationToken::new());
         self.session.0.channel.admit_bound(&self.binding, || {
             self.session.enqueue_request(request, None)
         })
@@ -87,6 +96,7 @@ impl BoundSession {
                 response,
                 request_message_id,
                 Some(self.binding.clone()),
+                None,
                 None,
             )
             .await;
@@ -165,12 +175,13 @@ impl SessionHandle {
     }
     /// 将内部事件排入原 session 队列；只接收在线、非恢复和非冻结会话，不产生客户端回应。
     pub fn post_event(&self, event: Arc<tok_events::Message>) -> Result<()> {
-        self.enqueue_event(event, None)
+        self.enqueue_event(event, None, None)
     }
     pub(super) fn enqueue_event(
         &self,
         event: Arc<tok_events::Message>,
         topic: Option<&str>,
+        source: Option<&tok_execution::Context>,
     ) -> Result<()> {
         event
             .validate(self.0.channel.max_event_bytes())
@@ -182,8 +193,12 @@ impl SessionHandle {
             self.0
                 .job_sender
                 .try_send(Job::Event(super::worker::EventJob {
+                    context: self.delivery_context(
+                        source,
+                        format!("player/event/{}", event.event_type),
+                        true,
+                    )?,
                     event,
-                    parent: tracing::Span::current(),
                 }))
                 .map_err(|error| match error {
                     mpsc::error::TrySendError::Full(_) => ErrorCode::QueueFull.into(),
@@ -196,6 +211,7 @@ impl SessionHandle {
         message_id: u32,
         body: &[u8],
         topic: Option<&str>,
+        source: &tok_execution::Context,
     ) -> Result<()> {
         if self.0.cancel.is_cancelled() {
             return Err(ErrorCode::SessionClosed.into());
@@ -215,6 +231,7 @@ impl SessionHandle {
             Some(EventTarget {
                 topic: topic.map(str::to_owned),
             }),
+            Some(source),
         )
         .await
     }
@@ -290,6 +307,27 @@ impl SessionHandle {
         context.extensions_mut().insert(self.clone());
         Ok(context)
     }
+    // 成功入队的事件属于独立 session 工作；同步通知仍受投递调用期限与取消约束。
+    pub(super) fn delivery_context(
+        &self,
+        source: Option<&tok_execution::Context>,
+        operation: String,
+        independent: bool,
+    ) -> Result<tok_execution::Context> {
+        let mut context = self.context(operation)?;
+        if let Some(source) = source {
+            let destination = context.extensions().clone();
+            context.extensions_mut().extend(source.extensions());
+            context.extensions_mut().extend(&destination);
+            context = context.with_span(source.span().clone());
+            if !independent {
+                context = context
+                    .with_deadline_limit(source.deadline())
+                    .with_cancellation(source.cancellation().child_token());
+            }
+        }
+        Ok(context)
+    }
     /// 查询会话阶段、连接、主题及 FIFO 容量，不替代后续准入检查。
     pub fn snapshot(&self) -> Result<super::Snapshot> {
         let mut snapshot = self.0.channel.status()?;
@@ -354,12 +392,15 @@ impl SessionHandle {
         &self,
         response: LogicalMessage,
         request_message_id: u32,
+        source: &tok_execution::Context,
     ) -> Result<()> {
         if self.0.cancel.is_cancelled() {
             return Err(ErrorCode::SessionClosed.into());
         }
+        // 业务结束后的回应发布使用独立有限范围，超时错误仍可下发；继承该请求的本地标记。
+        let publication = self.delivery_context(Some(source), "player/response".into(), true)?;
         if let Err(error) = self
-            .process_downlink(response, request_message_id, None, None)
+            .process_downlink(response, request_message_id, None, None, Some(&publication))
             .await
         {
             self.close();
@@ -373,22 +414,27 @@ impl SessionHandle {
         request: LogicalMessage,
         response_sender: Option<oneshot::Sender<LogicalMessage>>,
     ) -> Result<()> {
-        self.0
-            .channel
-            .admit_internal(|| self.enqueue_request(request, response_sender))
+        self.0.channel.admit_internal(|| {
+            let context =
+                self.execution_context(format!("player/request/{}", request.message_id))?;
+            self.enqueue_request(
+                tok_execution::Request::new(context, request),
+                response_sender,
+            )
+        })
     }
 
     fn enqueue_request(
         &self,
-        request: LogicalMessage,
+        request: tok_execution::Request<LogicalMessage>,
         response_sender: Option<oneshot::Sender<LogicalMessage>>,
     ) -> Result<()> {
         if self.0.cancel.is_cancelled() {
             return Err(ErrorCode::SessionClosed.into());
         }
-        if request.kind != MessageKind::Request
-            || request.request_id == 0
-            || request.message_id == 0
+        if request.input.kind != MessageKind::Request
+            || request.input.request_id == 0
+            || request.input.message_id == 0
         {
             return Err(ErrorCode::InvalidRequest.into());
         }
@@ -422,6 +468,7 @@ impl SessionHandle {
         request_message_id: u32,
         binding: Option<channel::Binding>,
         event_target: Option<EventTarget>,
+        source: Option<&tok_execution::Context>,
     ) -> Result<()> {
         self.0
             .channel
@@ -431,10 +478,15 @@ impl SessionHandle {
             || self.0.cancel.child_token(),
             |binding| binding.cancellation.child_token(),
         );
-        let context = self.context_with_cancellation(
-            format!("player/downlink/{}", message.message_id),
-            cancellation,
-        )?;
+        let context = self
+            .delivery_context(
+                source,
+                format!("player/downlink/{}", message.message_id),
+                false,
+            )?
+            .with_cancellation(
+                source.map_or(cancellation, |parent| parent.cancellation().child_token()),
+            );
         let session = self.clone();
         use tower::{Layer as _, ServiceExt};
         let service = tower::service_fn(move |request: tok_execution::Request<LogicalMessage>| {
@@ -475,7 +527,19 @@ impl SessionHandle {
             .await
             .map_err(super::worker::execution_error)
     }
-    /// 主动通知进入下行入口，不调用 player；断线或慢连接时在宽限期内继续缓存。
+    /// 在已有调用范围内发布新通知，保留自定义扩展并安装目标 session 能力。
+    pub async fn notify_request(
+        &self,
+        request: tok_execution::Request<LogicalMessage>,
+    ) -> Result<()> {
+        if request.input.kind != MessageKind::Notify || request.input.message_id == 0 {
+            return Err(ErrorCode::InvalidRequest.into());
+        }
+        self.process_downlink(request.input, 0, None, None, Some(&request.context))
+            .await
+    }
+    /// 建立独立有限范围主动通知，不调用 player；已有调用应使用 notify_request 保留其范围。
+    /// 断线或慢连接时在宽限期内继续缓存。
     /// 超大通知返回 FrameTooLarge，不消耗序号；登录回应入队前返回 InvalidState。
     pub async fn notify(&self, message: LogicalMessage) -> Result<()> {
         if self.0.cancel.is_cancelled() {
@@ -486,7 +550,7 @@ impl SessionHandle {
         {
             return Err(ErrorCode::InvalidRequest.into());
         }
-        if let Err(error) = self.process_downlink(message, 0, None, None).await {
+        if let Err(error) = self.process_downlink(message, 0, None, None, None).await {
             if matches!(error.code, ErrorCode::SessionClosed | ErrorCode::Internal) {
                 self.close();
             }

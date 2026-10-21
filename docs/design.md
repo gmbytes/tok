@@ -230,12 +230,12 @@ tok-message::rpc::lock 是薄协议适配，校验固定逻辑服务与 CallCont
 
 独立事件消费、timer、生命周期与补偿工作可以建立新范围，但必须声明范围边界、预算、停止关系和扩展规则。跨服务或 session 时由目标安装本地能力；跨进程仅传播白名单元数据并重建 Context。基础容器、存储后端和普通辅助函数不受统一请求签名限制，原生传输入口之外须有符合框架契约的执行适配。
 
-完整规则见[执行上下文连续性规范](service-runtime.md#执行上下文连续性规范)，代码差异见[审查记录](status.md#执行上下文连续性审查2026-10-21)。以下 gRPC Layer 化已完成，但尚未完成从上游 Context 接续出站范围，不能据此宣称端到端契约已满足。
+完整规则见[执行上下文连续性规范](service-runtime.md#执行上下文连续性规范)，代码差异见[审查记录](status.md#执行上下文连续性审查2026-10-21)。当前 gRPC 出站、游戏协议适配、网关准入/队列/投递与内部交接已接续 Context；独立消费与补偿的范围规则见运行模型。
 
 ## gRPC 处理链扩展（2026-10-21）
 
 gRPC 的连接缓存、监听、metadata 转换保留为边界组件；执行范围通过 client::{Layer, Service} 和 server::{Layer, Service} 表达。主要配置入口 Client / Server 保持根导出，功能命名空间公开，内部执行 Future 的实现模块私有。Client::execute、execute_service 与 Server::execute 是同一执行链的便捷方法，内置协议适配器不会自动获得用户出站策略。
 
-客户端 Layer 将连接准备前的 client::Call<T> 转换为 Outgoing<T>，允许外层策略在连接获取前选择目标或拒绝调用；其本地预算从进入 Layer 开始，覆盖连接准备、内层就绪和发送，外层等待须另行约束。Outgoing 提供已选定目标、关联序号、截止点与类型化 tonic::Request，发送器通过 into_parts 缩短远端期限。可重复调用的 Service 克隆内层，需要跨请求共享的策略状态由策略显式共享。便捷客户端方法可消费非 Clone Service / FnOnce 回调，支持借用输入和 Future，不另设执行循环，不主动重试。
+客户端 Layer 将 Request<client::Call<T>> 转换为 Request<Outgoing<T>>，保留 Context，允许外层策略在连接获取前选择目标或拒绝调用；本地预算沿用原截止点，Client 与 metadata 限制只能收紧；已发生的外层等待扣减剩余时间，外层等待期间的及时停止由外层保护负责。Outgoing 提供已选定目标、关联序号与类型化 tonic::Request，Context.service 保持本地身份，发送器通过 into_parts(&context) 校验当前停止条件并缩短远端期限，不重复保存一份执行期限。可重复调用的 Service 克隆内层，需要跨请求共享的策略状态由策略显式共享。便捷客户端方法同样接收执行 Request，可消费非 Clone Service / FnOnce 回调，支持借用输入和 Future，不另设执行循环，不主动重试。
 
 服务端 Layer 接收 execution::Request<T>，校验服务身份、复用 execution 执行约束并映射停止原因与指标。Server::context 继续负责 metadata 转换，Layer 不新建期限或进行认证。Client 克隆共享配置与 Channel 缓存，更换工厂为该实例建立独立配置。Listener::from_server 接收带 Layer 的 Tonic Server，Listener 与 Application 注册保持非泛型，服务绑定和就绪规则不变。

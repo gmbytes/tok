@@ -213,11 +213,11 @@ Listener::from_server 已支持带 Tower Layer 的 Tonic Server。内部改为 R
 
 ## 执行上下文连续性审查（2026-10-21）
 
-本次仅补充规范与源码审查，尚未实施下面的迁移。审查基于当前工作树，包含上一轮尚未提交的 client/server Tower Layer；不是只审查 HEAD。契约见[服务运行模型](service-runtime.md#执行上下文连续性规范)，待实施顺序见[实施计划](implementation-plan.md#执行上下文连续性校正待实施)。
+以下记录修复前的审查依据，保留问题定位；六类边界现已校正，结果见本文件末尾“执行上下文连续性修复”。审查基于当时工作树中的 client/server Tower Layer，不能将表中修复前状态当作当前能力。契约见[服务运行模型](service-runtime.md#执行上下文连续性规范)，待实施顺序见[实施计划](implementation-plan.md#执行上下文连续性校正)。
 
-### 需要调整的边界
+### 审查时需要调整的边界（修复前）
 
-| 优先顺序 | 代码与事实 | 契约差异及调整方向 |
+| 优先顺序 | 修复前代码与事实 | 契约差异及调整方向 |
 | --- | --- | --- |
 | 1 | [gRPC 客户端输入](../crates/tok-grpc/src/client/call.rs)、[执行 Layer](../crates/tok-grpc/src/client/middleware.rs)、[Outgoing](../crates/tok-grpc/src/outgoing.rs) 和 [便捷入口](../crates/tok-grpc/src/client.rs)：Call 只带目标、序号、请求和 Span，Layer 根据 Client timeout / metadata 新建本地截止点，Outgoing 没有 execution Context | 在本地出站处理链承接 Request<T> / Context，保留适用扩展和取消，并以已有截止点和客户端配置共同限制预算。保留目标独立于 Context.service；根调用须显式建立范围，便捷入口不能要求调用方拆散后再拼接上游 Context。现有外层 execution Layer 可约束本地结果，但不能让被丢弃的扩展重新可见，也不能保证远端取得上游剩余预算 |
 | 2 | [游戏 RPC 编码](../crates/tok-message/src/rpc/call.rs)、[普通业务客户端](../crates/tok-message/src/rpc/business.rs)、[玩家客户端](../crates/tok-message/src/rpc/player.rs)：只接收协议 CallContext / payload，自建发送 Span；[RpcExecutor](../crates/tok-gateway/src/player/executor.rs) 取 request.input 后不传 request.context | 游戏客户端承接执行请求，在编码正文时保留本地 Context，并交给通用 gRPC 出站适配。CallContext 继续表达远端目标、玩家与协议关联，不代替执行 Context。请求、事件、timer 三条 RpcExecutor 路径均需迁移，避免只修普通 call |
@@ -236,3 +236,14 @@ Listener::from_server 已支持带 Tower Layer 的 Tonic Server。内部改为 R
 - Extensions、生命周期初始化容器、发现/路由/锁/所有权后端、编解码和底层 Channel 不是业务处理链承载，无需机械增加 Request 参数。scene 仍是预留实现，不计为已完成的执行适配。
 
 本次审查的判断是：共同处理核心已有承载能力，主要缺口在适配、排队与独立范围的衔接。不能以“最外层已有超时”认定内部 Context 已连续，也不应为统一而传播全部源能力、改写交接状态机或增加事件确认与重试语义。
+
+
+## 执行上下文连续性修复（2026-10-21）
+
+前述六类边界均已迁移：通用 gRPC、游戏协议客户端与 RpcExecutor、准入/FIFO、事件投递及下行、四个交接 RPC、NATS 发布执行适配。Request::map 保留上下文，所有消息/protobuf 注册便捷回调也改为接收 Request；不提供丢弃 Context 的旧签名兼容。真实调用方、指南和 smoke 示例已迁移。
+
+客户端保留本地执行身份、扩展、追踪、取消和原截止点，Client 与 grpc-timeout 仅收紧预算；网络对端重建自身范围。准入返回 Request，FIFO 携带原截止点与标记，过期工作不进入业务链；连接停止关系在成功准入后显式转交，不改变在途收束。同步通知保留消费范围，已入队事件独立；目标已知能力覆盖源能力，自定义跨范围能力由游戏筛选。回应发布与交接取消补偿采用明确的独立有限范围，原业务不重试。
+
+交接入口处理 metadata，快照和恢复回调接续相应执行范围；源端监督状态机继续兜底。Bus::publisher / publish_request 保持本地调用范围，NATS 消费独立安装订阅能力，不传播 Extensions 或发布者执行期限。原生传输出口与独立提交入口在 rustdoc 中说明范围边界，不将所有基础设施方法机械包装成 Request。
+
+本轮 Windows 验收：工作区串行 306 项测试通过、32 项外部专项按默认规则跳过，包含 19 项指南示例；另在隔离临时 NATS 实例运行 16 项真实 NATS/多网关专项全部通过，发布 Future 的跨任务回归再次通过。最终期限收紧变更后，execution / grpc / gateway 共 143 项定向回归通过，准入边界最终 13 项再次通过。全目标编译与 Clippy、workspace rustdoc、rpc / client / application / events / dispatch 五个 smoke、格式、220 个文本文件 UTF-8/LF、119 处相对文档路径及空白检查通过。并行工作区回归曾遇到 Windows 套接字资源不足，串行完整重跑通过；不据此修改业务逻辑。未运行真实 Redis、Linux 或 release 构建；本轮修复随本次提交交付。

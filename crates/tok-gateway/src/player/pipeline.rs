@@ -11,7 +11,7 @@ type Chain<I, O> = BoxCloneSyncService<Request<I>, O, GatewayError>;
 /// 不取代 FIFO、认证、所有权及下行编号，不将事件转换为客户端回应。
 #[derive(Clone)]
 pub struct Pipeline {
-    admission: Chain<LogicalMessage, LogicalMessage>,
+    admission: Chain<LogicalMessage, Request<LogicalMessage>>,
     request: Chain<RequestInput, Reply>,
     event: Chain<EventInput, Option<TimerUpdate>>,
     timer: Chain<TimerInput, Reply>,
@@ -24,7 +24,7 @@ impl Pipeline {
         let event = Arc::clone(&executor);
         Self {
             admission: Chain::new(tower::service_fn(
-                |request: Request<LogicalMessage>| async move { Ok(request.input) },
+                |request: Request<LogicalMessage>| async move { Ok(request) },
             )),
             downlink: Chain::new(tower::service_fn(
                 |request: Request<LogicalMessage>| async move { Ok(request.input) },
@@ -46,9 +46,12 @@ impl Pipeline {
     /// 安装可信连接业务准入 Layer，完成后仍须校验连接代次和队列。
     pub fn with_admission_layer<L>(mut self, layer: L) -> Self
     where
-        L: Layer<Chain<LogicalMessage, LogicalMessage>>,
-        L::Service: Service<Request<LogicalMessage>, Response = LogicalMessage, Error = GatewayError>
-            + Clone
+        L: Layer<Chain<LogicalMessage, Request<LogicalMessage>>>,
+        L::Service: Service<
+                Request<LogicalMessage>,
+                Response = Request<LogicalMessage>,
+                Error = GatewayError,
+            > + Clone
             + Send
             + Sync
             + 'static,
@@ -113,7 +116,10 @@ impl Pipeline {
         self.downlink = Chain::new(layer.layer(self.downlink));
         self
     }
-    pub(super) async fn admit(&self, request: Request<LogicalMessage>) -> Result<LogicalMessage> {
+    pub(super) async fn admit(
+        &self,
+        request: Request<LogicalMessage>,
+    ) -> Result<Request<LogicalMessage>> {
         self.admission.clone().oneshot(request).await
     }
     pub(in crate::player) async fn downlink(

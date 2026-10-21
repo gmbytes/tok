@@ -20,14 +20,12 @@ impl Client {
     pub async fn call(
         &self,
         target: &ServiceDescriptor,
-        context: CallContext,
-        payload: Payload,
+        request: tok_execution::Request<(CallContext, Payload)>,
     ) -> Result<CallResponse, Status> {
         call::call(
             &self.connections,
             target,
-            context,
-            payload,
+            request,
             |channel, request| async move {
                 proto::player_rpc_client::PlayerRpcClient::new(channel)
                     .call(request)
@@ -40,9 +38,12 @@ impl Client {
     pub async fn handle_event(
         &self,
         target: &ServiceDescriptor,
-        context: CallContext,
-        event: &tok_events::Message,
+        request: tok_execution::Request<(CallContext, std::sync::Arc<tok_events::Message>)>,
     ) -> Result<proto::EventResponse, Status> {
+        let tok_execution::Request {
+            context: execution,
+            input: (context, event),
+        } = request;
         call::validate_target(target, &context)?;
         if context.timer.is_some() || context.request_id == 0 {
             return Err(Status::invalid_argument("内部事件上下文无效"));
@@ -58,14 +59,13 @@ impl Client {
             event_type: event.event_type.clone(),
             body: event.body.clone(),
         });
-        let span = tracing::info_span!("rpc_event_client", node_id = %target.node_id, service_name = %target.service_name, event_id = %event.event_id);
+        let span = tracing::info_span!(parent: execution.span(), "rpc_event_client", node_id = %target.node_id, service_name = %target.service_name, event_id = %event.event_id);
         let response = self
             .connections
             .execute(
                 target,
                 request_id,
-                request,
-                span,
+                tok_execution::Request::new(execution.with_span(span), request),
                 |channel, request| async move {
                     proto::player_rpc_client::PlayerRpcClient::new(channel)
                         .handle_event(request)

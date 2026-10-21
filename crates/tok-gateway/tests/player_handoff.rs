@@ -479,7 +479,17 @@ async fn handoff_replays_original_response_preserves_identity_and_runs_timer_onc
             trace_context: Default::default(),
         })),
     };
-    assert_eq!(a.sessions.deliver(&event).await.unwrap().admitted, 1);
+    assert_eq!(
+        a.sessions
+            .deliver(tok_execution::Request::new(
+                delivery_context(),
+                event.clone()
+            ))
+            .await
+            .unwrap()
+            .admitted,
+        1
+    );
     tokio::time::timeout(Duration::from_secs(2), async {
         while execution.events.lock().unwrap().len() != 1 {
             tokio::task::yield_now().await
@@ -508,7 +518,17 @@ async fn handoff_replays_original_response_preserves_identity_and_runs_timer_onc
     assert_eq!(replayed, original);
     assert!(matches!(read(&mut stream).await, Content::Recovered(_)));
     assert!(source.join_topic("stale").await.is_err());
-    assert_eq!(b.sessions.deliver(&event).await.unwrap().admitted, 1);
+    assert_eq!(
+        b.sessions
+            .deliver(tok_execution::Request::new(
+                delivery_context(),
+                event.clone()
+            ))
+            .await
+            .unwrap()
+            .admitted,
+        1
+    );
     tokio::time::timeout(Duration::from_secs(2), async {
         while execution.events.lock().unwrap().len() != 2 {
             tokio::task::yield_now().await
@@ -1459,4 +1479,64 @@ async fn target_topic_failure_cancels_preparation_without_transferring_ownership
     assert_eq!(source.snapshot().unwrap().topics, vec!["room"]);
     a.stop().await;
     b.stop().await;
+}
+
+#[cfg(test)]
+fn delivery_context() -> tok_execution::Context {
+    tok_execution::Context::new(
+        tok_core::Identity {
+            node_id: "local".into(),
+            service_name: "test-events".into(),
+        },
+        "test-delivery",
+        std::time::Duration::from_secs(5),
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .unwrap()
+}
+
+#[tokio::test]
+async fn all_gateway_rpc_methods_validate_execution_metadata_before_state_changes() {
+    use tok_grpc::tonic;
+    let fixture = Fixture::configured(
+        "a",
+        Arc::new(MemoryDirectory::default()),
+        Arc::new(MemoryOwnership::new(16).unwrap()),
+        Arc::new(tok_gateway::player::resume_token::SignedResumeTokens::ephemeral().unwrap()),
+        Arc::new(Execution::default()),
+        Config::default(),
+    )
+    .await;
+    let service = GatewayRpcService::new(Config::default().max_handoff_bytes).unwrap();
+    service.register_player(fixture.sessions.clone()).unwrap();
+    for operation in 0..4 {
+        for (timeout, expected) in [
+            ("invalid", tonic::Code::InvalidArgument),
+            ("0n", tonic::Code::DeadlineExceeded),
+        ] {
+            let mut request = tonic::Request::new(proto::HandoffRequest {
+                source_service_name: "gateway".into(),
+                ..Default::default()
+            });
+            request
+                .metadata_mut()
+                .insert("grpc-timeout", timeout.parse().unwrap());
+            let error = match operation {
+                0 => proto::gateway_rpc_server::GatewayRpc::prepare_handoff(&service, request)
+                    .await
+                    .unwrap_err(),
+                1 => proto::gateway_rpc_server::GatewayRpc::commit_handoff(&service, request)
+                    .await
+                    .unwrap_err(),
+                2 => proto::gateway_rpc_server::GatewayRpc::cancel_handoff(&service, request)
+                    .await
+                    .unwrap_err(),
+                _ => proto::gateway_rpc_server::GatewayRpc::complete_handoff(&service, request)
+                    .await
+                    .unwrap_err(),
+            };
+            assert_eq!(error.code(), expected);
+        }
+    }
+    fixture.stop().await;
 }

@@ -11,6 +11,7 @@ license.workspace = true
 tok.workspace = true
 clap.workspace = true
 tokio.workspace = true
+tokio-util.workspace = true
 prost.workspace = true
 tonic.workspace = true
 tonic-prost.workspace = true
@@ -18,7 +19,6 @@ tonic-prost.workspace = true
 [dev-dependencies]
 heck.workspace = true
 tower.workspace = true
-tokio-util.workspace = true
 uuid.workspace = true
 redis.workspace = true
 

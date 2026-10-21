@@ -403,7 +403,8 @@ struct Value {
 # #[tokio::main]
 # async fn main() -> Result<(), Box<dyn std::error::Error>> {
 let mut registry = Registry::<u64, (), std::io::Error>::new();
-registry.register(1, 2, |target, input: Value| async move {
+registry.register(1, 2, |request: tok::execution::Request<(u64, Value)>| async move {
+    let (target, input) = request.input;
     if input.value != target {
         return Err(std::io::Error::other("目标不匹配"));
     }
@@ -437,6 +438,18 @@ let rpc = message::rpc::Service::new("local", "custom", Arc::new(adapter))?;
 示例公会的 guild::handlers 返回 message::Registry 及消息注册错误，业务错误保留其自身类型；RPC 组装只负责提取目标、映射错误并安装请求锁。运行 `just dispatch-smoke` 验证直接本地调用，`just rpc-smoke client-smoke` 验证同一业务链在真实 RPC/TCP 中的使用。
 
 当前 message::rpc::HandlerRegistry 的普通请求表已委托执行库分发；timer、事件及其玩家附加结果仍由游戏协议层组合。通知归属仍待校正；通用请求锁已迁入 execution::lock，RPC 仅保留协议策略与映射。
+
+## 执行上下文的承载与边界
+
+框架处理链与注册回调接收 `execution::Request<T>`。使用 [`execution::Request::map`] 转换正文会移交原 Context；本地嵌套操作使用 Context::child，保留截止点、取消关系、Span 与 Extensions。Context.service 表示本地执行所属服务，出站目标独立表达。根入口显式创建 Context，不从当前任务自动恢复一个父 Context。
+
+Extensions 提供可选元信息和本地能力；类型相同的值克隆后共享，某个容器的 insert/remove 不回写其他克隆。业务必需输入放在正文，固定处理器依赖由构造注入。跨 gRPC / NATS 只传允许的协议 metadata，接收端校验后安装自身能力，不恢复源 SessionHandle。
+
+Context::with_budget_limit 只能收紧原截止点。with_cancellation 由可信适配器用于明确的停止边界，不能用于普通嵌套调用规避父取消。独立消费、timer 和补偿任务可以新建有限范围；排队本身不能隐式重置预算。
+
+SessionManager::deliver 接收 `Request<events::Delivery>`；同步通知保留消费范围，成功入队的转发事件建立独立 session 范围，从入队起计时，源消费结束或取消不撤销已准入工作。源扩展按投递输入继承，目标网关、manager、session 及其配置能力覆盖同类型源能力；游戏调用方负责移除不适合转移的自定义源能力，不将任意游戏 session 状态当作通用元信息复制。
+
+已有调用中发客户端通知用 SessionHandle::notify_request；notify / submit / post_event 是显式独立提交入口。独立通知与回应发布不自动放大其来源调用的业务预算，也不回滚已执行的业务。
 
 ## 内部 RPC 与共享端点
 
@@ -480,7 +493,8 @@ endpoint = "internal-rpc"
         Box::pin(async move {
             // 状态、入口和 Layer 在同一个工厂中初始化。
             let mut handlers = HandlerRegistry::new();
-            handlers.register(1, 2, |context, request: ReadGuild| async move {
+            handlers.register(1, 2, |execution: tok::execution::Request<(tok::message::rpc::CallContext, ReadGuild)>| async move {
+                let (context, request) = execution.input;
                 if context.bid.as_deref() != Some(request.guild_id.to_string().as_str()) {
                     return Err(tok::message::rpc::tonic::Status::invalid_argument("业务 ID 不匹配"));
                 }
@@ -512,14 +526,14 @@ Application::register_rpc_factory 按配置的 factory（默认服务名）建�
 查询服务，再用 [`infra::routing::route`] 按 bid 选点。
 [`grpc::Client`] 管理共享连接、缓存撤销、默认期限及通用调用执行，不包含 Player 或 Business 方法。
 [`message::rpc::player::Client`] 提供 call / handle_event，[`message::rpc::business::Client`] 提供普通业务 call；
-构造时分别传入同一个 `Arc<Client>`，协议适配器共享连接但保持各自的调用约束。
-自定义 protobuf 客户端推荐通过 Client::execute 接入统一期限、追踪和指标；也可以使用 Client::channel 取得 Channel，自行管理调用预算和协议适配。
-Client 的默认期限须大于零且不超过一天。execute 保留更短的请求 grpc-timeout，准备与发送共用本地截止点，超期结果不会成功返回；这不会中断阻塞代码或回滚远端副作用。
+构造时分别传入同一个 `Arc<Client>`，协议适配器共享连接但保持各自的调用约束。call 接收 `execution::Request<(CallContext, Payload)>`，handle_event 接收 `execution::Request<(CallContext, Arc<events::Message>)>`；协议 CallContext 表示远端关联与目标，外层 Context.service 保留本地执行身份。
+自定义 protobuf 客户端推荐通过 Client::execute 传入 `execution::Request<tonic::Request<T>>`，接续本地调用范围和扩展；也可以使用 Client::channel 取得 Channel，自行管理调用预算和协议适配。
+Client 的期限上限须大于零且不超过一天。execute 保留上游原截止点、取消和更短的请求 grpc-timeout，准备与发送共用本地截止点，超期结果不会成功返回；这不会中断阻塞代码或回滚远端副作用。
 Channel 为延迟连接，实际发送时才建立网络连接。
 
 ### 客户端出站处理链
 
-[`grpc::Client::layer`] 提供标准 [`grpc::client::Layer`]，可直接交给 ServiceBuilder。外层输入 [`grpc::client::Call`] 携带目标、关联序号、原请求与 Span，策略可在连接获取前选点或拒绝；Layer 准备连接并将 [`grpc::Outgoing`] 交给内层协议发送器。Outgoing 的目标、关联序号和绝对截止点只读，请求可修改。
+[`grpc::Client::layer`] 提供标准 [`grpc::client::Layer`]，可直接交给 ServiceBuilder。外层输入 `execution::Request<grpc::client::Call<T>>` 携带原 Context，正文 [`grpc::client::Call`] 表达目标、关联序号和原 gRPC 请求；策略可在连接获取前选点或拒绝。Layer 准备连接并将 `execution::Request<grpc::Outgoing<T>>` 交给内层协议发送器。Outgoing 的目标和关联序号只读，请求可修改，截止点与停止信号由包装请求的 Context 提供。
 
 以下示例展示内部业务协议发送器的组装，调用时需要目标服务运行；函数体由 rustdoc 编译检查。
 
@@ -527,36 +541,37 @@ Channel 为延迟连接，实际发送时才建立网络连接。
 use std::time::Duration;
 use tok::{core::ServiceDescriptor, grpc::{self, tonic}, message::rpc::protocol::internal::v1 as proto};
 use grpc::tower::{self, ServiceBuilder, ServiceExt};
+use tok::execution::{Context, Request};
 
-# async fn example(target: &ServiceDescriptor, request: proto::CallRequest) -> Result<(), Box<dyn std::error::Error>> {
+# async fn example(context: Context, target: &ServiceDescriptor, request: proto::CallRequest) -> Result<(), Box<dyn std::error::Error>> {
 let client = grpc::Client::new(Duration::from_secs(2), 128)?;
-let sender = tower::service_fn(|call: grpc::Outgoing<proto::CallRequest>| async move {
+let sender = tower::service_fn(|call: Request<grpc::Outgoing<proto::CallRequest>>| async move {
     // 在真实发送前重新扣减中间件等待消耗的预算，过期时不会发出调用。
-    let (channel, request) = call.into_parts()?;
+    let (channel, request) = call.input.into_parts(&call.context)?;
     proto::business_rpc_client::BusinessRpcClient::new(channel).call(request).await
 });
 let chain = ServiceBuilder::new()
     .layer(client.layer())
-    .map_request(|mut call: grpc::Outgoing<proto::CallRequest>| {
-        call.request.metadata_mut().insert("x-example-policy", tonic::metadata::MetadataValue::from_static("checked"));
+    .map_request(|mut call: Request<grpc::Outgoing<proto::CallRequest>>| {
+        call.input.request.metadata_mut().insert("x-example-policy", tonic::metadata::MetadataValue::from_static("checked"));
         call
     })
     .service(sender);
-let response = chain.oneshot(grpc::client::Call {
+let response = chain.oneshot(Request::new(context, grpc::client::Call {
     target: target.clone(), request_id: 1,
-    request: tonic::Request::new(request), span: tracing::Span::current(),
-}).await?;
+    request: tonic::Request::new(request),
+})).await?;
 // 直接 Service 保留完整 tonic::Response，包括 metadata。
 # drop(response);
 # Ok(())
 # }
 ```
 
-客户端预算从进入 Layer 的 call 开始，连接准备、内层 Service 就绪等待与调用共用本地绝对期限；更短的传入 grpc-timeout 保留。位于 Layer 外的策略等待不包含在此预算中，应另行约束；需要共享该预算的策略放在 Layer 内。发送器使用 Outgoing::into_parts 缩短远端期限，避免发送等待前的旧预算；本地超期结果仍被拒绝。
+客户端预算沿用传入 Context 的原截止点，并受 Client 配置与更短 grpc-timeout 共同限制；连接准备、内层就绪与发送不能重置预算。外层等待已消耗的时间通过原截止点扣减，但外层正在等待时的及时取消和超时仍应由 execution::Layer 等外层保护。发送器使用 Outgoing::into_parts 缩短远端期限，避免发送等待前的旧预算；本地超期结果仍被拒绝。
 
 可重复调用的 client::Service 每次克隆内层 Service，限流与熔断等状态应显式共享，例如使用 GlobalConcurrencyLimitLayer。Client 克隆共享连接缓存和工厂；替换某个克隆的工厂会为该实例建立独立配置与空缓存。不要求输入或 Future 为 static，可以处理借用；Buffer 等中间件可有自己的附加限制。
 
-[`grpc::Client::execute_service`] 便捷方法接收内层 `Service<Outgoing<Req>, Response = tonic::Response<Res>, Error = Status>`，消费该 Service 后返回响应正文，不要求 Service 克隆；execute 保留 FnOnce 发送回调。二者复用同一客户端 Layer 执行实现，准备阶段失败也计入其调用指标。已有协议客户端不自动安装用户出站链。框架不主动重试，中间件自行重试时须承担幂等与剩余预算约束；丢弃 Future 不回滚远端副作用。
+[`grpc::Client::execute_service`] 便捷方法接收内层 `Service<execution::Request<Outgoing<Req>>, Response = tonic::Response<Res>, Error = Status>`，接收 `Request<tonic::Request<Req>>`，消费该 Service 后返回响应正文，不要求 Service 克隆；execute 使用相同请求承载，保留 FnOnce 发送回调。两者从 Context 取得期限、取消与 Span，不另外传入 Span。二者复用同一客户端 Layer 执行实现，准备阶段失败也计入其调用指标。已有协议客户端不自动安装用户出站链。框架不主动重试，中间件自行重试时须承担幂等与剩余预算约束；丢弃 Future 不回滚远端副作用。
 
 ### 服务端类型化处理链
 
@@ -1144,7 +1159,7 @@ struct ProductionFinished {}
 
 # fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 let mut handlers = HandlerRegistry::new();
-handlers.register_with_timers(1, 2, |_context, _request: StartProduction| async move {
+handlers.register_with_timers(1, 2, |_request: tok::execution::Request<(tok::message::rpc::CallContext, StartProduction)>| async move {
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
         .map_err(|_| tok::message::rpc::tonic::Status::internal("系统时钟无效"))?.as_millis() as i64;
     Ok(HandlerReply {
@@ -1155,7 +1170,8 @@ handlers.register_with_timers(1, 2, |_context, _request: StartProduction| async 
         }])),
     })
 })?;
-handlers.register_timer(3, |context, _event: ProductionFinished| async move {
+handlers.register_timer(3, |request: tok::execution::Request<(tok::message::rpc::CallContext, ProductionFinished)>| async move {
+    let (context, _event) = request.input;
     let trigger = context.timer.expect("分发表已确认内部计时来源");
     // 在这里根据可信 session 和服务端生产规则结算产出。
     let _ = (context.session, trigger.scheduled_at_ms, trigger.fired_at_ms);
@@ -1272,7 +1288,7 @@ ID 限制为 1 到 128 个可打印 ASCII 非空白字节，追踪头每字段�
 
 本节介绍当前按 topic 和类型建立的固定兴趣订阅。P5 已接通传输路由，本地与远程注册表及 gateway/session 处理链沿用共同协议；P6 已提供按组件绑定的会话兴趣聚合，不按 player_id 自动订阅。
 
-任何服务都可以使用 [`events::nats::Bus::publish_event`] 发布，用 [`events::Registry`] 订阅自己关心的类型。
+调用链内使用 [`events::nats::Bus::publish_request`] 传入 `Request<Envelope<E>>`，或使用 [`events::nats::Bus::publisher`] 组合 `Service<Request<Message>>`；保留本地期限、取消与追踪，Extensions 不进入网络。原生 [`events::nats::Bus::publish_event`] / publish 仍供显式独立传输出口使用。任何服务都可以发布，用 [`events::Registry`] 订阅自己关心的类型。
 目标由业务正文表达，订阅者自行解释；总线不要求 player、session 或 RPC。
 每个 Registry 可对一种类型有序注册多个处理函数；多个服务可以分别订阅同一种事件。
 处理函数可捕获状态与发布连接，也可以实现 [`events::Handler`] 自定义分发。
@@ -1527,8 +1543,8 @@ Scene 目前仅预留模块，不套用 Player 的串行与所有权语义。
 ## 玩家中间件与扩展状态
 
 [`gateway::player::Pipeline`] 使用同一 Tower 协议，分别安装 `with_admission_layer`、`with_request_layer`、`with_event_layer`、`with_timer_layer`、`with_downlink_layer`。
-准入与新下行使用 `Request<LogicalMessage>`；执行器使用 `Request<RequestInput>`、`Request<EventInput>`、`Request<TimerInput>`，不再使用无共同上下文的多参数调用。
-每个入口保留自己的结果类型。事件只返回 timer 效果，不生成客户端 Response；timer 也不自动下发客户端回应。
+准入与新下行使用 `Request<LogicalMessage>`，准入结果也返回同类型 Request，以保留中间件写入的扩展；执行器使用 `Request<RequestInput>`、`Request<EventInput>`、`Request<TimerInput>`，不再使用无共同上下文的多参数调用。
+准入成功后传递原截止点与扩展到 FIFO，等待消耗预算；停止关系显式转交 session，在途业务不随连接替换被取消。回应发布采用独立有限范围，继承请求标记，使超时错误仍可下发。每个入口保留自己的结果类型。事件只返回 timer 效果，不生成客户端 Response；timer 也不自动下发客户端回应。
 
 ```rust
 use std::sync::Arc;

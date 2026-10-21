@@ -20,17 +20,15 @@ impl Client {
     pub async fn call(
         &self,
         target: &ServiceDescriptor,
-        context: CallContext,
-        payload: Payload,
+        request: tok_execution::Request<(CallContext, Payload)>,
     ) -> Result<CallResponse, Status> {
-        if context.timer.is_some() {
+        if request.input.0.timer.is_some() {
             return Err(Status::invalid_argument("计时触发只能调用 player 入口"));
         }
         call::call(
             &self.connections,
             target,
-            context,
-            payload,
+            request,
             |channel, request| async move {
                 proto::business_rpc_client::BusinessRpcClient::new(channel)
                     .call(request)

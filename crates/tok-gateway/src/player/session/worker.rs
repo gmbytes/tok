@@ -26,10 +26,10 @@ pub(super) enum Job {
 }
 pub(super) struct EventJob {
     pub(super) event: Arc<tok_events::Message>,
-    pub(super) parent: tracing::Span,
+    pub(super) context: tok_execution::Context,
 }
 pub(super) struct RequestJob {
-    pub(super) request: LogicalMessage,
+    pub(super) request: Request<LogicalMessage>,
     // Some 将回应交给等待方；None 通过会话通信通道发布给游戏客户端。
     pub(super) response_sender: Option<oneshot::Sender<LogicalMessage>>,
 }
@@ -108,8 +108,8 @@ pub(super) fn task(
                                 if !renew_ownership(&session_state, ownership_store.as_ref(), timeout, ttl).await { break; }
                                 let Some(next) = event_request.checked_add(1) else { session_state.cancel.cancel(); break; };
                                 event_request = next;
-                                let span = tracing::info_span!(parent: &job.parent, "player_event", player_id = %session_state.ownership.identity.player_id, event_id = %job.event.event_id, event_type = %job.event.event_type);
-                                let result = tokio::time::timeout(timeout, execute_event(&session_state,executor.as_ref(),event_request,job.event,span)).await;
+                                let span = tracing::info_span!(parent: job.context.span(), "player_event", player_id = %session_state.ownership.identity.player_id, event_id = %job.event.event_id, event_type = %job.event.event_type);
+                                let result = tokio::time::timeout(timeout, execute_event(&session_state,executor.as_ref(),event_request,job.context,job.event,span)).await;
                                 let success = match result {
                                     Ok(Ok(timers_update)) => {
                                         let mut success = true;
@@ -153,7 +153,7 @@ pub(super) fn task(
                                 continue;
                             }
                         };
-                        let mut request = job.request;
+                        let Request { context, input: mut request } = job.request;
                         let response = if session_state.cancel.is_cancelled() {
                             channel::error_response(&request, ErrorCode::SessionClosed)
                         } else if request.request_id <= last_request {
@@ -163,8 +163,8 @@ pub(super) fn task(
                             if !renew_ownership(&session_state, ownership_store.as_ref(), timeout, ttl).await {
                                 channel::error_response(&request, ErrorCode::SessionClosed)
                             } else {
-                                let span = tracing::info_span!("client_request", player_id = %session_state.ownership.identity.player_id, request_id = request.request_id, message_id = request.message_id);
-                                let result = tokio::time::timeout(timeout, execute_request(&session_state,executor.as_ref(),request.clone(),span)).await;
+                                let span = tracing::info_span!(parent: context.span(), "client_request", player_id = %session_state.ownership.identity.player_id, request_id = request.request_id, message_id = request.message_id);
+                                let result = tokio::time::timeout(timeout, execute_request(&session_state,executor.as_ref(),context.clone(),request.clone(),span)).await;
                                 match result {
                                     Ok(Ok(Reply { response: Some(mut response), timers: timer_update })) if response.kind == MessageKind::Response => {
                                         if let Some(update) = timer_update && let Err(error) = timers.apply(update) {
@@ -199,7 +199,7 @@ pub(super) fn task(
                                 reason = "publish_response 在发布失败时已关闭会话，不重复处理或重执业务。"
                             )]
                             let _ = SessionHandle(Arc::clone(&session_state))
-                                .publish_response(response, request.message_id).await;
+                                .publish_response(response, request.message_id, &context).await;
                         }
                     }
                 }
@@ -215,7 +215,7 @@ pub(super) fn task(
                         reason = "退出时仅尽力通知尚存的回应等待方，接收方允许先取消。"
                     )]
                     let _ = response_sender.send(channel::error_response(
-                        &job.request,
+                        &job.request.input,
                         ErrorCode::SessionClosed,
                     ));
                 }
@@ -280,11 +280,13 @@ pub(super) fn execution_error(
 async fn execute_request(
     state: &Arc<SessionState>,
     executor: &dyn Executor,
+    context: tok_execution::Context,
     message: LogicalMessage,
     span: tracing::Span,
 ) -> Result<Reply> {
-    let mut context = SessionHandle(Arc::clone(state))
-        .execution_context(format!("player/request/{}", message.message_id))?
+    let mut context = context
+        .child(format!("player/request/{}", message.message_id))
+        .map_err(|_| ErrorCode::Internal)?
         .with_span(span);
     context
         .extensions_mut()
@@ -310,12 +312,11 @@ async fn execute_event(
     state: &Arc<SessionState>,
     executor: &dyn Executor,
     request_id: u64,
+    context: tok_execution::Context,
     event: Arc<tok_events::Message>,
     span: tracing::Span,
 ) -> Result<Option<tok_player::TimerUpdate>> {
-    let mut context = SessionHandle(Arc::clone(state))
-        .execution_context(format!("player/event/{}", event.event_type))?
-        .with_span(span);
+    let mut context = context.with_span(span);
     context.extensions_mut().insert(event.event_id.clone());
     context.extensions_mut().insert(event.topic.clone());
     context.extensions_mut().insert(Arc::clone(&event));

@@ -57,7 +57,7 @@ fn payload(value: u64) -> Payload {
 fn handler() -> HandlerRegistry {
     let mut registry = HandlerRegistry::new();
     registry
-        .register(1, 2, |_: CallContext, data: Data| async move {
+        .register(1, 2, |execution_request: tok_execution::Request<(tok_message::rpc::CallContext, Data)>| async move { let (_, data) = execution_request.input;
             Ok(Data {
                 value: data.value + 1,
             })
@@ -95,7 +95,10 @@ async fn shared_endpoint_dispatches_and_rejects_unready_malformed_and_wrong_targ
     let guild = target(address, "guild");
     assert_eq!(
         player_client
-            .call(&player, context(&player), payload(1))
+            .call(
+                &player,
+                root((context(&player), payload(1)), tracing::Span::current())
+            )
             .await
             .unwrap_err()
             .code(),
@@ -106,10 +109,18 @@ async fn shared_endpoint_dispatches_and_rejects_unready_malformed_and_wrong_targ
     assert!(ready.set("guild", true));
     for (entry, is_player) in [(&player, true), (&guild, false)] {
         let response = if is_player {
-            player_client.call(entry, context(entry), payload(41)).await
+            player_client
+                .call(
+                    entry,
+                    root((context(entry), payload(41)), tracing::Span::current()),
+                )
+                .await
         } else {
             business_client
-                .call(entry, context(entry), payload(41))
+                .call(
+                    entry,
+                    root((context(entry), payload(41)), tracing::Span::current()),
+                )
                 .await
         }
         .unwrap();
@@ -122,7 +133,10 @@ async fn shared_endpoint_dispatches_and_rejects_unready_malformed_and_wrong_targ
     missing_identity.session = None;
     assert_eq!(
         player_client
-            .call(&player, missing_identity, payload(1))
+            .call(
+                &player,
+                root((missing_identity, payload(1)), tracing::Span::current())
+            )
             .await
             .unwrap_err()
             .code(),
@@ -132,7 +146,10 @@ async fn shared_endpoint_dispatches_and_rejects_unready_malformed_and_wrong_targ
     unknown.message_id = 123;
     assert_eq!(
         business_client
-            .call(&guild, context(&guild), unknown)
+            .call(
+                &guild,
+                root((context(&guild), unknown), tracing::Span::current())
+            )
             .await
             .unwrap_err()
             .code(),
@@ -144,7 +161,10 @@ async fn shared_endpoint_dispatches_and_rejects_unready_malformed_and_wrong_targ
     };
     assert_eq!(
         business_client
-            .call(&guild, context(&guild), bad_payload)
+            .call(
+                &guild,
+                root((context(&guild), bad_payload), tracing::Span::current())
+            )
             .await
             .unwrap_err()
             .code(),
@@ -169,7 +189,10 @@ async fn shared_endpoint_dispatches_and_rejects_unready_malformed_and_wrong_targ
     ready.clear();
     assert_eq!(
         business_client
-            .call(&guild, context(&guild), payload(1))
+            .call(
+                &guild,
+                root((context(&guild), payload(1)), tracing::Span::current())
+            )
             .await
             .unwrap_err()
             .code(),
@@ -230,7 +253,10 @@ async fn timeout_does_not_retry_business_execution() {
     let clients = Arc::new(Client::new(Duration::from_millis(150), 1).unwrap());
     let business_client = tok_message::rpc::business::Client::new(Arc::clone(&clients));
     let error = business_client
-        .call(&target, context(&target), payload(1))
+        .call(
+            &target,
+            root((context(&target), payload(1)), tracing::Span::current()),
+        )
         .await
         .unwrap_err();
     assert!(matches!(
@@ -252,12 +278,32 @@ fn duplicate_message_and_proto_service_bindings_are_rejected() {
     let mut handlers = handler();
     assert!(
         handlers
-            .register(1, 3, |_: CallContext, data: Data| async move { Ok(data) })
+            .register(
+                1,
+                3,
+                |execution_request: tok_execution::Request<(
+                    tok_message::rpc::CallContext,
+                    Data
+                )>| async move {
+                    let (_, data) = execution_request.input;
+                    Ok(data)
+                }
+            )
             .is_err()
     );
     assert!(
         handlers
-            .register(0, 3, |_: CallContext, data: Data| async move { Ok(data) })
+            .register(
+                0,
+                3,
+                |execution_request: tok_execution::Request<(
+                    tok_message::rpc::CallContext,
+                    Data
+                )>| async move {
+                    let (_, data) = execution_request.input;
+                    Ok(data)
+                }
+            )
             .is_err()
     );
     let service = RpcService::new("local", "guild", Arc::new(handler())).unwrap();
@@ -317,8 +363,14 @@ async fn user_tower_concurrency_limit_is_preserved_across_handler_clones() {
     let business_client = tok_message::rpc::business::Client::new(Arc::clone(&clients));
     let target = target(address, "guild");
     let (first, second) = tokio::join!(
-        business_client.call(&target, context(&target), payload(1)),
-        business_client.call(&target, context(&target), payload(2))
+        business_client.call(
+            &target,
+            root((context(&target), payload(1)), tracing::Span::current())
+        ),
+        business_client.call(
+            &target,
+            root((context(&target), payload(2)), tracing::Span::current())
+        )
     );
     assert_eq!(first.unwrap().payload.unwrap().body, payload(1).body);
     assert_eq!(second.unwrap().payload.unwrap().body, payload(2).body);
@@ -391,7 +443,10 @@ async fn custom_client_uri_and_server_transport_timeout_are_applied() {
     // 服务端传输期限应先于客户端三秒预算生效。
     let error = tokio::time::timeout(
         Duration::from_secs(1),
-        client.call(&target, context(&target), payload(1)),
+        client.call(
+            &target,
+            root((context(&target), payload(1)), tracing::Span::current()),
+        ),
     )
     .await
     .expect("configured server timeout was not applied")
@@ -461,22 +516,24 @@ async fn listener_tower_layers_cover_shared_routes_and_preserve_readiness() {
         })
     };
     let sender = || {
-        tower::service_fn(|call: tok_grpc::Outgoing<CallRequest>| async move {
-            let (channel, request) = call.into_parts()?;
-            let response =
-                tok_proto::internal::v1::business_rpc_client::BusinessRpcClient::new(channel)
-                    .call(request)
-                    .await?;
-            assert_eq!(
-                response.metadata().get("x-listener-layer").unwrap(),
-                "applied"
-            );
-            Ok(response)
-        })
+        tower::service_fn(
+            |call: tok_execution::Request<tok_grpc::Outgoing<CallRequest>>| async move {
+                let (channel, request) = call.input.into_parts(&call.context)?;
+                let response =
+                    tok_proto::internal::v1::business_rpc_client::BusinessRpcClient::new(channel)
+                        .call(request)
+                        .await?;
+                assert_eq!(
+                    response.metadata().get("x-listener-layer").unwrap(),
+                    "applied"
+                );
+                Ok(response)
+            },
+        )
     };
     assert_eq!(
         client
-            .execute_service(&guild, 99, request(), tracing::Span::none(), sender())
+            .execute_service(&guild, 99, root(request(), tracing::Span::none()), sender())
             .await
             .unwrap_err()
             .code(),
@@ -485,7 +542,7 @@ async fn listener_tower_layers_cover_shared_routes_and_preserve_readiness() {
     assert!(ready.set("guild", true));
     assert!(ready.set("player", true));
     let response = client
-        .execute_service(&guild, 99, request(), tracing::Span::none(), sender())
+        .execute_service(&guild, 99, root(request(), tracing::Span::none()), sender())
         .await
         .unwrap();
     assert_eq!(
@@ -498,7 +555,10 @@ async fn listener_tower_layers_cover_shared_routes_and_preserve_readiness() {
     let player_client = tok_message::rpc::player::Client::new(Arc::new(client));
     assert_eq!(
         player_client
-            .call(&player, context(&player), payload(41))
+            .call(
+                &player,
+                root((context(&player), payload(41)), tracing::Span::current())
+            )
             .await
             .unwrap()
             .request_id,
@@ -508,7 +568,10 @@ async fn listener_tower_layers_cover_shared_routes_and_preserve_readiness() {
     ready.clear();
     assert_eq!(
         player_client
-            .call(&player, context(&player), payload(41))
+            .call(
+                &player,
+                root((context(&player), payload(41)), tracing::Span::current())
+            )
             .await
             .unwrap_err()
             .code(),
@@ -517,4 +580,21 @@ async fn listener_tower_layers_cover_shared_routes_and_preserve_readiness() {
     assert_eq!(calls.load(Ordering::SeqCst), 4);
     shutdown.cancel();
     task.await.unwrap().unwrap();
+}
+
+fn root<T>(input: T, span: tracing::Span) -> tok_execution::Request<T> {
+    tok_execution::Request::new(
+        tok_execution::Context::new(
+            tok_core::Identity {
+                node_id: "local".into(),
+                service_name: "test-caller".into(),
+            },
+            "test-call",
+            std::time::Duration::from_secs(30),
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .unwrap()
+        .with_span(span),
+        input,
+    )
 }

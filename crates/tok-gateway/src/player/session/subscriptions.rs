@@ -194,7 +194,12 @@ mod tests {
         handle.leave_topic("guild:7").await.unwrap();
         assert!(
             candidates[0]
-                .notify_event(9, b"stale", Some("guild:7"))
+                .notify_event(
+                    9,
+                    b"stale",
+                    Some("guild:7"),
+                    &handle.context("test-notify".into()).unwrap()
+                )
                 .await
                 .is_err()
         );

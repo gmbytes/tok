@@ -65,7 +65,7 @@ async fn internal_trigger_is_propagated_and_cannot_be_selected_by_client_message
     let calls = Arc::new(AtomicUsize::new(0));
     let mut registry = HandlerRegistry::new();
     registry
-        .register_with_timers(1, 2, |_context, request: Data| async move {
+        .register_with_timers(1, 2, |execution_request: tok_execution::Request<(tok_message::rpc::CallContext, Data)>| async move { let (_context, request) = execution_request.input;
             Ok(HandlerReply {
                 message: request,
                 timers: Some(TimerUpdate::ReplaceAll(vec![spec()])),
@@ -74,25 +74,41 @@ async fn internal_trigger_is_propagated_and_cannot_be_selected_by_client_message
         .unwrap();
     let seen = Arc::clone(&calls);
     registry
-        .register_timer(3, move |context, request: Data| {
-            let seen = Arc::clone(&seen);
-            async move {
-                let trigger = context.timer.unwrap();
-                assert_eq!(trigger.timer_id, "income");
-                assert_eq!(trigger.scheduled_at_ms, 1000);
-                assert_eq!(trigger.fired_at_ms, 1500);
-                assert_eq!(request.value, 7);
-                seen.fetch_add(1, Ordering::SeqCst);
-                Ok(Some(TimerUpdate::Patch {
-                    upsert: vec![],
-                    cancel: vec!["income".into()],
-                }))
-            }
-        })
+        .register_timer(
+            3,
+            move |execution_request: tok_execution::Request<(
+                tok_message::rpc::CallContext,
+                Data,
+            )>| {
+                let (context, request) = execution_request.input;
+                let seen = Arc::clone(&seen);
+                async move {
+                    let trigger = context.timer.unwrap();
+                    assert_eq!(trigger.timer_id, "income");
+                    assert_eq!(trigger.scheduled_at_ms, 1000);
+                    assert_eq!(trigger.fired_at_ms, 1500);
+                    assert_eq!(request.value, 7);
+                    seen.fetch_add(1, Ordering::SeqCst);
+                    Ok(Some(TimerUpdate::Patch {
+                        upsert: vec![],
+                        cancel: vec!["income".into()],
+                    }))
+                }
+            },
+        )
         .unwrap();
     assert!(
         registry
-            .register_timer(3, |_ctx, _: Data| async { Ok(None) })
+            .register_timer(
+                3,
+                |execution_request: tok_execution::Request<(
+                    tok_message::rpc::CallContext,
+                    Data
+                )>| async move {
+                    let (_ctx, _) = execution_request.input;
+                    Ok(None)
+                }
+            )
             .is_err()
     );
     let endpoint = Listener::new()
@@ -131,11 +147,16 @@ async fn internal_trigger_is_propagated_and_cannot_be_selected_by_client_message
     let reply = player_client
         .call(
             &target,
-            context.clone(),
-            Payload {
-                message_id: 1,
-                body: Data { value: 7 }.encode_to_vec(),
-            },
+            root(
+                (
+                    context.clone(),
+                    Payload {
+                        message_id: 1,
+                        body: Data { value: 7 }.encode_to_vec(),
+                    },
+                ),
+                tracing::Span::current(),
+            ),
         )
         .await
         .unwrap();
@@ -155,7 +176,10 @@ async fn internal_trigger_is_propagated_and_cannot_be_selected_by_client_message
     };
     assert_eq!(
         player_client
-            .call(&target, context.clone(), body.clone())
+            .call(
+                &target,
+                root((context.clone(), body.clone()), tracing::Span::current())
+            )
             .await
             .unwrap_err()
             .code(),
@@ -168,7 +192,10 @@ async fn internal_trigger_is_propagated_and_cannot_be_selected_by_client_message
         fired_at_ms: 1500,
     });
     let reply = player_client
-        .call(&target, context.clone(), body.clone())
+        .call(
+            &target,
+            root((context.clone(), body.clone()), tracing::Span::current()),
+        )
         .await
         .unwrap();
     assert!(reply.payload.is_none());
@@ -182,7 +209,10 @@ async fn internal_trigger_is_propagated_and_cannot_be_selected_by_client_message
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     assert_eq!(
         business_client
-            .call(&target, context.clone(), body.clone())
+            .call(
+                &target,
+                root((context.clone(), body.clone()), tracing::Span::current())
+            )
             .await
             .unwrap_err()
             .code(),
@@ -191,7 +221,7 @@ async fn internal_trigger_is_propagated_and_cannot_be_selected_by_client_message
     context.timer.as_mut().unwrap().fired_at_ms = 500;
     assert_eq!(
         player_client
-            .call(&target, context, body)
+            .call(&target, root((context, body), tracing::Span::current()))
             .await
             .unwrap_err()
             .code(),
@@ -200,4 +230,21 @@ async fn internal_trigger_is_propagated_and_cannot_be_selected_by_client_message
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     cancel.cancel();
     server.await.unwrap().unwrap();
+}
+
+fn root<T>(input: T, span: tracing::Span) -> tok_execution::Request<T> {
+    tok_execution::Request::new(
+        tok_execution::Context::new(
+            tok_core::Identity {
+                node_id: "local".into(),
+                service_name: "test-caller".into(),
+            },
+            "test-call",
+            std::time::Duration::from_secs(30),
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .unwrap()
+        .with_span(span),
+        input,
+    )
 }

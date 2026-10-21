@@ -636,3 +636,10 @@ Listener::from_server 支持 Tonic Server<L>，内部保存 Routes 和类型擦�
 客户端预算从 Layer 的 call 开始，覆盖连接准备、内层就绪和发送；外层策略可提前拒绝或选点，其等待须独立约束。可重复 Service 克隆内层，共享策略状态须显式共享；指南使用标准 Layer / ServiceBuilder，说明预算放置与共享规则。Client 克隆共享工厂与缓存，invalidate 影响共享克隆，替换工厂建立独立配置。准备失败也计入 Layer 的调用指标，不主动增加重试或后台任务。
 
 本轮 Windows 验收：工作区 298 项测试通过、31 项外部专项按约定跳过，包含 19 项指南示例。新增回归覆盖直接 Layer 的借用输入与完整回应、外层提前拒绝、共享客户端缓存与工厂隔离、内层并发就绪预算、服务身份与取消及非 Clone FnOnce 回调；真实网络追踪回归切换到直接 Layer 路径并通过。全目标 Clippy、workspace rustdoc、rpc / client / application smoke、格式、220 个文本文件 UTF-8/LF、82 处相对文档路径及空白检查通过。未运行真实 Redis/NATS、Linux 或 release 构建；本轮代码和文档尚未提交。
+
+
+## 执行上下文连续性修复（2026-10-21）
+
+在 4092a10 提交 Layer 化与规范后，修复出站 gRPC / 游戏协议 / 网关准入队列 / 事件投递下行 / 内部交接 / NATS 发布六类边界。新增 Request::map 和 Context 收紧预算、显式停止边界能力；注册便捷回调统一传入 Request，不再剥离执行上下文。独立事件消费、session 工作、回应发布和交接补偿明确划分范围，传输只传播允许 metadata，目标安装自身能力，不改变无主动重试和有限租约约定。
+
+本轮 Windows 验收：工作区串行 306 项测试通过、32 项外部专项按默认规则跳过，包含 19 项指南示例；另在隔离临时 NATS 实例运行 16 项真实 NATS/多网关专项全部通过，发布 Future 的跨任务回归再次通过。最终期限收紧变更后，execution / grpc / gateway 共 143 项定向回归通过，准入边界最终 13 项再次通过。全目标编译与 Clippy、workspace rustdoc、rpc / client / application / events / dispatch 五个 smoke、格式、220 个文本文件 UTF-8/LF、119 处相对文档路径及空白检查通过。并行工作区回归曾遇到 Windows 套接字资源不足，串行完整重跑通过；不据此修改业务逻辑。未运行真实 Redis、Linux 或 release 构建；本轮修复随本次提交交付。

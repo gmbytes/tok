@@ -113,11 +113,16 @@ async fn event_handlers_are_inaccessible_to_requests_and_timers_and_require_sess
         player_client
             .call(
                 &target,
-                context.clone(),
-                Payload {
-                    message_id: 1,
-                    body: event.body.clone()
-                }
+                root(
+                    (
+                        context.clone(),
+                        Payload {
+                            message_id: 1,
+                            body: event.body.clone()
+                        }
+                    ),
+                    tracing::Span::current()
+                )
             )
             .await
             .unwrap_err()
@@ -134,11 +139,16 @@ async fn event_handlers_are_inaccessible_to_requests_and_timers_and_require_sess
         player_client
             .call(
                 &target,
-                timer,
-                Payload {
-                    message_id: 1,
-                    body: event.body.clone()
-                }
+                root(
+                    (
+                        timer,
+                        Payload {
+                            message_id: 1,
+                            body: event.body.clone()
+                        }
+                    ),
+                    tracing::Span::current()
+                )
             )
             .await
             .unwrap_err()
@@ -149,7 +159,13 @@ async fn event_handlers_are_inaccessible_to_requests_and_timers_and_require_sess
     missing.session = None;
     assert_eq!(
         player_client
-            .handle_event(&target, missing, &event)
+            .handle_event(
+                &target,
+                root(
+                    (missing, std::sync::Arc::new((event).clone())),
+                    tracing::Span::current()
+                )
+            )
             .await
             .unwrap_err()
             .code(),
@@ -159,7 +175,13 @@ async fn event_handlers_are_inaccessible_to_requests_and_timers_and_require_sess
     invalid.body = vec![255];
     assert_eq!(
         player_client
-            .handle_event(&target, context.clone(), &invalid)
+            .handle_event(
+                &target,
+                root(
+                    (context.clone(), std::sync::Arc::new((invalid).clone())),
+                    tracing::Span::current()
+                )
+            )
             .await
             .unwrap_err()
             .code(),
@@ -169,7 +191,13 @@ async fn event_handlers_are_inaccessible_to_requests_and_timers_and_require_sess
     unknown.event_type = "test.unknown".into();
     assert_eq!(
         player_client
-            .handle_event(&target, context.clone(), &unknown)
+            .handle_event(
+                &target,
+                root(
+                    (context.clone(), std::sync::Arc::new((unknown).clone())),
+                    tracing::Span::current()
+                )
+            )
             .await
             .unwrap_err()
             .code(),
@@ -177,7 +205,13 @@ async fn event_handlers_are_inaccessible_to_requests_and_timers_and_require_sess
     );
     assert_eq!(calls.load(Ordering::SeqCst), 0);
     let response = player_client
-        .handle_event(&target, context, &event)
+        .handle_event(
+            &target,
+            root(
+                (context, std::sync::Arc::new((event).clone())),
+                tracing::Span::current(),
+            ),
+        )
         .await
         .unwrap();
     assert_eq!(response.request_id, 1);
@@ -278,4 +312,21 @@ async fn ordered_event_handlers_compose_timer_effects_without_client_payloads() 
             expected
         );
     }
+}
+
+fn root<T>(input: T, span: tracing::Span) -> tok_execution::Request<T> {
+    tok_execution::Request::new(
+        tok_execution::Context::new(
+            tok_core::Identity {
+                node_id: "local".into(),
+                service_name: "test-caller".into(),
+            },
+            "test-call",
+            std::time::Duration::from_secs(30),
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .unwrap()
+        .with_span(span),
+        input,
+    )
 }

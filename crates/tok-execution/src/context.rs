@@ -83,6 +83,25 @@ impl Context {
             extensions: self.extensions.clone(),
         })
     }
+    /// 以当前时刻起的本地上限收紧原截止点，绝不扩大原预算。
+    pub fn with_budget_limit(mut self, budget: Duration) -> Self {
+        if let Some(limit) = Instant::now().checked_add(budget) {
+            self.deadline = self.deadline.min(limit);
+        }
+        self
+    }
+    /// 使用已有本地单调时钟截止点收紧范围，不因换算剩余时长引入新预算。
+    pub fn with_deadline_limit(mut self, deadline: Instant) -> Self {
+        self.deadline = self.deadline.min(deadline);
+        self
+    }
+    /// 由可信适配器显式改变停止关系；保留期限、追踪与扩展。
+    ///
+    /// 用于已接受工作脱离连接生命周期等明确的范围边界，不能隐式用于普通嵌套调用。
+    pub fn with_cancellation(mut self, cancellation: CancellationToken) -> Self {
+        self.cancellation = cancellation;
+        self
+    }
     /// 安装入口已建立的执行 span；不改变预算和取消范围。
     pub fn with_span(mut self, span: tracing::Span) -> Self {
         self.span = span;

@@ -84,7 +84,11 @@ pub fn handlers(
         GetPlayerResponse::MESSAGE_ID,
         {
             let state = Arc::clone(&state);
-            move |context, _request: GetPlayerRequest| {
+            move |execution_request: tok::execution::Request<(
+                tok::message::rpc::CallContext,
+                GetPlayerRequest,
+            )>| {
+                let (context, _request) = execution_request.input;
                 let state = Arc::clone(&state);
                 async move {
                     let player_id = player_id(&context)?;
@@ -117,7 +121,11 @@ pub fn handlers(
         SetPlayerResponse::MESSAGE_ID,
         {
             let state = Arc::clone(&state);
-            move |context, request: SetPlayerRequest| {
+            move |execution_request: tok::execution::Request<(
+                tok::message::rpc::CallContext,
+                SetPlayerRequest,
+            )>| {
+                let (context, request) = execution_request.input;
                 let state = Arc::clone(&state);
                 async move {
                     let player_id = player_id(&context)?;
@@ -139,7 +147,11 @@ pub fn handlers(
         StartProductionResponse::MESSAGE_ID,
         {
             let state = Arc::clone(&state);
-            move |context, _request: StartProductionRequest| {
+            move |execution_request: tok::execution::Request<(
+                tok::message::rpc::CallContext,
+                StartProductionRequest,
+            )>| {
+                let (context, _request) = execution_request.input;
                 let state = Arc::clone(&state);
                 async move {
                     let id = player_id(&context)?;
@@ -233,7 +245,12 @@ pub fn handlers(
     registry.register(
         QueryGuildRequest::MESSAGE_ID,
         QueryGuildResponse::MESSAGE_ID,
-        move |context, request: QueryGuildRequest| {
+        move |execution_request: tok::execution::Request<(
+            tok::message::rpc::CallContext,
+            QueryGuildRequest,
+        )>| {
+            let execution = execution_request.context;
+            let (context, request) = execution_request.input;
             let directory = Arc::clone(&directory);
             let client = client.clone();
             async move {
@@ -246,21 +263,26 @@ pub fn handlers(
                 let response = client
                     .call(
                         &target,
-                        CallContext {
-                            timer: None,
-                            node_id: target.node_id.clone(),
-                            service_name: target.service_name.clone(),
-                            bid: Some(request.guild_id.to_string()),
-                            request_id: context.request_id,
-                            session: None,
-                        },
-                        Payload {
-                            message_id: GetGuildRequest::MESSAGE_ID,
-                            body: GetGuildRequest {
-                                guild_id: request.guild_id,
-                            }
-                            .encode_to_vec(),
-                        },
+                        tok::execution::Request::new(
+                            execution,
+                            (
+                                CallContext {
+                                    timer: None,
+                                    node_id: target.node_id.clone(),
+                                    service_name: target.service_name.clone(),
+                                    bid: Some(request.guild_id.to_string()),
+                                    request_id: context.request_id,
+                                    session: None,
+                                },
+                                Payload {
+                                    message_id: GetGuildRequest::MESSAGE_ID,
+                                    body: GetGuildRequest {
+                                        guild_id: request.guild_id,
+                                    }
+                                    .encode_to_vec(),
+                                },
+                            ),
+                        ),
                     )
                     .await?;
                 let payload = response

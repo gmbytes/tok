@@ -87,10 +87,13 @@ async fn two_services_on_one_endpoint_share_a_tcp_connection() {
             body: vec![],
         };
         if player {
-            player_client.call(&target, context, payload).await.unwrap();
+            player_client
+                .call(&target, root((context, payload), tracing::Span::current()))
+                .await
+                .unwrap();
         } else {
             business_client
-                .call(&target, context, payload)
+                .call(&target, root((context, payload), tracing::Span::current()))
                 .await
                 .unwrap();
         }
@@ -104,4 +107,21 @@ async fn two_services_on_one_endpoint_share_a_tcp_connection() {
         .unwrap()
         .unwrap()
         .unwrap();
+}
+
+fn root<T>(input: T, span: tracing::Span) -> tok_execution::Request<T> {
+    tok_execution::Request::new(
+        tok_execution::Context::new(
+            tok_core::Identity {
+                node_id: "local".into(),
+                service_name: "test-caller".into(),
+            },
+            "test-call",
+            std::time::Duration::from_secs(30),
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .unwrap()
+        .with_span(span),
+        input,
+    )
 }

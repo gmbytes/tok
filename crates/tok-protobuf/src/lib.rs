@@ -78,7 +78,7 @@ where
     where
         Req: prost::Message + Default + Send + 'static,
         Resp: prost::Message + Send + 'static,
-        F: Fn(C, Req) -> Fut + Send + Sync + 'static,
+        F: Fn(Request<(C, Req)>) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<Reply<Resp, O>, E>> + Send + 'static,
     {
         let handler = Arc::new(handler);
@@ -87,7 +87,7 @@ where
             response_key,
             tower::service_fn(move |request: Request<(C, Req)>| {
                 let handler = Arc::clone(&handler);
-                async move { handler(request.input.0, request.input.1).await }
+                async move { handler(request).await }
             }),
         )
     }

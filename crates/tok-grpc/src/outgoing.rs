@@ -9,7 +9,6 @@ pub struct Outgoing<T> {
     target: ServiceDescriptor,
     request_id: u64,
     channel: Channel,
-    deadline: tokio::time::Instant,
     /// 发送给生成客户端的请求，可在中间件中检查或修改 metadata 与正文。
     pub request: Request<T>,
 }
@@ -19,14 +18,12 @@ impl<T> Outgoing<T> {
         request_id: u64,
         channel: Channel,
         request: Request<T>,
-        deadline: tokio::time::Instant,
     ) -> Self {
         Self {
             target,
             request_id,
             channel,
             request,
-            deadline,
         }
     }
     /// 当前实际连接对应的目标服务，调用前由路由组件选定。
@@ -37,29 +34,22 @@ impl<T> Outgoing<T> {
     pub fn request_id(&self) -> u64 {
         self.request_id
     }
-    /// 包含就绪等待和所有中间件执行的本地绝对截止点。
-    pub fn deadline(&self) -> tokio::time::Instant {
-        self.deadline
-    }
-
-    /// 在延迟处理后检查是否仍允许继续发起调用，不回滚已发生的副作用。
-    pub fn check(&self) -> Result<(), Status> {
-        if tokio::time::Instant::now() >= self.deadline {
-            Err(Status::deadline_exceeded("内部 RPC 超时，未自动重试"))
-        } else {
-            Ok(())
-        }
-    }
-
     /// 协议发送前消费调用，按当前剩余时间缩短 grpc-timeout，并取出连接和请求。
     ///
     /// 延迟、排队等中间件消耗预算后，发送器应在实际调用生成客户端前执行本方法。
-    /// 请求 metadata 中更短的期限仍保留，过期时不返回连接与请求。
-    pub fn into_parts(mut self) -> Result<(Channel, Request<T>), Status> {
-        self.check()?;
-        let remaining = self
-            .deadline
-            .saturating_duration_since(tokio::time::Instant::now());
+    /// 传入包装此正文的 Request.context，使用其当前期限与取消信号；更短 metadata 期限仍保留。
+    /// 过期或取消时不返回连接与请求，本类型不另外保存可漂移的执行范围。
+    pub fn into_parts(
+        mut self,
+        context: &tok_execution::Context,
+    ) -> Result<(Channel, Request<T>), Status> {
+        context.check().map_err(|reason| match reason {
+            tok_execution::StopReason::Cancelled => Status::cancelled("调用已取消"),
+            tok_execution::StopReason::DeadlineExceeded => {
+                Status::deadline_exceeded("内部 RPC 超时，未自动重试")
+            }
+        })?;
+        let remaining = context.remaining();
         let budget = crate::timeout::request_budget(self.request.metadata(), remaining)?;
         if budget.is_zero() {
             return Err(Status::deadline_exceeded("内部 RPC 超时，未自动重试"));

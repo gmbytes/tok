@@ -1,6 +1,6 @@
 //! 客户端连接管理与可组合的 gRPC 执行处理链。
 //!
-//! Call 是连接准备前的输入，Layer 将其转换为 Outgoing 并约束内部就绪和执行。
+//! `Request<Call<T>>` 是连接准备前的输入，Layer 保留 Context 并将正文转换为 Outgoing。
 //! Service 每次调用克隆内层；共享限额和其他状态应由内层策略显式共享。
 mod call;
 mod middleware;
@@ -129,7 +129,7 @@ impl Client {
         Ok(())
     }
 
-    /// 默认调用期限；协议适配器据此设置请求 deadline 和本地等待上限。
+    /// 本地调用期限上限；与上游 Context 和请求 metadata 共同限制本地及远端等待。
     pub fn timeout(&self) -> Duration {
         self.shared.timeout
     }
@@ -142,48 +142,50 @@ impl Client {
     /// 执行已组装 Tower 中间件的出站调用；就绪等待和调用共用原有限期限。
     ///
     /// 目标已解析，Channel 复用、追踪注入及整体期限由本客户端负责；中间件接收
-    /// Outgoing，可读取目标身份、关联序号并修改请求。路由选点应在进入本方法前完成。
+    /// `Request<Outgoing>`，可读取原上下文、目标和关联序号并修改请求。路由选点在调用前完成。
     /// 不要求输入或 Service 为 static，可使用借用；中间件自行决定是否引入队列或重试。
     /// 返回类型化回应正文，与 execute 一致，不主动添加重试。
     pub async fn execute_service<Req, Res, S>(
         &self,
         target: &ServiceDescriptor,
         request_id: u64,
-        request: Request<Req>,
-        span: tracing::Span,
+        request: tok_execution::Request<Request<Req>>,
         service: S,
     ) -> Result<Res, Status>
     where
-        S: tower::Service<Outgoing<Req>, Response = Response<Res>, Error = Status>,
+        S: tower::Service<
+                tok_execution::Request<Outgoing<Req>>,
+                Response = Response<Res>,
+                Error = Status,
+            >,
     {
         self.layer()
             .layer(service)
-            .call_once(Call {
+            .call_once(request.map(|request| Call {
                 target: target.clone(),
                 request_id,
                 request,
-                span,
-            })
+            }))
             .await
             .map(Response::into_inner)
     }
 
     /// 执行任意生成协议的单次调用，传播追踪、设置有限期限并记录指标；不自动重试。
     ///
-    /// 请求中的 grpc-timeout 只能缩短默认期限；准备与发送均计入预算，超期结果不会作为成功返回。
+    /// 请求使用执行 Request 承接上游 Context；Client 配置与 grpc-timeout 只能收紧原期限。
+    /// 准备与发送计入原预算，取消停止本地等待；不承诺远端回滚。
     pub async fn execute<Req, Res, F, Fut>(
         &self,
         target: &ServiceDescriptor,
         request_id: u64,
-        request: Request<Req>,
-        span: tracing::Span,
+        request: tok_execution::Request<Request<Req>>,
         send: F,
     ) -> Result<Res, Status>
     where
         F: FnOnce(Channel, Request<Req>) -> Fut,
         Fut: Future<Output = Result<Response<Res>, Status>>,
     {
-        self.execute_service(target, request_id, request, span, sender::Sender::new(send))
+        self.execute_service(target, request_id, request, sender::Sender::new(send))
             .await
     }
 }

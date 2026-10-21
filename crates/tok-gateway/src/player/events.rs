@@ -99,10 +99,13 @@ where
         let sessions = sessions.clone();
         Box::pin(async move {
             let report = sessions
-                .deliver(&Delivery {
-                    target: target?,
-                    action: Action::Forward(message?),
-                })
+                .deliver(tok_execution::Request::new(
+                    request.context,
+                    Delivery {
+                        target: target?,
+                        action: Action::Forward(message?),
+                    },
+                ))
                 .await
                 .map_err(|_| Error::Unavailable("玩家事件准入失败"))?;
             Ok(report.into())
@@ -135,10 +138,13 @@ where
         Box::pin(async move {
             let (target, body) = notification?;
             let report = sessions
-                .deliver(&Delivery {
-                    target,
-                    action: Action::Notify { message_id, body },
-                })
+                .deliver(tok_execution::Request::new(
+                    request.context,
+                    Delivery {
+                        target,
+                        action: Action::Notify { message_id, body },
+                    },
+                ))
                 .await
                 .map_err(|_| Error::Unavailable("通知准入失败"))?;
             Ok(report.into())

@@ -61,6 +61,52 @@ impl GatewayRpcService {
             .max_decoding_message_size(limit)
             .max_encoding_message_size(limit)
     }
+    async fn invoke(
+        &self,
+        request: Request<proto::HandoffRequest>,
+        action: Option<HandoffAction>,
+    ) -> std::result::Result<Response<proto::HandoffResponse>, Status> {
+        let manager = self.player_manager(&request.get_ref().source_service_name)?;
+        let gateway = manager.gateway();
+        let server = tok_grpc::Server::new(gateway.identity().clone())
+            .and_then(|server| {
+                server.with_execution(
+                    std::time::Duration::from_millis(manager.handoff_budget_ms()),
+                    gateway.cancellation(),
+                    manager.extensions(),
+                )
+            })
+            .map_err(|_| Status::internal("网关执行配置无效"))?;
+        let operation = match action {
+            None => "gateway/prepare_handoff",
+            Some(HandoffAction::Commit) => "gateway/commit_handoff",
+            Some(HandoffAction::Cancel) => "gateway/cancel_handoff",
+            Some(HandoffAction::Complete) => "gateway/complete_handoff",
+        };
+        let context = server.context(request.metadata(), operation)?;
+        let mut input = request.into_inner();
+        if action.is_none() {
+            input.budget_ms = input.budget_ms.min(context.remaining().as_millis() as u64);
+        }
+        server
+            .execute(
+                tok_execution::Request::new(context, input),
+                tower::service_fn(
+                    move |request: tok_execution::Request<proto::HandoffRequest>| {
+                        let manager = manager.clone();
+                        async move {
+                            match action {
+                                None => manager.prepare_handoff(request).await,
+                                Some(action) => manager.finish_handoff(request.input, action).await,
+                            }
+                            .map_err(handoff_status)
+                        }
+                    },
+                ),
+            )
+            .await
+            .map(Response::new)
+    }
     fn player_manager(&self, service_name: &str) -> std::result::Result<SessionManager, Status> {
         self.player_managers
             .lock()
@@ -85,45 +131,24 @@ impl proto::gateway_rpc_server::GatewayRpc for GatewayRpcService {
         &self,
         request: Request<proto::HandoffRequest>,
     ) -> std::result::Result<Response<proto::HandoffResponse>, Status> {
-        let request = request.into_inner();
-        let manager = self.player_manager(&request.source_service_name)?;
-        manager
-            .prepare_handoff(request)
-            .await
-            .map(Response::new)
-            .map_err(handoff_status)
+        self.invoke(request, None).await
     }
     async fn commit_handoff(
         &self,
         request: Request<proto::HandoffRequest>,
     ) -> std::result::Result<Response<proto::HandoffResponse>, Status> {
-        let request = request.into_inner();
-        self.player_manager(&request.source_service_name)?
-            .finish_handoff(request, HandoffAction::Commit)
-            .await
-            .map(Response::new)
-            .map_err(handoff_status)
+        self.invoke(request, Some(HandoffAction::Commit)).await
     }
     async fn cancel_handoff(
         &self,
         request: Request<proto::HandoffRequest>,
     ) -> std::result::Result<Response<proto::HandoffResponse>, Status> {
-        let request = request.into_inner();
-        self.player_manager(&request.source_service_name)?
-            .finish_handoff(request, HandoffAction::Cancel)
-            .await
-            .map(Response::new)
-            .map_err(handoff_status)
+        self.invoke(request, Some(HandoffAction::Cancel)).await
     }
     async fn complete_handoff(
         &self,
         request: Request<proto::HandoffRequest>,
     ) -> std::result::Result<Response<proto::HandoffResponse>, Status> {
-        let request = request.into_inner();
-        self.player_manager(&request.source_service_name)?
-            .finish_handoff(request, HandoffAction::Complete)
-            .await
-            .map(Response::new)
-            .map_err(handoff_status)
+        self.invoke(request, Some(HandoffAction::Complete)).await
     }
 }

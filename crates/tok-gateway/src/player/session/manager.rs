@@ -232,6 +232,9 @@ impl SessionManager {
         Arc::make_mut(&mut self.inner).pipeline = Arc::new(pipeline);
         self
     }
+    pub(crate) fn handoff_budget_ms(&self) -> u64 {
+        self.inner.config.handoff_timeout_ms
+    }
     /// 玩家管理器作用域的能力，与消息及事件的执行上下文共用。
     pub fn extensions(&self) -> tok_core::Extensions {
         let mut extensions = self.inner.extensions.clone();

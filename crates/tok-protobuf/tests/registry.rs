@@ -31,7 +31,16 @@ async fn protobuf_adapter_accepts_string_keys_and_preserves_decode_and_business_
         .register(
             "increment".to_owned(),
             "result".to_owned(),
-            |state, value: Value| async move {
+            |execution_request: tok_execution::Request<(u32, Value)>| async move {
+                assert_eq!(
+                    execution_request
+                        .context
+                        .extensions()
+                        .get::<String>()
+                        .unwrap(),
+                    "caller-marker"
+                );
+                let (state, value) = execution_request.input;
                 if value.value == 0 {
                     return Err(Denied);
                 }
@@ -44,7 +53,8 @@ async fn protobuf_adapter_accepts_string_keys_and_preserves_decode_and_business_
             },
         )
         .unwrap();
-    let ctx = context();
+    let mut ctx = context();
+    ctx.extensions_mut().insert(String::from("caller-marker"));
     let message = |body| protobuf::Message {
         key: "increment".to_owned(),
         body,
@@ -88,12 +98,17 @@ async fn protobuf_adapter_accepts_string_keys_and_preserves_decode_and_business_
 async fn codec_does_not_reserve_zero_keys() {
     let mut registry = protobuf::Registry::<u32>::new();
     registry
-        .register(0, 0, |_, value: Value| async move {
-            Ok(protobuf::Reply {
-                message: value,
-                output: (),
-            })
-        })
+        .register(
+            0,
+            0,
+            |execution_request: tok_execution::Request<((), Value)>| async move {
+                let (_, value) = execution_request.input;
+                Ok(protobuf::Reply {
+                    message: value,
+                    output: (),
+                })
+            },
+        )
         .unwrap();
     let reply = registry
         .dispatch(Request::new(

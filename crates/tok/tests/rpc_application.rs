@@ -468,18 +468,23 @@ async fn application_accepts_listener_layers_without_generic_registration() {
         let error = client
             .call(
                 &target,
-                tok::message::rpc::CallContext {
-                    node_id: "local".into(),
-                    service_name: "guild".into(),
-                    bid: Some("7".into()),
-                    request_id: 1,
-                    session: None,
-                    timer: None,
-                },
-                tok::message::rpc::protocol::internal::v1::Payload {
-                    message_id: 1,
-                    body: vec![],
-                },
+                root(
+                    (
+                        tok::message::rpc::CallContext {
+                            node_id: "local".into(),
+                            service_name: "guild".into(),
+                            bid: Some("7".into()),
+                            request_id: 1,
+                            session: None,
+                            timer: None,
+                        },
+                        tok::message::rpc::protocol::internal::v1::Payload {
+                            message_id: 1,
+                            body: vec![],
+                        },
+                    ),
+                    tracing::Span::current(),
+                ),
             )
             .await
             .unwrap_err();
@@ -491,4 +496,21 @@ async fn application_accepts_listener_layers_without_generic_registration() {
     .unwrap();
     assert_eq!(starts.load(Ordering::SeqCst), 2);
     assert!(directory.snapshot("guild").unwrap().is_empty());
+}
+
+fn root<T>(input: T, span: tracing::Span) -> tok_execution::Request<T> {
+    tok_execution::Request::new(
+        tok_execution::Context::new(
+            tok_core::Identity {
+                node_id: "local".into(),
+                service_name: "test-caller".into(),
+            },
+            "test-call",
+            std::time::Duration::from_secs(30),
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .unwrap()
+        .with_span(span),
+        input,
+    )
 }

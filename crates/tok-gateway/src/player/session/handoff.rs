@@ -47,6 +47,7 @@ enum Phase {
     Committed,
     Cancelled,
 }
+#[derive(Clone, Copy)]
 pub(crate) enum HandoffAction {
     Commit,
     Cancel,
@@ -154,8 +155,12 @@ async fn abort(manager: &SessionManager, record: &mut Record) {
 impl SessionManager {
     pub(crate) async fn prepare_handoff(
         &self,
-        request: proto::HandoffRequest,
+        request: tok_execution::Request<proto::HandoffRequest>,
     ) -> Result<proto::HandoffResponse> {
+        let tok_execution::Request {
+            context,
+            input: request,
+        } = request;
         let _activity = self.activity()?;
         if !self.inner.config.handoff_enabled
             || uuid::Uuid::parse_str(&request.handoff_id).is_err()
@@ -288,8 +293,11 @@ impl SessionManager {
                 extension: Some(proto::ExtensionSnapshot {
                     kind: session.extension.kind().to_owned(),
                     body: session.extension.snapshot(tok_execution::Request::new(
-                        SessionHandle(Arc::clone(&session))
-                            .context("player/session/snapshot".into())?,
+                        SessionHandle(Arc::clone(&session)).delivery_context(
+                            Some(&context),
+                            "player/session/snapshot".into(),
+                            false,
+                        )?,
                         SessionHandle(Arc::clone(&session)),
                     ))?,
                 }),
@@ -471,13 +479,21 @@ pub(super) async fn receive(
         .into_iter()
         .find(|entry| entry.node_id == expected.owner.node_id && entry.protocol == "grpc")
         .ok_or(ErrorCode::ResumeUnavailable)?;
-    let endpoint = tonic::transport::Endpoint::from_shared(format!("http://{}", target.address))
-        .map_err(|_| ErrorCode::Unavailable)?
-        .connect_timeout(Duration::from_millis(manager.inner.config.rpc_timeout_ms));
-    let channel = endpoint.connect_lazy();
-    let mut client = proto::gateway_rpc_client::GatewayRpcClient::new(channel)
-        .max_decoding_message_size(manager.inner.config.max_handoff_bytes + 65536)
-        .max_encoding_message_size(manager.inner.config.max_handoff_bytes + 65536);
+    let client = tok_grpc::Client::new(
+        Duration::from_millis(manager.inner.config.handoff_timeout_ms),
+        1,
+    )
+    .map_err(|_| ErrorCode::Internal)?;
+    let mut context = tok_execution::Context::new(
+        manager.gateway().identity().clone(),
+        "gateway/handoff",
+        deadline.saturating_duration_since(Instant::now()),
+        manager.inner.shutdown.child_token(),
+    )
+    .map_err(|_| ErrorCode::Internal)?;
+    context = context.with_deadline_limit(deadline.into_std());
+    *context.extensions_mut() = manager.extensions();
+    let limit = manager.inner.config.max_handoff_bytes + 65536;
     let mut request = proto::HandoffRequest {
         handoff_id: uuid::Uuid::new_v4().to_string(),
         expected: Some(encode_ownership(&expected)),
@@ -489,7 +505,19 @@ pub(super) async fn receive(
             .as_millis() as u64,
         source_service_name: expected.owner.service_name.clone(),
     };
-    let prepared = match timeout_at(deadline, client.prepare_handoff(request.clone())).await {
+    let prepared = match timeout_at(
+        deadline,
+        remote_call(
+            &client,
+            &target,
+            context.clone(),
+            request.clone(),
+            None,
+            limit,
+        ),
+    )
+    .await
+    {
         Ok(Ok(response)) => response.into_inner(),
         result => {
             #[expect(
@@ -498,7 +526,14 @@ pub(super) async fn receive(
             )]
             let _ = tokio::time::timeout(
                 Duration::from_millis(manager.inner.config.rpc_timeout_ms),
-                client.cancel_handoff(request.clone()),
+                remote_call(
+                    &client,
+                    &target,
+                    compensation_context(manager)?,
+                    request.clone(),
+                    Some(HandoffAction::Cancel),
+                    limit,
+                ),
             )
             .await;
             return Err(match result {
@@ -566,7 +601,7 @@ pub(super) async fn receive(
         channel.install_interests(interests)?;
         channel.check_interests()?;
         request.snapshot_id = snapshot.snapshot_id.clone();
-        let committed = timeout_at(deadline, client.commit_handoff(request.clone())).await;
+        let committed = timeout_at(deadline, remote_call(&client, &target, context.clone(), request.clone(), Some(HandoffAction::Commit), limit)).await;
         let acquired = match committed {
             Ok(Ok(reply)) => ownership(reply.into_inner().ownership.as_ref())?,
             _ => tokio::time::timeout(
@@ -601,7 +636,7 @@ pub(super) async fn receive(
             return Err(ErrorCode::Timeout.into());
         }
         let extensions = match manager.inner.extension.restore(tok_execution::Request::new(
-            manager.extension_context("player/session/restore")?,
+            context.child("player/session/restore").map_err(|_| ErrorCode::Internal)?,
             (acquired.identity.clone(), extension.body.as_slice()),
         )) {
             Ok(extensions) => extensions,
@@ -685,7 +720,7 @@ pub(super) async fn receive(
         let _ = tokio::time::timeout(
             Duration::from_millis(manager.inner.config.rpc_timeout_ms)
                 .min(deadline.saturating_duration_since(Instant::now())),
-            client.complete_handoff(request.clone()),
+            remote_call(&client, &target, context.clone(), request.clone(), Some(HandoffAction::Complete), limit),
         )
         .await;
         if Instant::now() >= deadline || state.cancel.is_cancelled() {
@@ -719,13 +754,60 @@ pub(super) async fn receive(
         )]
         let _ = tokio::time::timeout(
             Duration::from_millis(manager.inner.config.rpc_timeout_ms),
-            client.cancel_handoff(request),
+            remote_call(
+                &client,
+                &target,
+                compensation_context(manager)?,
+                request,
+                Some(HandoffAction::Cancel),
+                limit,
+            ),
         )
         .await;
     }
     result
 }
 
+// 取消补偿在协调调用过期后仍须尽力通知，使用独立有限范围；原状态机监督负责最终兜底。
+fn compensation_context(manager: &SessionManager) -> Result<tok_execution::Context> {
+    let mut context = tok_execution::Context::new(
+        manager.gateway().identity().clone(),
+        "gateway/cancel_handoff",
+        Duration::from_millis(manager.inner.config.rpc_timeout_ms),
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .map_err(|_| ErrorCode::Internal)?;
+    *context.extensions_mut() = manager.extensions();
+    Ok(context)
+}
+async fn remote_call(
+    client: &tok_grpc::Client,
+    target: &tok_core::ServiceDescriptor,
+    context: tok_execution::Context,
+    request: proto::HandoffRequest,
+    action: Option<HandoffAction>,
+    limit: usize,
+) -> std::result::Result<tonic::Response<proto::HandoffResponse>, Status> {
+    client
+        .execute(
+            target,
+            0,
+            tok_execution::Request::new(context, tonic::Request::new(request)),
+            move |channel, request| async move {
+                let mut client = proto::gateway_rpc_client::GatewayRpcClient::new(channel)
+                    .max_decoding_message_size(limit)
+                    .max_encoding_message_size(limit);
+                match action {
+                    None => client.prepare_handoff(request).await,
+                    Some(HandoffAction::Commit) => client.commit_handoff(request).await,
+                    Some(HandoffAction::Cancel) => client.cancel_handoff(request).await,
+                    Some(HandoffAction::Complete) => client.complete_handoff(request).await,
+                }
+            },
+        )
+        .await
+        .map(tonic::Response::new)
+}
 async fn release_failed_restore(manager: &SessionManager, ownership: SessionOwnership) {
     #[expect(
         clippy::let_underscore_must_use,

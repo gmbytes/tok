@@ -14,7 +14,7 @@ impl<F> Sender<F> {
         Self { send: Some(send) }
     }
 }
-impl<T, R, F, Fut> tower::Service<Outgoing<T>> for Sender<F>
+impl<T, R, F, Fut> tower::Service<tok_execution::Request<Outgoing<T>>> for Sender<F>
 where
     F: FnOnce(Channel, Request<T>) -> Fut,
     Fut: Future<Output = Result<Response<R>, Status>>,
@@ -25,8 +25,8 @@ where
     fn poll_ready(&mut self, _: &mut Context<'_>) -> Poll<Result<(), Status>> {
         Poll::Ready(Ok(()))
     }
-    fn call(&mut self, call: Outgoing<T>) -> Self::Future {
-        match (self.send.take(), call.into_parts()) {
+    fn call(&mut self, call: tok_execution::Request<Outgoing<T>>) -> Self::Future {
+        match (self.send.take(), call.input.into_parts(&call.context)) {
             (Some(send), Ok((channel, request))) => SendFuture {
                 running: Some(Box::pin(send(channel, request))),
                 error: None,

@@ -1215,3 +1215,105 @@ async fn topic_routes_isolate_default_named_namespaces_and_groups_and_reject_for
     other.close().await.unwrap();
     bus.close().await.unwrap();
 }
+
+#[tokio::test]
+#[ignore = "需要真实 NATS；通过 just nats-test 显式运行"]
+async fn scoped_publisher_keeps_local_extensions_and_receiver_installs_its_own_scope() {
+    use tower::ServiceExt as _;
+    let bus = Bus::connect(config()).await.unwrap();
+    let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let seen = Arc::clone(&count);
+    let mut registry = tok_events::Registry::default();
+    registry
+        .register::<Changed, _>(move |request| {
+            let seen = Arc::clone(&seen);
+            assert_eq!(request.context.service().service_name, "consumer");
+            assert_eq!(
+                request.context.extensions().get::<String>().unwrap(),
+                "consumer-capability"
+            );
+            Box::pin(async move {
+                seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(Outcome::Handled)
+            })
+        })
+        .unwrap();
+    registry.enable_protobuf::<Changed>().unwrap();
+    let mut extensions = tok_core::Extensions::default();
+    extensions.insert(String::from("consumer-capability"));
+    let subscriber = tok_events::Subscriber::new(
+        tok_core::Identity {
+            node_id: "test".into(),
+            service_name: "consumer".into(),
+        },
+        Arc::new(registry),
+        tok_events::TopicFilter::Exact(tok_events::Topic::default()),
+        None,
+    )
+    .unwrap()
+    .with_extensions(extensions);
+    let subscription = bus.subscribe(subscriber).await.unwrap();
+    let stop = CancellationToken::new();
+    let task = tokio::spawn(subscription.run(stop.clone()));
+    let mut context = tok_execution::Context::new(
+        tok_core::Identity {
+            node_id: "test".into(),
+            service_name: "producer".into(),
+        },
+        "publish",
+        Duration::from_secs(1),
+        CancellationToken::new(),
+    )
+    .unwrap();
+    context
+        .extensions_mut()
+        .insert(String::from("producer-capability"));
+    let policy = tower::ServiceBuilder::new()
+        .map_request(|request: tok_execution::Request<Message>| {
+            assert_eq!(
+                request.context.extensions().get::<String>().unwrap(),
+                "producer-capability"
+            );
+            request
+        })
+        .service(bus.publisher());
+    let cancelled = context.clone().with_cancellation(CancellationToken::new());
+    cancelled.cancellation().cancel();
+    let result = bus
+        .publish_request(tok_execution::Request::new(
+            cancelled,
+            Envelope::new(EventId::generate(), Changed { value: 1 }).unwrap(),
+        ))
+        .await;
+    assert!(matches!(
+        result,
+        Err(tok_events::Error::Stopped(
+            tok_execution::StopReason::Cancelled
+        ))
+    ));
+    let expired = context.clone().with_budget_limit(Duration::ZERO);
+    assert!(matches!(
+        policy
+            .clone()
+            .oneshot(tok_execution::Request::new(expired, message()))
+            .await,
+        Err(tok_events::Error::Stopped(
+            tok_execution::StopReason::DeadlineExceeded
+        ))
+    ));
+    tokio::spawn(policy.oneshot(tok_execution::Request::new(context, message())))
+        .await
+        .unwrap()
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while count.load(std::sync::atomic::Ordering::SeqCst) < 1 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 1);
+    stop.cancel();
+    task.await.unwrap().unwrap();
+    bus.close().await.unwrap();
+}

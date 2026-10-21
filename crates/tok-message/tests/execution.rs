@@ -198,14 +198,22 @@ async fn rpc_budget_and_malformed_timeout_are_enforced_before_accepting_results(
     let seen = Arc::clone(&calls);
     let mut registry = HandlerRegistry::new();
     registry
-        .register(1, 2, move |_, value: Value| {
-            let seen = Arc::clone(&seen);
-            async move {
-                seen.fetch_add(1, Ordering::SeqCst);
-                tokio::time::sleep(Duration::from_millis(100)).await;
-                Ok(value)
-            }
-        })
+        .register(
+            1,
+            2,
+            move |execution_request: tok_execution::Request<(
+                tok_message::rpc::CallContext,
+                Value,
+            )>| {
+                let (_, value) = execution_request.input;
+                let seen = Arc::clone(&seen);
+                async move {
+                    seen.fetch_add(1, Ordering::SeqCst);
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    Ok(value)
+                }
+            },
+        )
         .unwrap();
     let rpc = RpcService::new("node", "test", Arc::new(registry)).unwrap();
     for value in ["", "123456789S", "1X", "-1S"] {
@@ -275,7 +283,17 @@ async fn deferred_rpc_is_initialized_once_by_its_own_factory_and_stops_with_serv
         };
         Box::pin(async move {
             let mut registry = HandlerRegistry::new();
-            registry.register(1, 2, |_, v: Value| async move { Ok(v) })?;
+            registry.register(
+                1,
+                2,
+                |execution_request: tok_execution::Request<(
+                    tok_message::rpc::CallContext,
+                    Value,
+                )>| async move {
+                    let (_, v) = execution_request.input;
+                    Ok(v)
+                },
+            )?;
             let handler: Arc<dyn Handler> = Arc::new(registry);
             assert!(binding.install(&wrong, Arc::clone(&handler)).is_err());
             binding.install(&init, Arc::clone(&handler))?;

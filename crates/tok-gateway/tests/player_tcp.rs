@@ -1587,7 +1587,10 @@ fn game_subscriber(sessions: SessionManager) -> tok_events::Registry {
                     TestKind::Forward
                 };
                 let report = sessions
-                    .deliver(&event_message(target, kind, &event.body))
+                    .deliver(tok_execution::Request::new(
+                        delivery_context(),
+                        event_message(target, kind, &event.body),
+                    ))
                     .await
                     .map_err(|_| tok_events::Error::Unavailable("游戏事件准入失败"))?;
                 Ok(report.into())
@@ -1645,11 +1648,27 @@ async fn events_share_request_fifo_have_independent_sequence_and_respect_queue_c
         b"event",
     );
     assert_eq!(
-        fixture.sessions.deliver(&message).await.unwrap().admitted,
+        fixture
+            .sessions
+            .deliver(tok_execution::Request::new(
+                delivery_context(),
+                message.clone()
+            ))
+            .await
+            .unwrap()
+            .admitted,
         1
     );
     assert_eq!(
-        fixture.sessions.deliver(&message).await.unwrap().rejected,
+        fixture
+            .sessions
+            .deliver(tok_execution::Request::new(
+                delivery_context(),
+                message.clone()
+            ))
+            .await
+            .unwrap()
+            .rejected,
         1
     );
     assert!(fixture.tracker.events.lock().unwrap().is_empty());
@@ -1690,7 +1709,14 @@ async fn broadcast_filters_topics_and_offline_sessions_without_executing_player(
         TestKind::Broadcast,
         b"notice",
     );
-    let report = fixture.sessions.deliver(&message).await.unwrap();
+    let report = fixture
+        .sessions
+        .deliver(tok_execution::Request::new(
+            delivery_context(),
+            message.clone(),
+        ))
+        .await
+        .unwrap();
     assert_eq!(report.admitted, 1);
     assert_eq!(report.skipped, 0);
     assert!(
@@ -1699,7 +1725,15 @@ async fn broadcast_filters_topics_and_offline_sessions_without_executing_player(
     assert_eq!(fixture.tracker.calls.load(Ordering::SeqCst), 0);
     handle.leave_topic("guild:7").await.unwrap();
     assert_eq!(
-        fixture.sessions.deliver(&message).await.unwrap().admitted,
+        fixture
+            .sessions
+            .deliver(tok_execution::Request::new(
+                delivery_context(),
+                message.clone()
+            ))
+            .await
+            .unwrap()
+            .admitted,
         0
     );
     let all = event_message(
@@ -1707,21 +1741,40 @@ async fn broadcast_filters_topics_and_offline_sessions_without_executing_player(
         TestKind::Broadcast,
         b"all",
     );
-    assert_eq!(fixture.sessions.deliver(&all).await.unwrap().admitted, 2);
+    assert_eq!(
+        fixture
+            .sessions
+            .deliver(tok_execution::Request::new(delivery_context(), all.clone()))
+            .await
+            .unwrap()
+            .admitted,
+        2
+    );
     assert!(matches!(one.read().await, Content::Notify(_)));
     assert!(matches!(two.read().await, Content::Notify(_)));
     drop(one);
     drop(two);
     // 等到 TCP 解绑完成；宽限期保留的 session 不接收新事件，也不消耗下行序号。
     tokio::time::sleep(Duration::from_millis(30)).await;
-    assert_eq!(fixture.sessions.deliver(&all).await.unwrap().admitted, 0);
     assert_eq!(
         fixture
             .sessions
-            .deliver(&event_message(
-                tok_gateway::player::events::Target::Players(vec!["offline".into()]),
-                TestKind::Forward,
-                b"skip"
+            .deliver(tok_execution::Request::new(delivery_context(), all.clone()))
+            .await
+            .unwrap()
+            .admitted,
+        0
+    );
+    assert_eq!(
+        fixture
+            .sessions
+            .deliver(tok_execution::Request::new(
+                delivery_context(),
+                event_message(
+                    tok_gateway::player::events::Target::Players(vec!["offline".into()]),
+                    TestKind::Forward,
+                    b"skip"
+                )
             ))
             .await
             .unwrap()
@@ -1757,7 +1810,10 @@ async fn large_topic_delivery_yields_and_rechecks_membership_after_resuming() {
         TestKind::Broadcast,
         b"batch",
     );
-    let mut pending = Box::pin(fixture.sessions.deliver(&delivery));
+    let mut pending = Box::pin(fixture.sessions.deliver(tok_execution::Request::new(
+        delivery_context(),
+        delivery.clone(),
+    )));
     let first = std::future::poll_fn(|cx| Poll::Ready(pending.as_mut().poll(cx))).await;
     assert!(first.is_pending(), "大规模投递必须让出调度");
     // 暂停期间退出主题不受索引/会话锁阻塞；快照中的剩余目标必须重新校验。
@@ -1795,14 +1851,30 @@ async fn topic_index_survives_resume_and_cleans_up_replaced_and_closed_sessions(
         b"notice",
     );
     assert_eq!(
-        fixture.sessions.deliver(&delivery).await.unwrap().admitted,
+        fixture
+            .sessions
+            .deliver(tok_execution::Request::new(
+                delivery_context(),
+                delivery.clone()
+            ))
+            .await
+            .unwrap()
+            .admitted,
         1
     );
     assert!(matches!(resumed.read().await, Content::Notify(notify) if notify.server_seq == 1));
     let mut replacement = fixture.connect().await;
     assert_eq!(replacement.login(1, "1").await.error_code, 0);
     assert_eq!(
-        fixture.sessions.deliver(&delivery).await.unwrap().admitted,
+        fixture
+            .sessions
+            .deliver(tok_execution::Request::new(
+                delivery_context(),
+                delivery.clone()
+            ))
+            .await
+            .unwrap()
+            .admitted,
         0
     );
     let current = fixture.sessions.session("1").unwrap().unwrap();
@@ -1810,13 +1882,29 @@ async fn topic_index_survives_resume_and_cleans_up_replaced_and_closed_sessions(
     assert!(old.leave_topic("guild:7").await.is_err());
     old.close();
     assert_eq!(
-        fixture.sessions.deliver(&delivery).await.unwrap().admitted,
+        fixture
+            .sessions
+            .deliver(tok_execution::Request::new(
+                delivery_context(),
+                delivery.clone()
+            ))
+            .await
+            .unwrap()
+            .admitted,
         1
     );
     assert!(matches!(replacement.read().await, Content::Notify(notify) if notify.server_seq == 1));
     current.close();
     assert_eq!(
-        fixture.sessions.deliver(&delivery).await.unwrap().admitted,
+        fixture
+            .sessions
+            .deliver(tok_execution::Request::new(
+                delivery_context(),
+                delivery.clone()
+            ))
+            .await
+            .unwrap()
+            .admitted,
         0
     );
     fixture.finish().await;
@@ -2139,4 +2227,18 @@ async fn ownership_capacity_failure_is_reported_as_capacity_not_unavailability()
         ErrorCode::CapacityExceeded as u32
     );
     fixture.finish().await;
+}
+
+#[cfg(test)]
+fn delivery_context() -> tok_execution::Context {
+    tok_execution::Context::new(
+        tok_core::Identity {
+            node_id: "local".into(),
+            service_name: "test-events".into(),
+        },
+        "test-delivery",
+        std::time::Duration::from_secs(5),
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .unwrap()
 }

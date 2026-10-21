@@ -142,6 +142,7 @@ impl RpcExecutor {
 
 impl Executor for RpcExecutor {
     fn execute_event(&self, request: tok_execution::Request<EventInput>) -> EventTask<'_> {
+        let execution = request.context;
         let EventInput {
             identity,
             request_id,
@@ -156,15 +157,20 @@ impl Executor for RpcExecutor {
                 .client
                 .handle_event(
                     &target,
-                    CallContext {
-                        node_id: target.node_id.clone(),
-                        service_name: target.service_name.clone(),
-                        bid: Some(identity.player_id.clone()),
-                        request_id,
-                        session: Some(identity),
-                        timer: None,
-                    },
-                    &event,
+                    tok_execution::Request::new(
+                        execution,
+                        (
+                            CallContext {
+                                node_id: target.node_id.clone(),
+                                service_name: target.service_name.clone(),
+                                bid: Some(identity.player_id.clone()),
+                                request_id,
+                                session: Some(identity),
+                                timer: None,
+                            },
+                            event,
+                        ),
+                    ),
                 )
                 .await
                 .map_err(|status| self.mapper.map(&status))?;
@@ -182,9 +188,15 @@ impl Executor for RpcExecutor {
     }
 
     fn execute_request(&self, request: tok_execution::Request<RequestInput>) -> Task<'_> {
-        self.call(request.input.identity, request.input.message, None)
+        self.call(
+            request.context,
+            request.input.identity,
+            request.input.message,
+            None,
+        )
     }
     fn execute_timer(&self, request: tok_execution::Request<TimerInput>) -> Task<'_> {
+        let execution = request.context;
         let TimerInput {
             identity,
             request_id,
@@ -192,6 +204,7 @@ impl Executor for RpcExecutor {
             trigger,
         } = request.input;
         self.call(
+            execution,
             identity,
             LogicalMessage {
                 kind: MessageKind::Request,
@@ -208,6 +221,7 @@ impl Executor for RpcExecutor {
 impl RpcExecutor {
     fn call(
         &self,
+        execution: tok_execution::Context,
         identity: SessionIdentity,
         request: LogicalMessage,
         timer: Option<TimerTrigger>,
@@ -222,18 +236,23 @@ impl RpcExecutor {
                 .client
                 .call(
                     &target,
-                    CallContext {
-                        node_id: target.node_id.clone(),
-                        service_name: target.service_name.clone(),
-                        bid: Some(identity.player_id.clone()),
-                        request_id: request.request_id,
-                        session: Some(identity),
-                        timer,
-                    },
-                    Payload {
-                        message_id: request.message_id,
-                        body: request.body,
-                    },
+                    tok_execution::Request::new(
+                        execution,
+                        (
+                            CallContext {
+                                node_id: target.node_id.clone(),
+                                service_name: target.service_name.clone(),
+                                bid: Some(identity.player_id.clone()),
+                                request_id: request.request_id,
+                                session: Some(identity),
+                                timer,
+                            },
+                            Payload {
+                                message_id: request.message_id,
+                                body: request.body,
+                            },
+                        ),
+                    ),
                 )
                 .await
                 .map_err(|status| self.mapper.map(&status))?;

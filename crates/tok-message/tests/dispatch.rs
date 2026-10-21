@@ -168,11 +168,16 @@ async fn local_and_rpc_share_one_chain_and_map_errors_only_at_rpc_boundary() {
     let result = client
         .call(
             &target,
-            call(),
-            Payload {
-                message_id: 1,
-                body,
-            },
+            root(
+                (
+                    call(),
+                    Payload {
+                        message_id: 1,
+                        body,
+                    },
+                ),
+                tracing::Span::current(),
+            ),
         )
         .await
         .unwrap();
@@ -190,11 +195,16 @@ async fn local_and_rpc_share_one_chain_and_map_errors_only_at_rpc_boundary() {
             client
                 .call(
                     &target,
-                    call(),
-                    Payload {
-                        message_id: id,
-                        body
-                    }
+                    root(
+                        (
+                            call(),
+                            Payload {
+                                message_id: id,
+                                body
+                            }
+                        ),
+                        tracing::Span::current()
+                    )
                 )
                 .await
                 .unwrap_err()
@@ -216,30 +226,62 @@ fn numbered_registry_rejects_zero_and_duplicate_registration() {
     let mut registry = Registry::<(), (), Denied>::new();
     for (request, response) in [(0, 1), (1, 0)] {
         assert!(matches!(
-            registry.register(request, response, |_, value: Value| async move {
-                Ok(Reply {
-                    message: value,
-                    output: (),
-                })
-            }),
+            registry.register(
+                request,
+                response,
+                |execution_request: tok_execution::Request<((), Value)>| async move {
+                    let (_, value) = execution_request.input;
+                    Ok(Reply {
+                        message: value,
+                        output: (),
+                    })
+                }
+            ),
             Err(tok_message::Error::Invalid(_))
         ));
     }
     registry
-        .register(1, 2, |_, value: Value| async move {
-            Ok(Reply {
-                message: value,
-                output: (),
-            })
-        })
+        .register(
+            1,
+            2,
+            |execution_request: tok_execution::Request<((), Value)>| async move {
+                let (_, value) = execution_request.input;
+                Ok(Reply {
+                    message: value,
+                    output: (),
+                })
+            },
+        )
         .unwrap();
     assert!(matches!(
-        registry.register(1, 3, |_, value: Value| async move {
-            Ok(Reply {
-                message: value,
-                output: (),
-            })
-        }),
+        registry.register(
+            1,
+            3,
+            |execution_request: tok_execution::Request<((), Value)>| async move {
+                let (_, value) = execution_request.input;
+                Ok(Reply {
+                    message: value,
+                    output: (),
+                })
+            }
+        ),
         Err(tok_message::Error::Registration(_))
     ));
+}
+
+fn root<T>(input: T, span: tracing::Span) -> tok_execution::Request<T> {
+    tok_execution::Request::new(
+        tok_execution::Context::new(
+            tok_core::Identity {
+                node_id: "local".into(),
+                service_name: "test-caller".into(),
+            },
+            "test-call",
+            std::time::Duration::from_secs(30),
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .unwrap()
+        .with_span(span),
+        input,
+    )
 }

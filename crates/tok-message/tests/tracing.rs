@@ -118,11 +118,16 @@ async fn trace_context_is_propagated_across_the_network_call() {
         business_client
             .call(
                 &target,
-                call,
-                Payload {
-                    message_id: 1,
-                    body: vec![],
-                },
+                root_request(
+                    (
+                        call,
+                        Payload {
+                            message_id: 1,
+                            body: vec![],
+                        },
+                    ),
+                    root.clone(),
+                ),
             )
             .instrument(root.clone())
             .await
@@ -143,9 +148,11 @@ async fn trace_context_is_propagated_across_the_network_call() {
             }),
         });
         let sender = tower::service_fn(
-            |call: tok_grpc::Outgoing<tok_proto::internal::v1::CallRequest>| async move {
-                assert!(call.request.metadata().contains_key("traceparent"));
-                let (channel, request) = call.into_parts()?;
+            |call: tok_execution::Request<
+                tok_grpc::Outgoing<tok_proto::internal::v1::CallRequest>,
+            >| async move {
+                assert!(call.input.request.metadata().contains_key("traceparent"));
+                let (channel, request) = call.input.into_parts(&call.context)?;
                 tok_proto::internal::v1::business_rpc_client::BusinessRpcClient::new(channel)
                     .call(request)
                     .await
@@ -155,12 +162,14 @@ async fn trace_context_is_propagated_across_the_network_call() {
         clients
             .layer()
             .layer(sender)
-            .oneshot(tok_grpc::client::Call {
-                target: target.clone(),
-                request_id: 2,
-                request,
-                span: root,
-            })
+            .oneshot(root_request(
+                tok_grpc::client::Call {
+                    target: target.clone(),
+                    request_id: 2,
+                    request,
+                },
+                root,
+            ))
             .await
             .unwrap();
     }
@@ -193,14 +202,22 @@ async fn trace_context_is_propagated_across_the_network_call() {
     player_client
         .handle_event(
             &target,
-            call,
-            &tok_events::Message {
-                topic: Default::default(),
-                event_id: tok_events::EventId::generate(),
-                event_type: "test.trace".into(),
-                body: vec![],
-                trace_context: Default::default(),
-            },
+            root_request(
+                (
+                    call,
+                    std::sync::Arc::new(
+                        (tok_events::Message {
+                            topic: Default::default(),
+                            event_id: tok_events::EventId::generate(),
+                            event_type: "test.trace".into(),
+                            body: vec![],
+                            trace_context: Default::default(),
+                        })
+                        .clone(),
+                    ),
+                ),
+                root.clone(),
+            ),
         )
         .instrument(root)
         .await
@@ -214,4 +231,21 @@ async fn trace_context_is_propagated_across_the_network_call() {
         .unwrap()
         .unwrap();
     provider.shutdown().unwrap();
+}
+
+fn root_request<T>(input: T, span: tracing::Span) -> tok_execution::Request<T> {
+    tok_execution::Request::new(
+        tok_execution::Context::new(
+            tok_core::Identity {
+                node_id: "local".into(),
+                service_name: "test-caller".into(),
+            },
+            "test-call",
+            std::time::Duration::from_secs(30),
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .unwrap()
+        .with_span(span),
+        input,
+    )
 }

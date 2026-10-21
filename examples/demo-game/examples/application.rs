@@ -181,18 +181,24 @@ async fn main() -> Result<(), BoxError> {
             let response = client
                 .call(
                     &target,
-                    CallContext {
-                        node_id: "example".into(),
-                        service_name: "guild".into(),
-                        bid: Some("7".into()),
-                        request_id: 1,
-                        session: None,
-                        timer: None,
-                    },
-                    Payload {
-                        message_id: GetGuildRequest::MESSAGE_ID,
-                        body: GetGuildRequest { guild_id: 7 }.encode_to_vec(),
-                    },
+                    root(
+                        (
+                            CallContext {
+                                node_id: "example".into(),
+                                service_name: "guild".into(),
+                                bid: Some("7".into()),
+                                request_id: 1,
+                                session: None,
+                                timer: None,
+                            },
+                            Payload {
+                                message_id: GetGuildRequest::MESSAGE_ID,
+                                body: GetGuildRequest { guild_id: 7 }.encode_to_vec(),
+                            },
+                        ),
+                        tok::observability::tracing::Span::current(),
+                    )
+                    .map_err(std::io::Error::other)?,
                 )
                 .await
                 .map_err(std::io::Error::other)?;
@@ -221,4 +227,23 @@ async fn main() -> Result<(), BoxError> {
     .await?;
     println!("应用组装验证通过：RPC 与无端点事件服务共用处理链，事件状态借用有效");
     Ok(())
+}
+
+fn root<T>(
+    input: T,
+    span: tok::observability::tracing::Span,
+) -> Result<tok::execution::Request<T>, tok::execution::ContextError> {
+    Ok(tok::execution::Request::new(
+        tok::execution::Context::new(
+            tok::core::Identity {
+                node_id: "local".into(),
+                service_name: "rpc-smoke".into(),
+            },
+            "rpc-smoke",
+            std::time::Duration::from_secs(30),
+            tokio_util::sync::CancellationToken::new(),
+        )?
+        .with_span(span),
+        input,
+    ))
 }

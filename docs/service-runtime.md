@@ -50,7 +50,7 @@ RPC / 客户端业务消息 / 本地或 NATS 事件 / timer
 
 ### 执行上下文连续性规范
 
-以下是目标契约；不代表所有现有入口已迁移。当前缺口见[实现状态](status.md#执行上下文连续性审查2026-10-21)，实施顺序见[实施计划](implementation-plan.md#执行上下文连续性校正待实施)。
+以下是框架执行契约；现有边界的审查与修复结果见[实现状态](status.md#执行上下文连续性审查2026-10-21)，实施顺序与验收见[实施计划](implementation-plan.md#执行上下文连续性校正)。
 
 框架业务处理链的统一承载是 `tok_execution::Request<T>`，Context 与正文具有独立职责。入口适配器负责建立根范围，中间件组织行为，Extensions 提供本地可选元信息和能力。协议特有目标、关联序号和 metadata 可放在 T 或有明确类型的扩展中，不能另建只有 Span 或 Duration 的输入来替代已有执行范围。
 
@@ -84,7 +84,7 @@ Context 不依赖任务局部变量自动传播。普通辅助函数可以接收
 
 `Context.child` 仅派生当前服务内的执行，保留原期限、取消关系、追踪和扩展。未来出站调用设施须显式建立出站调用元信息，继承剩余预算、取消关系和追踪，并选择可传播的身份与元数据；接收服务通过自己的可信入口建立上下文。不得把全部扩展自动当作出站目标能力或远端元数据。
 
-当前仅完成上下文边界及类型化扩展基础；尚未提供通用路由器、熔断器或出站调用上下文适配器，不将这些契约记为已实现功能。
+当前已提供保留 Context 的 gRPC 出站执行适配；通用路由器与熔断器仍未提供，不将协议承载能力等同于已有策略实现。
 
 ### 处理与结果契约
 
@@ -319,7 +319,7 @@ Context 移除 source 字段、Source 枚举和构造/child 的来源参数。�
 
 通用入口使用 tok_grpc::{Client, Listener, Readiness, Server}。Server 负责逻辑服务的执行范围，Listener 负责共享监听和协议绑定；内部实现模块不公开。
 
-客户端配置期限须大于零且不超过一天，与服务端预算配置一致。execute 取请求 grpc-timeout 与默认期限的较小值，准备和发送共用截止点；无效超时返回 InvalidArgument，零期限或迟到结果返回 DeadlineExceeded，不自动重试、不回滚副作用。直接使用 channel 的适配器须自行管理预算；Channel 延迟建连，不承诺获取时已连接。
+客户端配置期限须大于零且不超过一天，与服务端预算配置一致。execute 接续执行 Context，取其原期限、请求 grpc-timeout 与客户端上限的较小值，准备和发送共用截止点；无效超时返回 InvalidArgument，零期限或迟到结果返回 DeadlineExceeded，不自动重试、不回滚副作用。直接使用 channel 的适配器须自行管理预算；Channel 延迟建连，不承诺获取时已连接。
 
 Readiness::set 返回是否匹配已绑定服务，允许 Application 向多个端点广播状态更新；直接指定服务时应检查命中。空服务名、重复业务绑定和重复 protobuf 绑定分别报告配置原因。Error 保留 Configuration / Transport / Io 分类，传输与监听文本提供中文操作说明且保留 source；运行期继续使用 tonic::Status，不新增业务错误码。
 
@@ -381,12 +381,27 @@ execution::lock::Layer 显式注入 Backend、Config、取键函数和结果判�
 
 ## gRPC 客户端与监听处理链（2026-10-21）
 
-Client::layer 返回 client::Layer；输入 client::Call<T> 包含待准备连接的目标、关联序号、原始请求与 Span。Layer 获取共享连接、注入追踪并将 Outgoing<T> 交给内层 Service；外层策略可在连接获取前拒绝或调整目标，内层策略可修改 metadata 和类型化请求。直接调用保留内层完整响应；execute_service 消费单次内层 Service 并返回 tonic 响应正文，execute 保留 FnOnce 回调，三者共用执行 Future。输入与 Future 支持借用，不固定生成协议，不主动重试。
+Client::layer 返回 client::Layer；输入 Request<client::Call<T>> 将 Context 与待准备连接的目标、序号及原 gRPC 请求分开。Layer 获取共享连接、按 Context 注入追踪并将 Request<Outgoing<T>> 交给内层 Service；外层策略可在连接获取前拒绝或调整目标，内层策略可修改 metadata 和类型化请求。直接调用保留内层完整响应；execute_service 消费单次内层 Service 并返回 tonic 响应正文，execute 保留 FnOnce 回调，三者共用执行 Future。输入与 Future 支持借用，不固定生成协议，不主动重试。
 
-客户端本地期限从进入 Layer 的 call 开始，覆盖准备连接、内层就绪等待和执行。外层策略等待须自行约束，需共用本地预算的策略放在 Layer 内。非协作式 poll_ready 迟到后不调用发送器；Outgoing::into_parts 在发送前检查截止点并缩短 grpc-timeout，保留更短 metadata 期限。超时或丢弃 Future 不保证回滚副作用。准备失败和执行结果均计入客户端 Layer 指标；未进入 Layer 的外层拒绝由外层负责观察。
+客户端本地期限继承 Context，Client 配置与 grpc-timeout 只能收紧，覆盖准备连接、内层就绪等待和执行；外层已发生的等待不获得新预算，正在等待时的及时停止须由外层执行保护负责。非协作式 poll_ready 迟到后不调用发送器；Outgoing::into_parts 在发送前检查截止点并缩短 grpc-timeout，保留更短 metadata 期限。超时或丢弃 Future 不保证回滚副作用。准备失败和执行结果均计入客户端 Layer 指标；未进入 Layer 的外层拒绝由外层负责观察。
 
 可重复调用的 client::Service 每次克隆内层，server::Service 沿用 execution::Layer 的相同规则；共享限额等状态应显式共享，不承诺普通 Clone 会自动共享任意策略状态。Client 本身克隆共享工厂与缓存，invalidate 对所有共享克隆生效；with_endpoint_factory 建立独立配置与空缓存，其他克隆不受影响。
 
 Server::layer 返回 server::Layer，输入为 execution::Request<T>。Layer 校验服务身份、映射执行停止原因并记录 gRPC 指标，内部就绪、取消、期限和追踪由 execution::Layer 驱动。Server::context 继续从 metadata 建立原范围；直接 Layer 与 Server::execute 不重复分配预算，协议解码、认证与路由仍由适配器负责。
 
 Listener::from_server 接收 Tonic Server<L>，监听级 Layer 覆盖共享端点的整个 Routes；单服务仍可独立安装 Tower 链。内部仅擦除监听工厂，保留 Tonic 类型边界；对外 Listener 和 Application::register_rpc_endpoint 继续为非泛型接口。就绪控制、重复绑定校验及退出监督保持原语义，HTTP 级策略与解码后的业务 Layer 分别组合。
+
+
+## 执行上下文在适配与调度中的接续（2026-10-21）
+
+Request::map 转换正文并移交 Context；Context::with_budget_limit / with_deadline_limit 只收紧原截止点，跨本地范围对齐使用已有绝对截止点，避免剩余时长换算引入新预算。with_cancellation 仅用于明确的停止边界：连接准入成功后移交 session 收束已接受业务，保留原期限与扩展，连接替换不会取消在途执行。FIFO 工作项携带执行请求，出队不重建请求预算。
+
+通用 gRPC 出站 Service、游戏 business / player 客户端、RpcExecutor 的请求/事件/timer，以及 protobuf / message 注册回调均接收共同 Request。CallContext 继续是协议关联和目标，不替代执行 Context；本地扩展不进入 metadata。注册便捷方法不再将回调输入拆成无执行上下文的多参数。
+
+SessionManager::deliver 接收 Request<Delivery>，当前消费范围约束本地筛选和同步通知；取消或过期前已准入的动作不回滚。转发成功入队属于独立 session 工作，预算从入队建立，继承追踪与投递扩展，但使用目标 session 的停止关系和本地能力。同类型的目标配置能力覆盖源能力；调用方须筛选不适合跨 session 继承的游戏自定义能力，框架不猜测任意用户类型的权限或作用域。
+
+SessionHandle::notify_request 继承当前范围；notify / submit / post_event 明确创建独立有限工作。回应发布是已完成业务的独立发布阶段，保留请求标记、受目标会话和发布预算限制，业务超时仍可回传错误；不重新执行已经结束的业务。补发不重复运行新下行链。
+
+GatewayRpcService 四个交接入口从 metadata 建立执行范围、安装目标 manager 能力并复用 Server 执行。prepare 的 budget_ms 被传入范围剩余预算进一步限制；快照回调接续该范围。协调端的 prepare / commit / complete 共享原接管期限并使用通用 gRPC 执行；取消补偿使用独立、有界范围，既有冻结/条件所有权转移/恢复和监督清理保持原语义。
+
+Bus::publisher 提供 Service<Request<Message>>，Bus::publish_request 接收 Request<Envelope<E>>；从 Context.span 提取追踪，本地发布受原期限和取消约束。原生 publish / publish_event 保留为底层出口；订阅者消费仍独立建立本地能力与处理预算。不新增 broker 确认、业务重试或远端取消保证。

@@ -192,22 +192,27 @@ pub async fn rpc_smoke(directory: &dyn ServiceDirectory) -> Result<(), Error> {
     let response = player_client
         .call(
             &player,
-            CallContext {
-                timer: None,
-                node_id: player.node_id.clone(),
-                service_name: player.service_name.clone(),
-                bid: Some("42".into()),
-                request_id: 1,
-                session: Some(SessionIdentity {
-                    player_id: "42".into(),
-                    session_id: "rpc-smoke".into(),
-                    epoch: 1,
-                }),
-            },
-            Payload {
-                message_id: protocol::v1::GetPlayerRequest::MESSAGE_ID,
-                body: protocol::v1::GetPlayerRequest { player_id: 9999 }.encode_to_vec(),
-            },
+            root(
+                (
+                    CallContext {
+                        timer: None,
+                        node_id: player.node_id.clone(),
+                        service_name: player.service_name.clone(),
+                        bid: Some("42".into()),
+                        request_id: 1,
+                        session: Some(SessionIdentity {
+                            player_id: "42".into(),
+                            session_id: "rpc-smoke".into(),
+                            epoch: 1,
+                        }),
+                    },
+                    Payload {
+                        message_id: protocol::v1::GetPlayerRequest::MESSAGE_ID,
+                        body: protocol::v1::GetPlayerRequest { player_id: 9999 }.encode_to_vec(),
+                    },
+                ),
+                tok::observability::tracing::Span::current(),
+            )?,
         )
         .await?;
     let payload = response
@@ -223,18 +228,23 @@ pub async fn rpc_smoke(directory: &dyn ServiceDirectory) -> Result<(), Error> {
     let response = business_client
         .call(
             &guild,
-            CallContext {
-                timer: None,
-                node_id: guild.node_id.clone(),
-                service_name: guild.service_name.clone(),
-                bid: Some("7".into()),
-                request_id: 2,
-                session: None,
-            },
-            Payload {
-                message_id: protocol::v1::GetGuildRequest::MESSAGE_ID,
-                body: protocol::v1::GetGuildRequest { guild_id: 7 }.encode_to_vec(),
-            },
+            root(
+                (
+                    CallContext {
+                        timer: None,
+                        node_id: guild.node_id.clone(),
+                        service_name: guild.service_name.clone(),
+                        bid: Some("7".into()),
+                        request_id: 2,
+                        session: None,
+                    },
+                    Payload {
+                        message_id: protocol::v1::GetGuildRequest::MESSAGE_ID,
+                        body: protocol::v1::GetGuildRequest { guild_id: 7 }.encode_to_vec(),
+                    },
+                ),
+                tok::observability::tracing::Span::current(),
+            )?,
         )
         .await?;
     let payload = response
@@ -248,4 +258,23 @@ pub async fn rpc_smoke(directory: &dyn ServiceDirectory) -> Result<(), Error> {
         return Err(std::io::Error::other("guild 回应不匹配").into());
     }
     Ok(())
+}
+
+fn root<T>(
+    input: T,
+    span: tok::observability::tracing::Span,
+) -> Result<tok::execution::Request<T>, tok::execution::ContextError> {
+    Ok(tok::execution::Request::new(
+        tok::execution::Context::new(
+            tok::core::Identity {
+                node_id: "local".into(),
+                service_name: "rpc-smoke".into(),
+            },
+            "rpc-smoke",
+            std::time::Duration::from_secs(30),
+            tokio_util::sync::CancellationToken::new(),
+        )?
+        .with_span(span),
+        input,
+    ))
 }

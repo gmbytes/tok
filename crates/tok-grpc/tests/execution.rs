@@ -72,8 +72,7 @@ async fn arbitrary_client_protocol_gets_a_deadline_without_business_types() {
         .execute(
             &target,
             7,
-            tonic::Request::new("custom"),
-            tracing::Span::none(),
+            root(tonic::Request::new("custom"), tracing::Span::none()),
             |_, request| async move {
                 assert!(request.metadata().contains_key("grpc-timeout"));
                 Ok(tonic::Response::new(request.into_inner().len()))
@@ -114,8 +113,7 @@ async fn client_preserves_shorter_request_budget_and_rejects_invalid_or_expired_
         .execute(
             &target(),
             1,
-            request,
-            tracing::Span::none(),
+            root(request, tracing::Span::none()),
             |_, request| async move {
                 // 使用服务端同一解析入口核对发送预算，避免依赖 tonic 选择的编码单位。
                 let server = server(CancellationToken::new());
@@ -138,8 +136,7 @@ async fn client_preserves_shorter_request_budget_and_rejects_invalid_or_expired_
             .execute(
                 &target(),
                 1,
-                request,
-                tracing::Span::none(),
+                root(request, tracing::Span::none()),
                 |_, _| -> std::future::Ready<Result<tonic::Response<()>, tonic::Status>> {
                     panic!("invalid or expired request must not be sent")
                 },
@@ -158,8 +155,7 @@ async fn client_rejects_late_results_from_non_cooperative_work() {
             .execute(
                 &target(),
                 1,
-                tonic::Request::new(()),
-                tracing::Span::none(),
+                root(tonic::Request::new(()), tracing::Span::none()),
                 |_, _| {
                     // 同步构造和单次 poll 内阻塞两种情况均不得延长预算。
                     if block_in_send {
@@ -181,8 +177,7 @@ async fn client_rejects_late_results_from_non_cooperative_work() {
         .execute(
             &target(),
             1,
-            tonic::Request::new(()),
-            tracing::Span::none(),
+            root(tonic::Request::new(()), tracing::Span::none()),
             |_, _| async {
                 std::future::pending::<Result<tonic::Response<()>, tonic::Status>>().await
             },
@@ -236,9 +231,9 @@ async fn custom_endpoint_factory_uses_cache_and_can_be_replaced() {
 }
 
 async fn borrowed_sender(
-    call: tok_grpc::Outgoing<&mut String>,
+    call: tok_execution::Request<tok_grpc::Outgoing<&mut String>>,
 ) -> Result<tonic::Response<usize>, tonic::Status> {
-    let (_, request) = call.into_parts()?;
+    let (_, request) = call.input.into_parts(&call.context)?;
     assert_eq!(request.metadata().get("x-policy").unwrap(), "checked");
     let value = request.into_inner();
     tokio::task::yield_now().await;
@@ -252,14 +247,15 @@ async fn outgoing_tower_chain_receives_target_and_can_mutate_borrowed_input() {
     let client = Client::new(Duration::from_secs(1), 1).unwrap();
     let mut value = String::from("source");
     let service = tower::ServiceBuilder::new()
-        .map_request(|mut call: Outgoing<&mut String>| {
-            assert_eq!(call.target().service_name, "custom");
-            assert_eq!(call.request_id(), 17);
-            assert!(call.request.metadata().contains_key("grpc-timeout"));
-            call.request
+        .map_request(|mut call: tok_execution::Request<Outgoing<&mut String>>| {
+            assert_eq!(call.input.target().service_name, "custom");
+            assert_eq!(call.input.request_id(), 17);
+            assert!(call.input.request.metadata().contains_key("grpc-timeout"));
+            call.input
+                .request
                 .metadata_mut()
                 .insert("x-policy", "checked".parse().unwrap());
-            call.request.get_mut().push_str(" middleware");
+            call.input.request.get_mut().push_str(" middleware");
             call
         })
         .service(tower::service_fn(borrowed_sender));
@@ -267,8 +263,7 @@ async fn outgoing_tower_chain_receives_target_and_can_mutate_borrowed_input() {
         .execute_service(
             &target(),
             17,
-            tonic::Request::new(&mut value),
-            tracing::Span::none(),
+            root(tonic::Request::new(&mut value), tracing::Span::none()),
             service,
         )
         .await
@@ -282,7 +277,7 @@ struct ReadinessProbe {
     mode: u8,
     calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
-impl tower::Service<tok_grpc::Outgoing<()>> for ReadinessProbe {
+impl tower::Service<tok_execution::Request<tok_grpc::Outgoing<()>>> for ReadinessProbe {
     type Response = tonic::Response<()>;
     type Error = tonic::Status;
     type Future = std::future::Ready<Result<Self::Response, Self::Error>>;
@@ -299,7 +294,7 @@ impl tower::Service<tok_grpc::Outgoing<()>> for ReadinessProbe {
             }
         }
     }
-    fn call(&mut self, _: tok_grpc::Outgoing<()>) -> Self::Future {
+    fn call(&mut self, _: tok_execution::Request<tok_grpc::Outgoing<()>>) -> Self::Future {
         self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         std::future::ready(Ok(tonic::Response::new(())))
     }
@@ -320,8 +315,7 @@ async fn outgoing_readiness_is_bounded_and_late_ready_or_rejection_never_dispatc
             .execute_service(
                 &target(),
                 1,
-                request,
-                tracing::Span::none(),
+                root(request, tracing::Span::none()),
                 ReadinessProbe {
                     mode,
                     calls: Arc::clone(&calls),
@@ -344,46 +338,70 @@ async fn outgoing_readiness_is_bounded_and_late_ready_or_rejection_never_dispatc
 #[tokio::test]
 async fn outgoing_sender_shortens_remote_budget_after_middleware_wait_and_keeps_shorter_metadata() {
     let client = Client::new(Duration::from_secs(1), 1).unwrap();
-    let service = tower::service_fn(|call: tok_grpc::Outgoing<()>| async move {
-        let before = server(CancellationToken::new())
-            .context(call.request.metadata(), "before")
-            .unwrap()
-            .remaining();
-        tokio::time::sleep(Duration::from_millis(30)).await;
-        let (_, request) = call.into_parts()?;
-        let after = server(CancellationToken::new())
-            .context(request.metadata(), "after")
-            .unwrap()
-            .remaining();
-        assert!(after + Duration::from_millis(20) < before);
-        Ok::<_, tonic::Status>(tonic::Response::new(after))
-    });
+    let service = tower::service_fn(
+        |call: tok_execution::Request<tok_grpc::Outgoing<()>>| async move {
+            let before = server(CancellationToken::new())
+                .context(call.input.request.metadata(), "before")
+                .unwrap()
+                .remaining();
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            let (_, request) = call.input.into_parts(&call.context)?;
+            let after = server(CancellationToken::new())
+                .context(request.metadata(), "after")
+                .unwrap()
+                .remaining();
+            assert!(after + Duration::from_millis(20) < before);
+            Ok::<_, tonic::Status>(tonic::Response::new(after))
+        },
+    );
     let mut request = tonic::Request::new(());
     request.set_timeout(Duration::from_millis(200));
     assert!(
         client
-            .execute_service(&target(), 1, request, tracing::Span::none(), service)
+            .execute_service(&target(), 1, root(request, tracing::Span::none()), service)
             .await
             .unwrap()
             < Duration::from_millis(180)
     );
     // 中间件主动缩短的远端期限不被发送器放大。
-    let service = tower::service_fn(|mut call: tok_grpc::Outgoing<()>| async move {
-        call.request.set_timeout(Duration::from_millis(5));
-        let (_, request) = call.into_parts()?;
-        let remaining = server(CancellationToken::new())
-            .context(request.metadata(), "shorter")
-            .unwrap()
-            .remaining();
-        assert!(remaining <= Duration::from_millis(5));
-        Ok::<_, tonic::Status>(tonic::Response::new(()))
-    });
+    let service = tower::service_fn(
+        |mut call: tok_execution::Request<tok_grpc::Outgoing<()>>| async move {
+            call.input.request.set_timeout(Duration::from_millis(5));
+            let (_, request) = call.input.into_parts(&call.context)?;
+            let remaining = server(CancellationToken::new())
+                .context(request.metadata(), "shorter")
+                .unwrap()
+                .remaining();
+            assert!(remaining <= Duration::from_millis(5));
+            Ok::<_, tonic::Status>(tonic::Response::new(()))
+        },
+    );
     client
         .execute_service(
             &target(),
             2,
-            tonic::Request::new(()),
-            tracing::Span::none(),
+            root(tonic::Request::new(()), tracing::Span::none()),
+            service,
+        )
+        .await
+        .unwrap();
+    let service = tower::service_fn(
+        |mut call: tok_execution::Request<tok_grpc::Outgoing<()>>| async move {
+            call.context = call.context.with_budget_limit(Duration::from_millis(5));
+            let (_, request) = call.input.into_parts(&call.context)?;
+            let remaining = server(CancellationToken::new())
+                .context(request.metadata(), "context-limit")
+                .unwrap()
+                .remaining();
+            assert!(remaining <= Duration::from_millis(5));
+            Ok::<_, tonic::Status>(tonic::Response::new(()))
+        },
+    );
+    client
+        .execute_service(
+            &target(),
+            3,
+            root(tonic::Request::new(()), tracing::Span::none()),
             service,
         )
         .await
@@ -399,7 +417,7 @@ async fn outgoing_work_timeout_is_not_retried_and_invalid_budget_skips_readiness
     let client = Client::new(Duration::from_millis(20), 1).unwrap();
     let calls = Arc::new(AtomicUsize::new(0));
     let observed = Arc::clone(&calls);
-    let service = tower::service_fn(move |_: tok_grpc::Outgoing<()>| {
+    let service = tower::service_fn(move |_: tok_execution::Request<tok_grpc::Outgoing<()>>| {
         observed.fetch_add(1, Ordering::SeqCst);
         std::future::pending::<Result<tonic::Response<()>, tonic::Status>>()
     });
@@ -407,8 +425,7 @@ async fn outgoing_work_timeout_is_not_retried_and_invalid_budget_skips_readiness
         .execute_service(
             &target(),
             1,
-            tonic::Request::new(()),
-            tracing::Span::none(),
+            root(tonic::Request::new(()), tracing::Span::none()),
             service,
         )
         .await
@@ -423,8 +440,7 @@ async fn outgoing_work_timeout_is_not_retried_and_invalid_budget_skips_readiness
         .execute_service(
             &target(),
             2,
-            request,
-            tracing::Span::none(),
+            root(request, tracing::Span::none()),
             ReadinessProbe {
                 mode: 2,
                 calls: Arc::clone(&calls),
@@ -442,15 +458,16 @@ async fn client_layer_preserves_borrowed_input_and_response_metadata() {
     use tower::ServiceExt as _;
     let client = Client::new(Duration::from_secs(1), 1).unwrap();
     let service = tower::ServiceBuilder::new()
-        .map_request(|mut call: Call<&mut String>| {
+        .map_request(|mut call: tok_execution::Request<Call<&mut String>>| {
             // 连接准备之前的策略可修改目标。
-            call.target.service_name = "selected".into();
+            call.input.target.service_name = "selected".into();
             call
         })
         .layer(client.layer())
-        .map_request(|mut call: Outgoing<&mut String>| {
-            assert_eq!(call.target().service_name, "selected");
-            call.request
+        .map_request(|mut call: tok_execution::Request<Outgoing<&mut String>>| {
+            assert_eq!(call.input.target().service_name, "selected");
+            call.input
+                .request
                 .metadata_mut()
                 .insert("x-policy", "checked".parse().unwrap());
             call
@@ -464,12 +481,14 @@ async fn client_layer_preserves_borrowed_input_and_response_metadata() {
         .service(tower::service_fn(borrowed_sender));
     let mut value = String::from("direct");
     let response = service
-        .oneshot(Call {
-            target: target(),
-            request_id: 17,
-            request: tonic::Request::new(&mut value),
-            span: tracing::Span::none(),
-        })
+        .oneshot(root(
+            Call {
+                target: target(),
+                request_id: 17,
+                request: tonic::Request::new(&mut value),
+            },
+            tracing::Span::none(),
+        ))
         .await
         .unwrap();
     assert_eq!(response.metadata().get("x-response").unwrap(), "retained");
@@ -486,27 +505,31 @@ async fn outer_client_policy_can_reject_before_connection_preparation() {
         .with_endpoint_factory(|_| panic!("rejected call must not prepare a connection"));
     let service = tower::ServiceBuilder::new()
         .layer(client.layer())
-        .service(tower::service_fn(|_: Outgoing<()>| async {
-            panic!("rejected call must not dispatch");
-            #[allow(unreachable_code)]
-            Ok::<_, tonic::Status>(tonic::Response::new(()))
-        }));
-    let service = tower::service_fn(move |call: Call<()>| {
+        .service(tower::service_fn(
+            |_: tok_execution::Request<Outgoing<()>>| async {
+                panic!("rejected call must not dispatch");
+                #[allow(unreachable_code)]
+                Ok::<_, tonic::Status>(tonic::Response::new(()))
+            },
+        ));
+    let service = tower::service_fn(move |call: tok_execution::Request<Call<()>>| {
         let inner = service.clone();
         async move {
-            if call.target.service_name == "custom" {
+            if call.input.target.service_name == "custom" {
                 return Err(tonic::Status::permission_denied("策略拒绝"));
             }
             inner.oneshot(call).await
         }
     });
     let error = service
-        .oneshot(Call {
-            target: target(),
-            request_id: 1,
-            request: tonic::Request::new(()),
-            span: tracing::Span::none(),
-        })
+        .oneshot(root(
+            Call {
+                target: target(),
+                request_id: 1,
+                request: tonic::Request::new(()),
+            },
+            tracing::Span::none(),
+        ))
         .await
         .unwrap_err();
     assert_eq!(error.code(), Code::PermissionDenied);
@@ -539,21 +562,25 @@ async fn cloned_client_layer_shares_cache_and_bounds_inner_readiness() {
         .layer(tower::limit::GlobalConcurrencyLimitLayer::with_semaphore(
             held,
         ))
-        .service(tower::service_fn(|_: tok_grpc::Outgoing<()>| async {
-            panic!("no permit available");
-            #[allow(unreachable_code)]
-            Ok::<_, tonic::Status>(tonic::Response::new(()))
-        }));
+        .service(tower::service_fn(
+            |_: tok_execution::Request<tok_grpc::Outgoing<()>>| async {
+                panic!("no permit available");
+                #[allow(unreachable_code)]
+                Ok::<_, tonic::Status>(tonic::Response::new(()))
+            },
+        ));
     for service in [service.clone(), service] {
         let mut request = tonic::Request::new(());
         request.set_timeout(Duration::from_millis(20));
         let error = service
-            .oneshot(Call {
-                target: target(),
-                request_id: 1,
-                request,
-                span: tracing::Span::none(),
-            })
+            .oneshot(root(
+                Call {
+                    target: target(),
+                    request_id: 1,
+                    request,
+                },
+                tracing::Span::none(),
+            ))
             .await
             .unwrap_err();
         assert_eq!(error.code(), Code::DeadlineExceeded);
@@ -624,8 +651,7 @@ async fn convenience_callback_can_consume_non_clone_capture_and_borrowed_input()
         .execute(
             &target(),
             1,
-            tonic::Request::new(&mut value),
-            tracing::Span::none(),
+            root(tonic::Request::new(&mut value), tracing::Span::none()),
             move |_, request| async move {
                 let suffix = owned.into_inner().unwrap();
                 let value = request.into_inner();
@@ -638,4 +664,97 @@ async fn convenience_callback_can_consume_non_clone_capture_and_borrowed_input()
         .unwrap();
     assert_eq!(value, "borrowed once");
     assert_eq!(size, value.len());
+}
+
+fn root<T>(input: T, span: tracing::Span) -> tok_execution::Request<T> {
+    tok_execution::Request::new(
+        tok_execution::Context::new(
+            tok_core::Identity {
+                node_id: "local".into(),
+                service_name: "test-caller".into(),
+            },
+            "test-call",
+            std::time::Duration::from_secs(30),
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .unwrap()
+        .with_span(span),
+        input,
+    )
+}
+
+#[tokio::test]
+async fn outgoing_context_keeps_local_identity_extensions_and_elapsed_upstream_budget() {
+    let client = Client::new(Duration::from_secs(2), 1).unwrap();
+    let mut request = root(tonic::Request::new(()), tracing::Span::none());
+    request.context = request
+        .context
+        .with_budget_limit(Duration::from_millis(300));
+    request
+        .context
+        .extensions_mut()
+        .insert(String::from("outer-policy"));
+    let original = request.context.deadline();
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    let service = tower::service_fn(
+        move |call: tok_execution::Request<tok_grpc::Outgoing<()>>| async move {
+            assert_eq!(call.context.service().service_name, "test-caller");
+            assert_eq!(
+                call.context.extensions().get::<String>().unwrap(),
+                "outer-policy"
+            );
+            assert!(call.context.deadline() <= original);
+            assert_eq!(call.input.target().service_name, "custom");
+            let (_, request) = call.input.into_parts(&call.context)?;
+            let remote = server(CancellationToken::new())
+                .context(request.metadata(), "remote")
+                .unwrap();
+            assert!(remote.remaining() < Duration::from_millis(280));
+            Ok::<_, tonic::Status>(tonic::Response::new(()))
+        },
+    );
+    client
+        .execute_service(&target(), 1, request, service)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn upstream_stop_prevents_preparation_and_interrupts_inner_readiness() {
+    use tower::{Layer as _, ServiceExt as _};
+    let client = Client::new(Duration::from_secs(2), 1).unwrap();
+    let mut request = root(tonic::Request::new(()), tracing::Span::none());
+    request.context = request.context.with_budget_limit(Duration::ZERO);
+    let guarded = client
+        .clone()
+        .with_endpoint_factory(|_| panic!("expired upstream must not prepare"));
+    let error = guarded
+        .execute(&target(), 1, request, |_, _| async {
+            Ok(tonic::Response::new(()))
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), Code::DeadlineExceeded);
+    let request = root(tonic::Request::new(()), tracing::Span::none());
+    let cancellation = request.context.cancellation();
+    let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let probe = ReadinessProbe {
+        mode: 0,
+        calls: std::sync::Arc::clone(&calls),
+    };
+    let work = client
+        .layer()
+        .layer(probe)
+        .oneshot(request.map(|request| tok_grpc::client::Call {
+            target: target(),
+            request_id: 1,
+            request,
+        }));
+    let stopped = async {
+        tokio::task::yield_now().await;
+        cancellation.cancel();
+    };
+    let (result, ()) = tokio::join!(work, stopped);
+    assert_eq!(result.unwrap_err().code(), Code::Cancelled);
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
 }

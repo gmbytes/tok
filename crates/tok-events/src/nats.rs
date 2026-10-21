@@ -223,6 +223,55 @@ impl Bus {
             .map_err(|_| Error::Unavailable("NATS 回环清理失败"))?;
         Ok(())
     }
+    /// 构造接受共同执行请求的发布 Service，保留本地范围并从其 Span 提取追踪。
+    ///
+    /// 成功仅表示客户端接受发布，不传输 Extensions 或发布者的执行期限。
+    pub fn publisher(
+        &self,
+    ) -> impl tower::Service<
+        tok_execution::Request<Message>,
+        Response = (),
+        Error = Error,
+        Future: Send,
+    > + Clone
+    + Send
+    + Sync
+    + 'static {
+        let bus = self.clone();
+        use tower::{Layer as _, ServiceExt as _};
+        let service = tok_execution::Layer.layer(tower::service_fn(
+            move |request: tok_execution::Request<Message>| {
+                let bus = bus.clone();
+                async move {
+                    let mut message = request.input;
+                    let mut trace = crate::TraceContext::default();
+                    opentelemetry::global::get_text_map_propagator(|propagator| {
+                        propagator.inject_context(&request.context.span().context(), &mut trace);
+                    });
+                    if trace.traceparent.is_some() {
+                        message.trace_context = trace;
+                    }
+                    bus.publish(&message).await
+                }
+            },
+        ));
+        service.map_err(|error| match error {
+            tok_execution::Error::Stopped(reason) => Error::Stopped(reason),
+            tok_execution::Error::Inner(error) => error,
+        })
+    }
+    /// 在当前调用范围内编码并发布强类型事件；本地能力不进入事件正文。
+    pub async fn publish_request<E: crate::Event + prost::Message>(
+        &self,
+        request: tok_execution::Request<crate::Envelope<E>>,
+    ) -> Result<(), Error> {
+        use tower::ServiceExt as _;
+        request.context.check().map_err(Error::Stopped)?;
+        let message = Message::new(&request.input)?;
+        self.publisher()
+            .oneshot(tok_execution::Request::new(request.context, message))
+            .await
+    }
     /// 发布强类型事件；先占用发布容量再编码，成功仅表示客户端接受发布操作。
     pub async fn publish_event<E: crate::Event + prost::Message>(
         &self,

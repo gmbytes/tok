@@ -45,9 +45,13 @@ struct Counts {
     timer: AtomicUsize,
     downlink: AtomicUsize,
     admission: AtomicUsize,
+    admission_budget_ms: AtomicU64,
     changes: Mutex<Vec<Change>>,
     events: Mutex<Vec<Arc<tok_events::Message>>>,
+    contexts: Mutex<Vec<(String, Option<u64>, std::time::Instant)>>,
 }
+#[derive(Clone)]
+struct ScopeMark(u64);
 struct GatewayData;
 struct ManagerData;
 struct SessionData {
@@ -253,10 +257,28 @@ where
     fn poll_ready(&mut self, _: &mut TaskContext<'_>) -> Poll<Result<()>> {
         Poll::Ready(Ok(()))
     }
-    fn call(&mut self, request: Request<T>) -> Self::Future {
+    fn call(&mut self, mut request: Request<T>) -> Self::Future {
         let inner = self.inner.clone();
         let audit = self.audit.clone();
         Box::pin(async move {
+            if request.context.operation().contains("/admission/") {
+                request.context.extensions_mut().insert(ScopeMark(37));
+                let limit = audit.counts.admission_budget_ms.load(Ordering::SeqCst);
+                if limit > 0 {
+                    request.context = request
+                        .context
+                        .with_budget_limit(Duration::from_millis(limit));
+                }
+            }
+            audit.counts.contexts.lock().unwrap().push((
+                request.context.operation().to_owned(),
+                request
+                    .context
+                    .extensions()
+                    .get::<ScopeMark>()
+                    .map(|mark| mark.0),
+                request.context.deadline(),
+            ));
             let capabilities = request.context.extensions();
             assert!(capabilities.get::<GatewayData>().is_some());
             assert!(capabilities.get::<ManagerData>().is_some());
@@ -692,13 +714,16 @@ async fn topic_membership_is_rechecked_after_async_downlink_before_assigning_seq
     let manager = fixture.manager.clone();
     let delivery = tokio::spawn(async move {
         manager
-            .deliver(&player::events::Delivery {
-                target: player::events::Target::Topic("room".into()),
-                action: player::events::Action::Notify {
-                    message_id: 90,
-                    body: vec![1],
+            .deliver(tok_execution::Request::new(
+                delivery_context(),
+                player::events::Delivery {
+                    target: player::events::Target::Topic("room".into()),
+                    action: player::events::Action::Notify {
+                        message_id: 90,
+                        body: vec![1],
+                    },
                 },
-            })
+            ))
             .await
             .unwrap()
     });
@@ -894,4 +919,176 @@ async fn trusted_initial_topics_are_ready_before_login_and_failure_closes_unpubl
         fixture.stop().await;
         assert_eq!(transport.active.load(Ordering::SeqCst), 0);
     }
+}
+
+#[cfg(test)]
+fn delivery_context() -> tok_execution::Context {
+    tok_execution::Context::new(
+        tok_core::Identity {
+            node_id: "local".into(),
+            service_name: "test-events".into(),
+        },
+        "test-delivery",
+        std::time::Duration::from_secs(5),
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .unwrap()
+}
+
+#[tokio::test]
+async fn admission_extensions_reach_execution_and_response_publication() {
+    let fixture = Fixture::new(None).await;
+    let mut client = fixture.connect().await;
+    client.login().await;
+    client.request(2, 1).await;
+    assert!(matches!(client.read().await, Content::Response(_)));
+    let contexts = fixture.counts.contexts.lock().unwrap().clone();
+    let admission = contexts
+        .iter()
+        .find(|entry| entry.0.contains("/admission/"))
+        .unwrap();
+    let execution = contexts
+        .iter()
+        .find(|entry| entry.0.contains("/request/"))
+        .unwrap();
+    let publication = contexts
+        .iter()
+        .find(|entry| entry.0.contains("/downlink/"))
+        .unwrap();
+    assert_eq!(execution.1, Some(37));
+    assert_eq!(publication.1, Some(37));
+    assert!(execution.2 <= admission.2);
+    fixture.stop().await;
+}
+
+#[tokio::test]
+async fn independent_event_keeps_selected_metadata_after_source_cancellation() {
+    let gate = Arc::new(Gate {
+        stage: "/event/",
+        entered: Notify::new(),
+        permits: Semaphore::new(0),
+    });
+    let fixture = Fixture::new(Some(Arc::clone(&gate))).await;
+    let mut client = fixture.connect().await;
+    client.login().await;
+    let mut context = delivery_context();
+    context.extensions_mut().insert(ScopeMark(99));
+    let source_stop = context.cancellation();
+    let event = Arc::new(
+        tok_events::Message::new(
+            &tok_events::Envelope::new(tok_events::EventId::generate(), Added {}).unwrap(),
+        )
+        .unwrap(),
+    );
+    fixture
+        .manager
+        .deliver(Request::new(
+            context,
+            player::events::Delivery {
+                target: player::events::Target::Players(vec!["1".into()]),
+                action: player::events::Action::Forward(event),
+            },
+        ))
+        .await
+        .unwrap();
+    gate.entered.notified().await;
+    source_stop.cancel();
+    gate.permits.add_permits(1);
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if fixture.counts.events.lock().unwrap().len() == 1 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(
+        fixture
+            .counts
+            .contexts
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|entry| entry.0.contains("/event/") && entry.1 == Some(99))
+    );
+    fixture.stop().await;
+}
+
+#[tokio::test]
+async fn expired_fifo_request_does_not_enter_business_chain() {
+    let gate = Arc::new(Gate {
+        stage: "/request/",
+        entered: Notify::new(),
+        permits: Semaphore::new(0),
+    });
+    let fixture = Fixture::new(Some(Arc::clone(&gate))).await;
+    let mut client = fixture.connect().await;
+    client.login().await;
+    client.request(2, 1).await;
+    gate.entered.notified().await;
+    fixture
+        .counts
+        .admission_budget_ms
+        .store(30, Ordering::SeqCst);
+    client.request(3, 1).await;
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while fixture.counts.admission.load(Ordering::SeqCst) < 2 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    tokio::time::sleep(Duration::from_millis(60)).await;
+    gate.permits.add_permits(1);
+    assert!(matches!(client.read().await, Content::Response(response) if response.error_code == 0));
+    assert!(
+        matches!(client.read().await, Content::Response(response) if response.error_code == ErrorCode::Timeout as u32)
+    );
+    assert_eq!(fixture.counts.request.load(Ordering::SeqCst), 1);
+    fixture.stop().await;
+}
+
+#[tokio::test]
+async fn synchronous_notification_keeps_metadata_and_stops_before_sequence_on_expiry() {
+    let gate = Arc::new(Gate {
+        stage: "/downlink/",
+        entered: Notify::new(),
+        permits: Semaphore::new(0),
+    });
+    let fixture = Fixture::new(Some(Arc::clone(&gate))).await;
+    let mut client = fixture.connect().await;
+    client.login().await;
+    let session = fixture.manager.session("1").unwrap().unwrap();
+    let mut context = delivery_context().with_budget_limit(Duration::from_millis(30));
+    context.extensions_mut().insert(ScopeMark(99));
+    let result = fixture
+        .manager
+        .deliver(Request::new(
+            context,
+            player::events::Delivery {
+                target: player::events::Target::Players(vec!["1".into()]),
+                action: player::events::Action::Notify {
+                    message_id: 90,
+                    body: vec![],
+                },
+            },
+        ))
+        .await;
+    assert_eq!(result.unwrap_err().code, ErrorCode::Timeout);
+    assert_eq!(session.snapshot().unwrap().last_server_seq, 0);
+    assert!(
+        fixture
+            .counts
+            .contexts
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|entry| entry.0.contains("/downlink/") && entry.1 == Some(99))
+    );
+    gate.permits.add_permits(1);
+    session.notify(notification(b"still-online")).await.unwrap();
+    assert_eq!(session.snapshot().unwrap().last_server_seq, 1);
+    fixture.stop().await;
 }

@@ -25,7 +25,8 @@ pub fn handlers() -> Result<Registry<u64, (), Error>, tok::message::Error> {
     registry.register(
         GetGuildRequest::MESSAGE_ID,
         GetGuildResponse::MESSAGE_ID,
-        |guild_id, request: GetGuildRequest| async move {
+        |execution_request: tok::execution::Request<(u64, GetGuildRequest)>| async move {
+            let (guild_id, request) = execution_request.input;
             if guild_id != request.guild_id {
                 return Err(Error::TargetMismatch);
             }

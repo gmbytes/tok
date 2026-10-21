@@ -13,4 +13,11 @@ impl<T> Request<T> {
     pub fn new(context: Context, input: T) -> Self {
         Self { context, input }
     }
+    /// 转换正文并移交原执行上下文，不重新分配预算或丢弃扩展。
+    pub fn map<U>(self, transform: impl FnOnce(T) -> U) -> Request<U> {
+        Request {
+            context: self.context,
+            input: transform(self.input),
+        }
+    }
 }
