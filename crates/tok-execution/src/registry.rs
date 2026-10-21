@@ -4,7 +4,7 @@
 use crate::Request;
 use std::{collections::BTreeMap, future::Future, sync::Arc};
 use tok_core::BoxFuture;
-use tower::{Layer as _, Service, ServiceExt};
+use tower::{Layer as _, Service as TowerService, ServiceExt};
 
 /// 注册配置错误；键的有效性规则由调用方或协议边界规定。
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -83,7 +83,7 @@ where
     /// 安装 Tower 处理链；就绪等待和执行共用传入 Context 的原期限与取消范围。
     pub fn register_service<S>(&mut self, key: K, service: S) -> Result<(), Error<K>>
     where
-        S: Service<Request<T>, Response = R, Error = E> + Clone + Send + Sync + 'static,
+        S: TowerService<Request<T>, Response = R, Error = E> + Clone + Send + Sync + 'static,
         S::Future: Send + 'static,
     {
         if self.handlers.contains_key(&key) {
@@ -99,8 +99,24 @@ where
         Ok(())
     }
 
+    /// 将组装好的分发表转换为标准 Tower Service，由取键函数读取完整请求。
+    ///
+    /// 可在分发表外安装公共 Layer，路由内的 Layer 仍由 register_service 配置。
+    /// Service 克隆共享这份只读分发表与取键函数，不复制全部路由，不重新分配执行预算。
+    pub fn into_service<F>(self, key: F) -> Service<K, T, R, E, F>
+    where
+        K: Send + Sync + 'static,
+        F: Fn(&Request<T>) -> K + Send + Sync + 'static,
+    {
+        Service {
+            registry: Arc::new(self),
+            key: Arc::new(key),
+        }
+    }
+
     /// 按键分发，保留原操作名、追踪、扩展、期限及取消；键与输入独立传递。
     pub async fn dispatch(&self, key: &K, request: Request<T>) -> Result<R, DispatchError<K, E>> {
+        request.context.check().map_err(DispatchError::Stopped)?;
         let handler = self
             .handlers
             .get(key)
@@ -108,6 +124,61 @@ where
         handler(request).await.map_err(|error| match error {
             crate::Error::Inner(error) => DispatchError::Handler(error),
             crate::Error::Stopped(reason) => DispatchError::Stopped(reason),
+        })
+    }
+}
+
+/// 按请求取键并执行已注册处理链的路由 Service，不是包装单个处理器的 Layer。
+///
+/// poll_ready 只表示分发入口可接受调用，不表示目标路由已有容量；取键、路由查询、
+/// 目标就绪等待与执行均受原 Context 的期限、取消与追踪约束。外层中间件的等待
+/// 仍须由外层执行保护负责。克隆共享固定路由快照，路由自己的限额状态由该 Layer 共享。
+pub struct Service<K, T, R, E, F> {
+    registry: Arc<Registry<K, T, R, E>>,
+    key: Arc<F>,
+}
+impl<K, T, R, E, F> Clone for Service<K, T, R, E, F> {
+    fn clone(&self) -> Self {
+        Self {
+            registry: Arc::clone(&self.registry),
+            key: Arc::clone(&self.key),
+        }
+    }
+}
+impl<K, T, R, E, F> TowerService<Request<T>> for Service<K, T, R, E, F>
+where
+    K: Ord + Clone + Send + Sync + 'static,
+    T: Send + 'static,
+    R: Send + 'static,
+    E: Send + 'static,
+    F: Fn(&Request<T>) -> K + Send + Sync + 'static,
+{
+    type Response = R;
+    type Error = DispatchError<K, E>;
+    type Future = BoxFuture<'static, Result<R, Self::Error>>;
+    fn poll_ready(
+        &mut self,
+        _: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), Self::Error>> {
+        std::task::Poll::Ready(Ok(()))
+    }
+    fn call(&mut self, request: Request<T>) -> Self::Future {
+        let registry = Arc::clone(&self.registry);
+        let key = Arc::clone(&self.key);
+        Box::pin(async move {
+            // 取键也可能执行用户逻辑，因此放在原执行保护与追踪范围之内。
+            crate::Layer
+                .layer(tower::service_fn(move |request: Request<T>| {
+                    let registry = Arc::clone(&registry);
+                    let key = key(&request);
+                    async move { registry.dispatch(&key, request).await }
+                }))
+                .oneshot(request)
+                .await
+                .map_err(|error| match error {
+                    crate::Error::Inner(error) => error,
+                    crate::Error::Stopped(reason) => DispatchError::Stopped(reason),
+                })
         })
     }
 }

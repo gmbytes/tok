@@ -405,3 +405,14 @@ SessionHandle::notify_request 继承当前范围；notify / submit / post_event 
 GatewayRpcService 四个交接入口从 metadata 建立执行范围、安装目标 manager 能力并复用 Server 执行。prepare 的 budget_ms 被传入范围剩余预算进一步限制；快照回调接续该范围。协调端的 prepare / commit / complete 共享原接管期限并使用通用 gRPC 执行；取消补偿使用独立、有界范围，既有冻结/条件所有权转移/恢复和监督清理保持原语义。
 
 Bus::publisher 提供 Service<Request<Message>>，Bus::publish_request 接收 Request<Envelope<E>>；从 Context.span 提取追踪，本地发布受原期限和取消约束。原生 publish / publish_event 保留为底层出口；订阅者消费仍独立建立本地能力与处理预算。不新增 broker 确认、业务重试或远端取消保证。
+
+
+## Registry 的 Tower 路由入口（2026-10-21）
+
+execution::Registry::into_service(Fn(&Request<T>) -> K) 消费已组装分发表，返回 registry::Service；取键函数可读取正文与扩展。Service 克隆通过 Arc 共享分发表和取键函数，不要求取键闭包 Clone。Service 入口要求键与选择器 Send + Sync + static；原显式 dispatch 不因此收紧键的既有约束。
+
+路由 Service 的取键、查表及目标调用进入共同执行保护，已停止调用不执行取键；非协作式取键迟到后不继续业务或接受迟到结果。直接 dispatch 也先检查 Context 停止条件，再查询键。Unknown / Stopped / Handler 的分类和原错误保留，不转换为协议状态。
+
+protobuf::Registry 和 message::Registry 直接实现 Service<Request<(C, Message<K>)>> / Service<Request<(C, message::Message)>>。编码适配移交原 Context，dispatch 复用同一 Service 路径，不新增执行循环。protobuf 表以 Arc 共享快照，注册时写时复制，旧克隆和已开始的调用保持原路由视图；路由内部策略状态仍按各自 Clone/共享约定工作。
+
+所有入口的 poll_ready 仅表示分发器可接受调用，不预留尚未选定路由的资源，也不探测远端健康。目标就绪等待计入调用期限；公共 Layer 的外层等待由外层执行范围保护。普通业务 RPC 适配和本地公会示例已直接使用 Service，不需为 Registry 手写 service_fn；事件借用分发与 fan-out 契约不变。

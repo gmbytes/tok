@@ -239,3 +239,10 @@ gRPC 的连接缓存、监听、metadata 转换保留为边界组件；执行范
 客户端 Layer 将 Request<client::Call<T>> 转换为 Request<Outgoing<T>>，保留 Context，允许外层策略在连接获取前选择目标或拒绝调用；本地预算沿用原截止点，Client 与 metadata 限制只能收紧；已发生的外层等待扣减剩余时间，外层等待期间的及时停止由外层保护负责。Outgoing 提供已选定目标、关联序号与类型化 tonic::Request，Context.service 保持本地身份，发送器通过 into_parts(&context) 校验当前停止条件并缩短远端期限，不重复保存一份执行期限。可重复调用的 Service 克隆内层，需要跨请求共享的策略状态由策略显式共享。便捷客户端方法同样接收执行 Request，可消费非 Clone Service / FnOnce 回调，支持借用输入和 Future，不另设执行循环，不主动重试。
 
 服务端 Layer 接收 execution::Request<T>，校验服务身份、复用 execution 执行约束并映射停止原因与指标。Server::context 继续负责 metadata 转换，Layer 不新建期限或进行认证。Client 克隆共享配置与 Channel 缓存，更换工厂为该实例建立独立配置。Listener::from_server 接收带 Layer 的 Tonic Server，Listener 与 Application 注册保持非泛型，服务绑定和就绪规则不变。
+
+
+## 分发表作为路由 Service（2026-10-21）
+
+分发表选择多个已注册处理链中的一条，作为 Tower 路由 Service 参与组合，不包装成只增强单个内层 Service 的 Layer。公共策略位于分发表外，路由专用策略位于注册链内；执行范围可保护整条公共策略和路由链，Context 与错误保持各层既有职责。
+
+通用 execution::Registry 由 into_service 显式接收 Request 取键函数；protobuf / message 注册器的正文已含键，可直接实现 Service。路由入口的 poll_ready 不代表某个目标已预留容量，选中路由后的就绪等待在原范围中执行。不为此引入后台队列、自动重试、默认 fallback 或热更新协议。

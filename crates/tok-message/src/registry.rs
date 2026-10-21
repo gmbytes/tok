@@ -1,6 +1,6 @@
 use std::{future::Future, sync::Arc};
 use tok_execution::Request;
-use tower::Service;
+use tower::{Service, ServiceExt};
 
 /// 编号消息的参数或注册错误。
 #[derive(Debug, thiserror::Error)]
@@ -17,6 +17,8 @@ pub enum Error {
 ///
 /// C 是调用状态，O 是附加结果，E 是业务错误。请求和回应编号必须非零；
 /// 编解码、就绪等待和处理链执行共用原始执行预算，不构造 RPC 信封。
+/// 可直接交给 ServiceBuilder 安装公共 Layer；输入为 `Request<(C, Message)>`。
+/// poll_ready 仅代表分发入口可接收调用，目标就绪在调用范围内等待。
 pub struct Registry<C = (), O = (), E = std::convert::Infallible> {
     inner: tok_protobuf::Registry<u32, C, O, E>,
 }
@@ -99,6 +101,28 @@ where
         tok_protobuf::Reply<tok_protobuf::Message<u32>, O>,
         tok_execution::registry::DispatchError<u32, tok_protobuf::Error<E>>,
     > {
-        self.inner.dispatch(request).await
+        self.clone().oneshot(request).await
+    }
+}
+
+impl<C, O, E> Service<Request<(C, tok_protobuf::Message<u32>)>> for Registry<C, O, E>
+where
+    C: Send + 'static,
+    O: Send + 'static,
+    E: Send + 'static,
+{
+    type Response = tok_protobuf::Reply<tok_protobuf::Message<u32>, O>;
+    type Error = tok_execution::registry::DispatchError<u32, tok_protobuf::Error<E>>;
+    type Future = <tok_protobuf::Registry<u32, C, O, E> as Service<
+        Request<(C, tok_protobuf::Message<u32>)>,
+    >>::Future;
+    fn poll_ready(
+        &mut self,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), Self::Error>> {
+        self.inner.poll_ready(cx)
+    }
+    fn call(&mut self, request: Request<(C, tok_protobuf::Message<u32>)>) -> Self::Future {
+        self.inner.call(request)
     }
 }

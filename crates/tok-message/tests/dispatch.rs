@@ -285,3 +285,47 @@ fn root<T>(input: T, span: tracing::Span) -> tok_execution::Request<T> {
         input,
     )
 }
+
+#[tokio::test]
+async fn numbered_registry_is_a_tower_service_with_common_policy_and_original_business_error() {
+    use tower::ServiceExt as _;
+    let mut registry = Registry::<(), (), Denied>::new();
+    registry
+        .register(1, 2, |request: Request<((), Value)>| async move {
+            assert_eq!(request.context.extensions().get::<u64>(), Some(&99));
+            if request.input.1.value == 0 {
+                return Err(Denied);
+            }
+            Ok(Reply {
+                message: request.input.1,
+                output: (),
+            })
+        })
+        .unwrap();
+    let service = tower::ServiceBuilder::new()
+        .map_request(|mut request: Request<((), Message)>| {
+            request.context.extensions_mut().insert(99u64);
+            request
+        })
+        .service(registry);
+    let input = |value| {
+        Request::new(
+            context(),
+            (
+                (),
+                Message {
+                    key: 1,
+                    body: Value { value }.encode_to_vec(),
+                },
+            ),
+        )
+    };
+    assert_eq!(
+        service.clone().oneshot(input(7)).await.unwrap().message.key,
+        2
+    );
+    assert!(matches!(
+        service.oneshot(input(0)).await,
+        Err(DispatchError::Handler(protobuf::Error::Handler(Denied)))
+    ));
+}

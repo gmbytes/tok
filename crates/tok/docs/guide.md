@@ -353,30 +353,45 @@ trace_sample_ratio = 0.1
 
 [`execution::registry::Registry`] 只根据键选择和执行 Tower 处理链，不规定输入、结果或编码方式。
 `Registry<K, T, R, E>` 中，K 是实现 Ord + Clone 的分发键，T 是每次调用的自有输入，R 是结果，E 是原始业务错误。键可以是枚举、字符串或自定义类型，不要求 Display；零值和空字符串是否有效由协议或业务决定。
+组装完成后通过 [`execution::registry::Registry::into_service`] 注入 `Fn(&Request<T>) -> K` 取键函数，得到 [`execution::registry::Service`]。取键可读取正文或扩展，只负责返回路由键；输入与能力校验由前置 Layer 完成，未注册键返回 Unknown。公共 Layer 放在分发表外，路由专用 Layer 继续通过 register_service 安装。
 核心执行库不依赖 prost、Tonic 或框架生成协议。分发保留输入 Context 的操作名、期限、取消和扩展，不创建队列、增加预算或重试。共享业务状态可放在输入的 Arc 中；借用输入仍可直接通过 execution 的 Tower 调用执行，当前注册器只保存静态处理链。
 
 ```rust
 use std::time::Duration;
-use tok::{core::Identity, execution::{Context, Request, Registry}};
+use tok::{core::Identity, execution::{self, Context, Request, Registry}};
 use tok::application::CancellationToken;
+use tower::{ServiceBuilder, ServiceExt};
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 enum Operation { Increment }
+struct Command { operation: Operation, value: u64 }
 
 # #[tokio::main]
 # async fn main() -> Result<(), Box<dyn std::error::Error>> {
-let mut registry = Registry::<Operation, u64, u64, std::io::Error>::new();
+let mut registry = Registry::<Operation, Command, u64, std::io::Error>::new();
 registry.register(Operation::Increment, |request| async move {
-    Ok(request.input + 1)
+    assert_eq!(request.context.extensions().get::<u64>(), Some(&42));
+    Ok(request.input.value + 1)
 })?;
+let service = ServiceBuilder::new()
+    .layer(execution::Layer) // 同时约束公共策略的等待。
+    .map_request(|mut request: Request<Command>| {
+        request.context.extensions_mut().insert(42u64);
+        request
+    })
+    .service(registry.into_service(|request| request.input.operation.clone()));
 let context = Context::new(
     Identity { node_id: "local".into(), service_name: "custom".into() },
     "local.increment", Duration::from_secs(1), CancellationToken::new(),
 )?;
-assert_eq!(registry.dispatch(&Operation::Increment, Request::new(context, 41)).await?, 42);
+assert_eq!(service.oneshot(Request::new(context, Command {
+    operation: Operation::Increment, value: 41,
+})).await?, 42);
 # Ok(())
 # }
 ```
+
+路由 Service 的 poll_ready 只表示能接收本次分发，不预留尚未选定路由的容量。取键、查表、目标就绪及处理都在原 Context 范围内；过期或取消时不再调用取键函数，非协作式取键迟到后也不继续执行业务。不新增全局队列、自动重试或默认路由。Service 克隆共享只读分发表和取键函数，不要求取键闭包本身 Clone。Service 入口要求 K 和取键函数满足 Send + Sync + static；显式 dispatch 保留原有键调用方式，不机械收紧其键约束。
 
 注册错误 [`execution::registry::Error`] 保留重复键；运行错误 [`execution::registry::DispatchError`] 区分 Unknown、Stopped 和 Handler，并保留原始键及业务错误。
 
@@ -386,6 +401,8 @@ assert_eq!(registry.dispatch(&Operation::Increment, Request::new(context, 41)).a
 `protobuf::Registry<K, C, O, E>` 的 C 是业务状态，O 是附加结果；Reply 包含回应消息和附加结果，`Message<K>` 包含键和编码正文。
 [`message::Registry<C, O, E>`] 在其上限定 u32 非零请求与回应编号，Message 是编号消息，Reply 仍保留泛型附加结果。以下示例使用该编号消息表；本地调用不依赖 Tonic 类型。
 
+protobuf::Registry 和 message::Registry 的输入已含消息键，可直接作为 `Service<Request<(C, Message<K>)>>` / `Service<Request<(C, message::Message)>>` 交给 ServiceBuilder，不需要额外 service_fn。克隆共享路由快照，后续注册采用写时复制，不改变旧克隆；每条路由的可变限额仍由其 Layer 显式共享。dispatch 复用该 Service 路径。
+
 编解码和内层 Service 的就绪等待也计入原执行范围。解码错误通过 `registry::DispatchError::Handler(protobuf::Error::Decode(...))` 返回，业务错误保留在 `protobuf::Error::Handler` 中；RPC 边界再映射为 Status。
 
 ```rust
@@ -393,6 +410,7 @@ use std::{sync::Arc, time::Duration};
 use prost::Message as _;
 use tok::{core::Identity, execution::{Context, Request}, message::{self, Registry, Reply, Message}};
 use tok::application::CancellationToken;
+use tower::{ServiceBuilder, ServiceExt};
 
 #[derive(Clone, PartialEq, prost::Message)]
 struct Value {
@@ -415,7 +433,13 @@ let context = Context::new(
     Identity { node_id: "local".into(), service_name: "custom".into() },
     "local.get", Duration::from_secs(1), CancellationToken::new(),
 )?;
-let reply = registry.dispatch(Request::new(context, (42, Message {
+let service = ServiceBuilder::new()
+    .map_request(|request: Request<(u64, Message)>| {
+        assert_eq!(request.context.service().service_name, "custom");
+        request
+    })
+    .service(registry.as_ref().clone());
+let reply = service.oneshot(Request::new(context, (42, Message {
     key: 1,
     body: Value { value: 42 }.encode_to_vec(),
 }))).await?;

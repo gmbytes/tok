@@ -17,6 +17,7 @@ use tok::{
     protobuf::Message,
 };
 use tokio_util::sync::CancellationToken;
+use tower::{ServiceBuilder, ServiceExt as _};
 
 #[tokio::main]
 async fn main() -> Result<(), BoxError> {
@@ -30,8 +31,15 @@ async fn main() -> Result<(), BoxError> {
         Duration::from_secs(1),
         CancellationToken::new(),
     )?;
-    let reply = registry
-        .dispatch(Request::new(
+    // 公共策略包住整个路由表，注册路由内部仍可安装自己的 Layer。
+    let service = ServiceBuilder::new()
+        .map_request(|request: Request<(u64, Message<u32>)>| {
+            assert_eq!(request.context.service().service_name, "guild");
+            request
+        })
+        .service(registry);
+    let reply = service
+        .oneshot(Request::new(
             context,
             (
                 42,

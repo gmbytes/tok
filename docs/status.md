@@ -247,3 +247,12 @@ Listener::from_server 已支持带 Tower Layer 的 Tonic Server。内部改为 R
 交接入口处理 metadata，快照和恢复回调接续相应执行范围；源端监督状态机继续兜底。Bus::publisher / publish_request 保持本地调用范围，NATS 消费独立安装订阅能力，不传播 Extensions 或发布者执行期限。原生传输出口与独立提交入口在 rustdoc 中说明范围边界，不将所有基础设施方法机械包装成 Request。
 
 本轮 Windows 验收：工作区串行 306 项测试通过、32 项外部专项按默认规则跳过，包含 19 项指南示例；另在隔离临时 NATS 实例运行 16 项真实 NATS/多网关专项全部通过，发布 Future 的跨任务回归再次通过。最终期限收紧变更后，execution / grpc / gateway 共 143 项定向回归通过，准入边界最终 13 项再次通过。全目标编译与 Clippy、workspace rustdoc、rpc / client / application / events / dispatch 五个 smoke、格式、220 个文本文件 UTF-8/LF、119 处相对文档路径及空白检查通过。并行工作区回归曾遇到 Windows 套接字资源不足，串行完整重跑通过；不据此修改业务逻辑。未运行真实 Redis、Linux 或 release 构建；本轮修复随本次提交交付。
+
+
+## Registry 标准 Service 入口（2026-10-21）
+
+已提供 execution::Registry::into_service 与 registry::Service，显式注入 Request 取键函数；protobuf / message Registry 直接实现 Tower Service。公共 Layer 可直接包住整张分发表，注册项内的路由 Layer 保留。Context、未知键和原业务错误不被协议化，就绪等待继续在原期限内执行，取消或过期先于取键和查表检查。
+
+protobuf 表克隆改为共享路由快照，注册时写时复制，服务调用不复制整张表；旧克隆不因后续注册变化，实际策略状态仍由 Layer 共享。普通业务 RPC 适配和本地公会示例已切换到 Service 入口；显式 dispatch 保留，编码适配复用 Service 路径。未新增 Registry Layer、路由 fallback、后台队列或自动重试。
+
+本轮 Windows 验收：工作区串行 311 项测试通过、32 项外部专项按默认规则跳过，包含 19 项指南示例。新增 5 项回归覆盖公共与路由 Layer 的 Context 传递、原错误与未知键、非 Clone 取键函数共享、停止前不取键、就绪等待和非协作式取键的期限，以及 protobuf / message 直接 Service 与注册快照隔离。全目标编译与 Clippy、workspace rustdoc、dispatch / rpc / client 三个 smoke、格式、220 个文本文件 UTF-8/LF、119 处相对文档路径及空白检查通过。未运行真实 Redis/NATS、Linux 或 release 构建；本轮随本次提交交付。

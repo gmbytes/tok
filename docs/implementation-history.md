@@ -643,3 +643,12 @@ Listener::from_server 支持 Tonic Server<L>，内部保存 Routes 和类型擦�
 在 4092a10 提交 Layer 化与规范后，修复出站 gRPC / 游戏协议 / 网关准入队列 / 事件投递下行 / 内部交接 / NATS 发布六类边界。新增 Request::map 和 Context 收紧预算、显式停止边界能力；注册便捷回调统一传入 Request，不再剥离执行上下文。独立事件消费、session 工作、回应发布和交接补偿明确划分范围，传输只传播允许 metadata，目标安装自身能力，不改变无主动重试和有限租约约定。
 
 本轮 Windows 验收：工作区串行 306 项测试通过、32 项外部专项按默认规则跳过，包含 19 项指南示例；另在隔离临时 NATS 实例运行 16 项真实 NATS/多网关专项全部通过，发布 Future 的跨任务回归再次通过。最终期限收紧变更后，execution / grpc / gateway 共 143 项定向回归通过，准入边界最终 13 项再次通过。全目标编译与 Clippy、workspace rustdoc、rpc / client / application / events / dispatch 五个 smoke、格式、220 个文本文件 UTF-8/LF、119 处相对文档路径及空白检查通过。并行工作区回归曾遇到 Windows 套接字资源不足，串行完整重跑通过；不据此修改业务逻辑。未运行真实 Redis、Linux 或 release 构建；本轮修复随本次提交交付。
+
+
+## Registry 标准 Service 入口（2026-10-21）
+
+已提供 execution::Registry::into_service 与 registry::Service，显式注入 Request 取键函数；protobuf / message Registry 直接实现 Tower Service。公共 Layer 可直接包住整张分发表，注册项内的路由 Layer 保留。Context、未知键和原业务错误不被协议化，就绪等待继续在原期限内执行，取消或过期先于取键和查表检查。
+
+protobuf 表克隆改为共享路由快照，注册时写时复制，服务调用不复制整张表；旧克隆不因后续注册变化，实际策略状态仍由 Layer 共享。普通业务 RPC 适配和本地公会示例已切换到 Service 入口；显式 dispatch 保留，编码适配复用 Service 路径。未新增 Registry Layer、路由 fallback、后台队列或自动重试。
+
+本轮 Windows 验收：工作区串行 311 项测试通过、32 项外部专项按默认规则跳过，包含 19 项指南示例。新增 5 项回归覆盖公共与路由 Layer 的 Context 传递、原错误与未知键、非 Clone 取键函数共享、停止前不取键、就绪等待和非协作式取键的期限，以及 protobuf / message 直接 Service 与注册快照隔离。全目标编译与 Clippy、workspace rustdoc、dispatch / rpc / client 三个 smoke、格式、220 个文本文件 UTF-8/LF、119 处相对文档路径及空白检查通过。未运行真实 Redis/NATS、Linux 或 release 构建；本轮随本次提交交付。

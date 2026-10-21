@@ -474,3 +474,10 @@ Listener::from_server 已支持带 Tower Layer 的 Tonic Server。内部改为 R
 
 
 上下文连续性校正四项已实施并通过验收；本轮还统一了 protobuf / message 便捷注册回调。工作区串行 306 项通过、32 项外部专项默认跳过；隔离真实 NATS 的 16 项专项及发布跨任务回归通过，最终 execution / grpc / gateway 的 143 项回归与准入 13 项复核通过。Clippy、rustdoc、五个 smoke 和文本/文档检查通过。详细环境边界见 status.md；本轮修复随本次提交交付，不宣称已提供远端取消、事件确认或通用熔断策略。
+
+
+## Registry 路由 Service 校正（2026-10-21）
+
+本批已实现三项：通用分发表显式取键的 into_service 适配、protobuf / message 直接 Service 入口、普通业务 RPC 与本地示例接入及 rustdoc 指南同步。分发表是路由末端，公共 Layer 和路由专用 Layer 分别组合，不为形式统一新增 Registry Layer。
+
+验收覆盖公共/路由策略的 Context 传递、未知键和原错误、停止前不取键、路由就绪与非协作式取键的原预算，以及注册后的快照隔离；工作区串行 311 项通过、32 项外部专项默认跳过，Clippy、rustdoc（19 项指南示例）、dispatch / rpc / client smoke、格式及 UTF-8/LF 和文档链接检查通过。环境边界与详细结果见 status.md；本轮随本次提交交付。

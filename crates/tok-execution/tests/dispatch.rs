@@ -168,3 +168,123 @@ async fn readiness_wait_uses_original_deadline_and_cancelled_requests_do_not_sta
     ));
     assert!(polls.load(Ordering::SeqCst) > 0);
 }
+
+#[tokio::test]
+async fn registry_service_composes_common_and_route_layers_without_losing_context_or_errors() {
+    use tower::ServiceExt as _;
+    let mut registry = Registry::<Action, (Action, u32), u32, Rejected>::new();
+    let route = tower::ServiceBuilder::new()
+        .map_request(|mut request: Request<(Action, u32)>| {
+            assert_eq!(request.context.extensions().get::<u64>(), Some(&41));
+            request.context.extensions_mut().insert(42u64);
+            request
+        })
+        .service(tower::service_fn(
+            |request: Request<(Action, u32)>| async move {
+                assert_eq!(request.context.extensions().get::<u64>(), Some(&42));
+                assert_eq!(request.context.operation(), "local.increment");
+                if request.input.1 == 0 {
+                    return Err(Rejected(0));
+                }
+                Ok(request.input.1 + 1)
+            },
+        ));
+    registry.register_service(Action::Increment, route).unwrap();
+    let service = tower::ServiceBuilder::new()
+        .map_request(|mut request: Request<(Action, u32)>| {
+            request.context.extensions_mut().insert(41u64);
+            request
+        })
+        .service(registry.into_service(|request| request.input.0.clone()));
+    let context = context(Duration::from_secs(1), CancellationToken::new());
+    assert_eq!(
+        service
+            .clone()
+            .oneshot(Request::new(context.clone(), (Action::Increment, 7)))
+            .await
+            .unwrap(),
+        8
+    );
+    assert!(matches!(
+        service
+            .clone()
+            .oneshot(Request::new(context.clone(), (Action::Increment, 0)))
+            .await,
+        Err(DispatchError::Handler(Rejected(0)))
+    ));
+    assert!(matches!(
+        service
+            .oneshot(Request::new(context, (Action::Missing, 7)))
+            .await,
+        Err(DispatchError::Unknown(Action::Missing))
+    ));
+}
+
+#[tokio::test]
+async fn service_clones_share_non_clone_selector_and_stop_before_selection_or_unready_dispatch() {
+    use tower::ServiceExt as _;
+    let polls = Arc::new(AtomicUsize::new(0));
+    let selections = Arc::new(std::sync::Mutex::new(0));
+    let observed = Arc::clone(&selections);
+    let non_clone = std::sync::Mutex::new(Action::Increment);
+    let mut registry = Registry::new();
+    registry
+        .register_service(Action::Increment, NeverReady(Arc::clone(&polls)))
+        .unwrap();
+    let service = registry.into_service(move |_| {
+        *observed.lock().unwrap() += 1;
+        non_clone.lock().unwrap().clone()
+    });
+    let stop = CancellationToken::new();
+    stop.cancel();
+    assert!(matches!(
+        service
+            .clone()
+            .oneshot(Request::new(context(Duration::from_secs(1), stop), ()))
+            .await,
+        Err(DispatchError::Stopped(StopReason::Cancelled))
+    ));
+    assert_eq!(*selections.lock().unwrap(), 0);
+    assert_eq!(polls.load(Ordering::SeqCst), 0);
+    assert!(matches!(
+        service
+            .oneshot(Request::new(
+                context(Duration::from_millis(20), CancellationToken::new()),
+                ()
+            ))
+            .await,
+        Err(DispatchError::Stopped(StopReason::DeadlineExceeded))
+    ));
+    assert_eq!(*selections.lock().unwrap(), 1);
+    assert!(polls.load(Ordering::SeqCst) > 0);
+}
+
+#[tokio::test]
+async fn slow_key_selection_cannot_dispatch_or_return_a_late_unknown_result() {
+    use tower::ServiceExt as _;
+    let calls = Arc::new(AtomicUsize::new(0));
+    for selected in [Action::Increment, Action::Missing] {
+        let mut registry = Registry::<Action, (), (), Rejected>::new();
+        let calls = Arc::clone(&calls);
+        registry
+            .register(Action::Increment, move |_| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                async { Ok(()) }
+            })
+            .unwrap();
+        let service = registry.into_service(move |_| {
+            std::thread::sleep(Duration::from_millis(30));
+            selected.clone()
+        });
+        assert!(matches!(
+            service
+                .oneshot(Request::new(
+                    context(Duration::from_millis(5), CancellationToken::new()),
+                    ()
+                ))
+                .await,
+            Err(DispatchError::Stopped(StopReason::DeadlineExceeded))
+        ));
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+}

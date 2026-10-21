@@ -1,4 +1,5 @@
 //! protobuf 正文编解码适配；分发键 K 由调用方定义，不包含 RPC 信封。
+//! Registry 可直接作为 Tower Service，公共策略包住分发表，路由策略保留在注册项内。
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
 
 use std::{future::Future, sync::Arc};
@@ -40,20 +41,22 @@ type EncodedRegistry<K, C, O, E> =
 ///
 /// K 可以是数字、字符串或枚举。本适配器不规定零或空字符串是否有效，
 /// 编解码、内层就绪等待和业务执行均在原 Context 约束内，不创建后台任务。
+/// 可直接作为接受 `Request<(C, Message<K>)>` 的 Tower Service，供公共 Layer 包装。
+/// poll_ready 不预留目标路由容量；克隆共享路由快照，克隆后注册新路由不会修改旧快照。
 pub struct Registry<K, C = (), O = (), E = std::convert::Infallible> {
-    inner: EncodedRegistry<K, C, O, E>,
+    inner: Arc<EncodedRegistry<K, C, O, E>>,
 }
 impl<K, C, O, E> Default for Registry<K, C, O, E> {
     fn default() -> Self {
         Self {
-            inner: tok_execution::registry::Registry::default(),
+            inner: Arc::new(tok_execution::registry::Registry::default()),
         }
     }
 }
 impl<K: Clone, C, O, E> Clone for Registry<K, C, O, E> {
     fn clone(&self) -> Self {
         Self {
-            inner: self.inner.clone(),
+            inner: Arc::clone(&self.inner),
         }
     }
 }
@@ -108,7 +111,7 @@ where
             + 'static,
         S::Future: Send + 'static,
     {
-        self.inner.register_service(
+        Arc::make_mut(&mut self.inner).register_service(
             request_key,
             tower::service_fn(move |request: Request<(C, Vec<u8>)>| {
                 let service = service.clone();
@@ -136,12 +139,37 @@ where
         &self,
         request: Request<(C, Message<K>)>,
     ) -> Result<Reply<Message<K>, O>, DispatchError<K, Error<E>>> {
-        let (state, message) = request.input;
-        self.inner
-            .dispatch(
-                &message.key,
-                Request::new(request.context, (state, message.body)),
-            )
-            .await
+        self.clone().oneshot(request).await
+    }
+}
+
+impl<K, C, O, E> Service<Request<(C, Message<K>)>> for Registry<K, C, O, E>
+where
+    K: Ord + Clone + Send + Sync + 'static,
+    C: Send + 'static,
+    O: Send + 'static,
+    E: Send + 'static,
+{
+    type Response = Reply<Message<K>, O>;
+    type Error = DispatchError<K, Error<E>>;
+    type Future =
+        std::pin::Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
+    fn poll_ready(
+        &mut self,
+        _: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), Self::Error>> {
+        std::task::Poll::Ready(Ok(()))
+    }
+    fn call(&mut self, request: Request<(C, Message<K>)>) -> Self::Future {
+        let inner = Arc::clone(&self.inner);
+        Box::pin(async move {
+            let (state, message) = request.input;
+            inner
+                .dispatch(
+                    &message.key,
+                    Request::new(request.context, (state, message.body)),
+                )
+                .await
+        })
     }
 }

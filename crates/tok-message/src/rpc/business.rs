@@ -5,6 +5,7 @@ use std::sync::Arc;
 use tok_core::ServiceDescriptor;
 use tok_proto::internal::v1::{self as proto, CallResponse, Payload};
 use tonic::Status;
+use tower::ServiceExt as _;
 
 /// 普通业务协议客户端；与其他适配器共享连接而不共享业务语义。
 #[derive(Clone)]
@@ -91,7 +92,9 @@ where
             );
             let reply = self
                 .registry
-                .dispatch(tok_execution::Request::new(
+                .as_ref()
+                .clone()
+                .oneshot(tok_execution::Request::new(
                     context,
                     (
                         state,
