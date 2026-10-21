@@ -4,8 +4,8 @@ mod middleware;
 use std::{sync::Arc, time::Duration};
 use tok::{
     application::Binding,
-    game_rpc::Client,
     gateway::{ErrorCode, Gateway, player},
+    grpc::Client,
     infra::routing::RendezvousRouter,
     lifecycle::{Factory, Init, InitFuture, task::Task},
     player::ownership::{Owner as SessionOwner, Store as OwnershipStore},
@@ -90,7 +90,7 @@ impl Factory for PlayerIngressFactory {
             let executor = Arc::new(player::RpcExecutor::new(
                 "player",
                 Arc::new(RendezvousRouter::new(Arc::clone(&binding.directory))),
-                tok::game_rpc::player::Client::new(clients),
+                tok::message::rpc::player::Client::new(clients),
             )?);
             let pipeline = player::Pipeline::new(Arc::<player::RpcExecutor>::clone(&executor))
                 .with_admission_layer(middleware::Observe)

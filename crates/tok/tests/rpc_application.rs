@@ -8,12 +8,13 @@ use std::{
     },
     time::Duration,
 };
+use tok::grpc::Listener;
 use tok::{
     AppConfig,
     application::{self, Application},
     core::ServiceDirectory,
-    game_rpc::{HandlerRegistry, Listener, RpcService},
     lifecycle::{self, Init, InitFuture, task::Task},
+    message::rpc::{HandlerRegistry, Service as RpcService},
 };
 
 struct Factory {
@@ -239,7 +240,7 @@ fn installing_factory(init: Init) -> InitFuture {
     Box::pin(async move {
         let binding = init
             .extensions
-            .get::<tok::game_rpc::Binding>()
+            .get::<tok::message::rpc::Binding>()
             .unwrap()
             .clone();
         assert!(!binding.is_installed());
@@ -268,7 +269,11 @@ async fn configured_rpc_factories_assemble_shared_endpoint_and_reject_missing_in
                     installing_factory(init)
                 } else {
                     Box::pin(async move {
-                        assert!(init.extensions.get::<tok::game_rpc::Binding>().is_some());
+                        assert!(
+                            init.extensions
+                                .get::<tok::message::rpc::Binding>()
+                                .is_some()
+                        );
                         Ok(Box::pin(async move {
                             init.service.cancellation().cancelled().await;
                             Ok(())

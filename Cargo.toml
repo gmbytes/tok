@@ -16,8 +16,9 @@ tok-player = { path = "crates/tok-player", version = "0.1.0" }
 tok-execution = { path = "crates/tok-execution", version = "0.1.0" }
 tok-lifecycle = { path = "crates/tok-lifecycle", version = "0.1.0" }
 tok-proto = { path = "crates/tok-proto", version = "0.1.0" }
-tok-game-rpc = { path = "crates/tok-game-rpc", version = "0.1.0" }
-tok-rpc = { path = "crates/tok-rpc", version = "0.1.0" }
+tok-protobuf = { path = "crates/tok-protobuf", version = "0.1.0" }
+tok-message = { path = "crates/tok-message", version = "0.1.0" }
+tok-grpc = { path = "crates/tok-grpc", version = "0.1.0" }
 tok-events = { path = "crates/tok-events", version = "0.1.0" }
 tok-infra = { path = "crates/tok-infra", version = "0.1.0" }
 tok-gateway = { path = "crates/tok-gateway", version = "0.1.0" }

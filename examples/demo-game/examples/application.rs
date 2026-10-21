@@ -13,18 +13,19 @@ use std::{
     task::{Context as TaskContext, Poll},
     time::Duration,
 };
+use tok::grpc::Client;
 use tok::{
     AppConfig,
     application::Application,
     events::{self, Envelope, Event, EventId, Outcome, Registry},
     execution::{Context, Request, sync_handler},
-    game_rpc::{
-        CallContext, Client, HandlerRegistry, HandlerReply, RpcService,
-        protocol::internal::v1::Payload, tonic::Status,
-    },
     lifecycle::{
         Init, InitFuture,
         task::{BoxError, Task},
+    },
+    message::rpc::{
+        CallContext, HandlerRegistry, HandlerReply, Service as RpcService,
+        protocol::internal::v1::Payload, tonic::Status,
     },
 };
 use tokio::sync::{mpsc, watch};
@@ -141,7 +142,7 @@ async fn main() -> Result<(), BoxError> {
                         )),
                     )?;
                     init.extensions
-                        .get::<tok::game_rpc::Binding>()
+                        .get::<tok::message::rpc::Binding>()
                         .ok_or_else(|| std::io::Error::other("缺少 RPC 绑定"))?
                         .install(&init, Arc::new(handlers))?;
                     Ok(Box::pin(async move {
@@ -174,7 +175,7 @@ async fn main() -> Result<(), BoxError> {
             {
                 return Err(std::io::Error::other("无端点服务不应发布地址"));
             }
-            let client = tok::game_rpc::business::Client::new(Arc::new(
+            let client = tok::message::rpc::business::Client::new(Arc::new(
                 Client::new(Duration::from_secs(2), 4).map_err(std::io::Error::other)?,
             ));
             let response = client

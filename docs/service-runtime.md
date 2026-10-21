@@ -109,7 +109,7 @@ Gateway::new_in 接收 Init，继承所属服务身份、生命周期句柄和�
 
 ServiceConfig 的 factory 可选，默认按服务名查找共同 Factory；endpoint 也可省略，无端点服务仍参与初始化、运行监督与退出，但不生成或发布网络描述。网络服务保留 application::Binding 能力，事件服务可由组装层注入发现查询或其他状态。
 
-Application::register_rpc_factory 为匹配配置创建 RpcService 及一次性 game_rpc::Binding，按所属服务注入 Init.extensions，在同一工厂中安装真实状态、路由与 Layer。工厂结束时检查绑定是否完成，缺失安装会在发布前失败；初始化绑定不保存回自身执行扩展，防止引用环。
+Application::register_rpc_factory 为匹配配置创建 message::rpc::Service 及一次性 message::rpc::Binding，按所属服务注入 Init.extensions，在同一工厂中安装真实状态、路由与 Layer。工厂结束时检查绑定是否完成，缺失安装会在发布前失败；初始化绑定不保存回自身执行扩展，防止引用环。
 
 自定义 protobuf 通过 bind_rpc 按业务服务声明，与其他逐服务绑定在启动前合并并校验端点；高级调用可一次注册完整 Listener，同端点不混用两种方式。重复 protobuf、错误协议或缺失端点在监听前拒绝，工厂注册失败不留下半份声明。协议转换不会自动选择锁或中间件，普通服务仍是一套 Factory 契约。
 
@@ -277,7 +277,7 @@ JetStream、离线加载、全局去重、通用扇出中继、热配置、生�
 
 ## RPC 协议适配分层校正（2026-10-21）
 
-通用 tok-rpc 保留 Client / Listener / Server，通过泛型请求和 Tower 接入任意协议；正常依赖移除 tok-player / tok-events / tok-proto。新增 tok-game-rpc 承载游戏 CallContext、Handler / HandlerRegistry、玩家与普通业务协议客户端、绑定槽、通知编码及 timer / 事件 / 请求锁适配。门面从 game_rpc 访问游戏协议，rpc 访问通用设施；移除通用 CallHandler 上的事件契约，不提供旧路径兼容别名。Application 的普通自定义 protobuf 绑定继续使用通用端点，游戏 register_rpc_factory 使用新协议适配。客户端 Frame、内部 protobuf、事件 topic、timer、租约和无自动重试语义保持原有约束；事件与 timer 入口仍仅供可信服务端。
+通用 tok-grpc 保留 Client / Listener / Server，通过泛型请求和 Tower 接入任意生成的 gRPC 服务；正常依赖移除 tok-player / tok-events / tok-proto。新增 tok-message 承载游戏 CallContext、Handler / HandlerRegistry、玩家与普通业务协议客户端、绑定槽、通知编码及 timer / 事件 / 请求锁适配。门面从 message::rpc 访问游戏协议，grpc 访问 gRPC 设施；移除通用 CallHandler 上的事件契约，不提供旧路径兼容别名。Application 的普通自定义 protobuf 绑定继续使用通用端点，游戏 register_rpc_factory 使用新协议适配。客户端 Frame、内部 protobuf、事件 topic、timer、租约和无自动重试语义保持原有约束；事件与 timer 入口仍仅供可信服务端。
 
 ## 调用执行与生命周期分库（2026-10-21）
 
@@ -293,7 +293,7 @@ Context 移除 source 字段、Source 枚举和构造/child 的来源参数。�
 
 ## 通用 RPC 期限与诊断（2026-10-21）
 
-通用入口使用 tok_rpc::{Client, Listener, Readiness, Server}。Server 负责逻辑服务的执行范围，Listener 负责共享监听和协议绑定；内部实现模块不公开。
+通用入口使用 tok_grpc::{Client, Listener, Readiness, Server}。Server 负责逻辑服务的执行范围，Listener 负责共享监听和协议绑定；内部实现模块不公开。
 
 客户端配置期限须大于零且不超过一天，与服务端预算配置一致。execute 取请求 grpc-timeout 与默认期限的较小值，准备和发送共用截止点；无效超时返回 InvalidArgument，零期限或迟到结果返回 DeadlineExceeded，不自动重试、不回滚副作用。直接使用 channel 的适配器须自行管理预算；Channel 延迟建连，不承诺获取时已连接。
 
@@ -315,7 +315,7 @@ Client::with_endpoint_factory 接收从 ServiceDescriptor 创建 Tonic Endpoint 
 
 tok-execution::registry::Registry<K, T, R, E> 根据 K 选择 Tower Service<Request<T>, Response=R, Error=E>，就绪等待和执行共用原 Context。K 需 Ord + Clone；枚举、字符串和自定义键均可用，不限定 u32、数字非零或 Display。注册错误 registry::Error 保留重复键，运行错误 registry::DispatchError 区分 Unknown / Stopped / Handler 并保留原始业务错误，不生成协议状态码。
 
-protobuf 正文适配位于 tok-game-rpc::protobuf，包装上述通用表，不让 tok-execution 依赖 prost。适配器 Registry<K, C, O, E> 根据键解码请求、执行强类型处理链、编码回应；编解码也处于原预算内。业务状态和附加结果为自有 Send + static 类型，借用调用仍可直接使用 execution 或事件处理。
+protobuf 正文适配位于 tok-protobuf，包装上述通用表，不让 tok-execution 依赖 prost。适配器 Registry<K, C, O, E> 根据键解码请求、执行强类型处理链、编码回应；编解码也处于原预算内。业务状态和附加结果为自有 Send + static 类型，借用调用仍可直接使用 execution 或事件处理。
 
 游戏 RPC 明确选择 u32 消息 ID：HandlerRegistry 注册时校验请求与回应 ID 非零，business::Handler 拒绝零请求消息 ID 或零回应消息 ID。上下文转换、request_id 回应关联、计时来源隔离和 Status 映射均留在游戏协议边界。公会处理函数使用自身错误和业务目标，同一表可被本地和真实 RPC 调用；请求锁、玩家组合与通知的后续迁移不计入本批完成范围。
 
@@ -332,3 +332,11 @@ registry 注册错误定名为 Error<K>，运行失败定名为 DispatchError<K,
 删除 tok-core/error.rs 及根 Error / Result，领域发现、锁和路由契约不变，不提供兼容类型。剩余校验能力回到所属模块：execution::ContextError 表达无效服务身份、操作名和不可表示期限；lifecycle::task::CreateError 表达无效容量和父范围退出，lifecycle::CreateError 表达服务身份及底层任务范围构造失败。构造失败与运行错误分开，组合处保留原始来源。
 
 应用配置使用 tok::config::{Error, Result}，Application 以 Configuration / Create / Discovery 聚合配置、构造和发现错误，Unsupported 表达应用尚未实现的可选能力。玩家参数、配置、可选操作、所有权和凭证错误直接归 player::Error，不再经 Core 包装；玩家接入运行参数单独使用 gateway::player::ConfigError。示例业务状态构造采用自己的标准 I/O 参数错误，不依赖框架根错误。
+
+## 消息与传输边界校正（2026-10-21）
+
+tok-game-rpc 已调整为 tok-message，通用正文适配独立为 tok-protobuf，tok-rpc 更名为 tok-grpc。生成协议仍在 tok-proto，不依赖执行层。门面提供 tok::protobuf、tok::message 与 tok::grpc；旧 crate 与门面路径不再提供。
+
+tok-message 根 Registry 提供不依赖 Tonic 的非零编号注册、本地分发与原始业务错误；玩家身份、事件/timer RPC 组合、线协议结果与 Status 映射集中于 message::rpc。公会示例和本地/RPC 共用处理链采用根 Registry。通用 protobuf 表继续允许字符串及零键，RPC 不自动添加锁或重试，事件与 timer 仍只能由可信服务器触发。
+
+本轮只校正库与命名空间边界，不宣称通用请求锁泛化、玩家结果模型及通知构造后续批次已经完成。请求锁目前保留在 message::rpc::lock，仍按现有 TTL 和执行预算约束运行。

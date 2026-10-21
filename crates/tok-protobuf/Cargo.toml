@@ -1,0 +1,21 @@
+[package]
+name = "tok-protobuf"
+description = "protobuf 正文与通用执行链适配"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+tok-execution.workspace = true
+prost.workspace = true
+tower.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tok-core.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+
+[lints]
+workspace = true

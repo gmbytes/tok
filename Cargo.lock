@@ -1977,13 +1977,14 @@ dependencies = [
  "tok-core",
  "tok-events",
  "tok-execution",
- "tok-game-rpc",
  "tok-gateway",
+ "tok-grpc",
  "tok-infra",
  "tok-lifecycle",
+ "tok-message",
  "tok-observability",
  "tok-player",
- "tok-rpc",
+ "tok-protobuf",
  "tokio",
  "tokio-util",
  "toml",
@@ -2036,32 +2037,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "tok-game-rpc"
-version = "0.1.0"
-dependencies = [
- "opentelemetry",
- "opentelemetry_sdk",
- "prost",
- "thiserror",
- "tok-core",
- "tok-events",
- "tok-execution",
- "tok-infra",
- "tok-lifecycle",
- "tok-player",
- "tok-proto",
- "tok-rpc",
- "tokio",
- "tokio-stream",
- "tokio-util",
- "tonic",
- "tower",
- "tracing",
- "tracing-opentelemetry",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "tok-gateway"
 version = "0.1.0"
 dependencies = [
@@ -2076,9 +2051,10 @@ dependencies = [
  "tok-core",
  "tok-events",
  "tok-execution",
- "tok-game-rpc",
+ "tok-grpc",
  "tok-infra",
  "tok-lifecycle",
+ "tok-message",
  "tok-player",
  "tokio",
  "tokio-util",
@@ -2086,6 +2062,24 @@ dependencies = [
  "tracing",
  "tracing-opentelemetry",
  "uuid",
+]
+
+[[package]]
+name = "tok-grpc"
+version = "0.1.0"
+dependencies = [
+ "metrics",
+ "opentelemetry",
+ "thiserror",
+ "tok-core",
+ "tok-execution",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "tonic",
+ "tower",
+ "tracing",
+ "tracing-opentelemetry",
 ]
 
 [[package]]
@@ -2111,6 +2105,33 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "tok-message"
+version = "0.1.0"
+dependencies = [
+ "opentelemetry",
+ "opentelemetry_sdk",
+ "prost",
+ "thiserror",
+ "tok-core",
+ "tok-events",
+ "tok-execution",
+ "tok-grpc",
+ "tok-infra",
+ "tok-lifecycle",
+ "tok-player",
+ "tok-proto",
+ "tok-protobuf",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "tonic",
+ "tower",
+ "tracing",
+ "tracing-opentelemetry",
  "tracing-subscriber",
 ]
 
@@ -2157,21 +2178,16 @@ dependencies = [
 ]
 
 [[package]]
-name = "tok-rpc"
+name = "tok-protobuf"
 version = "0.1.0"
 dependencies = [
- "metrics",
- "opentelemetry",
+ "prost",
  "thiserror",
  "tok-core",
  "tok-execution",
  "tokio",
- "tokio-stream",
  "tokio-util",
- "tonic",
  "tower",
- "tracing",
- "tracing-opentelemetry",
 ]
 
 [[package]]

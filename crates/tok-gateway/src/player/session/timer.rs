@@ -90,38 +90,40 @@ impl Scheduler {
         &self,
         last_request_id: u64,
         timer_request_id: u64,
-    ) -> Result<tok_game_rpc::protocol::internal::v1::ExecutionSnapshot> {
+    ) -> Result<tok_message::rpc::protocol::internal::v1::ExecutionSnapshot> {
         let state = self.lock_state();
         if !state.paused || state.entries.values().any(|entry| entry.tick_pending) {
             return Err(ErrorCode::InvalidState.into());
         }
-        Ok(tok_game_rpc::protocol::internal::v1::ExecutionSnapshot {
-            last_request_id,
-            timer_request_id,
-            event_request_id: 0,
-            timer_version: state.version,
-            timers: state
-                .entries
-                .values()
-                .map(
-                    |entry| tok_game_rpc::protocol::internal::v1::ScheduledTimer {
-                        version: entry.version,
-                        scheduled_at_ms: entry.scheduled_at_ms,
-                        spec: Some(tok_game_rpc::protocol::internal::v1::TimerSpec {
-                            timer_id: entry.spec.timer_id.clone(),
-                            message_id: entry.spec.message_id,
-                            body: entry.spec.body.clone(),
-                            due_at_ms: entry.spec.due_at_ms,
-                            interval_ms: entry.spec.interval_ms,
-                        }),
-                    },
-                )
-                .collect(),
-        })
+        Ok(
+            tok_message::rpc::protocol::internal::v1::ExecutionSnapshot {
+                last_request_id,
+                timer_request_id,
+                event_request_id: 0,
+                timer_version: state.version,
+                timers: state
+                    .entries
+                    .values()
+                    .map(
+                        |entry| tok_message::rpc::protocol::internal::v1::ScheduledTimer {
+                            version: entry.version,
+                            scheduled_at_ms: entry.scheduled_at_ms,
+                            spec: Some(tok_message::rpc::protocol::internal::v1::TimerSpec {
+                                timer_id: entry.spec.timer_id.clone(),
+                                message_id: entry.spec.message_id,
+                                body: entry.spec.body.clone(),
+                                due_at_ms: entry.spec.due_at_ms,
+                                interval_ms: entry.spec.interval_ms,
+                            }),
+                        },
+                    )
+                    .collect(),
+            },
+        )
     }
     pub(super) fn restore(
         &self,
-        snapshot: &tok_game_rpc::protocol::internal::v1::ExecutionSnapshot,
+        snapshot: &tok_message::rpc::protocol::internal::v1::ExecutionSnapshot,
     ) -> Result<()> {
         let specs = snapshot
             .timers

@@ -19,7 +19,7 @@ pub(super) type SessionTask = Pin<Box<dyn Future<Output = ()> + Send>>;
 
 pub(super) enum Job {
     // 按 FIFO 等待前序任务完成后采集执行快照；停止新业务与暂停 timer 由交接流程提前完成。
-    Snapshot(oneshot::Sender<Result<tok_game_rpc::protocol::internal::v1::ExecutionSnapshot>>),
+    Snapshot(oneshot::Sender<Result<tok_message::rpc::protocol::internal::v1::ExecutionSnapshot>>),
     Request(RequestJob),
     Timer(timer::Ticket),
     Event(EventJob),

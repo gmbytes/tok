@@ -1,5 +1,6 @@
 //! 真实 TCP/gRPC 双网关交接与失败边界；常规测试不依赖外部服务。
 use tok_core::BoxFuture;
+use tok_grpc::Listener;
 #[path = "support/topics.rs"]
 mod topic_support;
 
@@ -11,7 +12,6 @@ use std::{
     time::Duration,
 };
 use tok_core::ServiceDescriptor;
-use tok_game_rpc::{Listener, protocol::internal::v1 as proto};
 use tok_gateway::{
     Gateway,
     codec::{FrameCodec, VERSION},
@@ -23,6 +23,7 @@ use tok_gateway::{
     rpc::GatewayRpcService,
 };
 use tok_infra::{discovery::MemoryDirectory, ownership::MemoryOwnership};
+use tok_message::rpc::protocol::internal::v1 as proto;
 use tok_player::{
     LogicalMessage, MessageKind,
     credentials::ResumeTokenCodec,
@@ -411,7 +412,7 @@ async fn resume(fixture: &Fixture, login: &protocol::LoginResponse) -> TcpStream
 }
 async fn rpc(
     fixture: &Fixture,
-) -> proto::gateway_rpc_client::GatewayRpcClient<tok_game_rpc::tonic::transport::Channel> {
+) -> proto::gateway_rpc_client::GatewayRpcClient<tok_message::rpc::tonic::transport::Channel> {
     proto::gateway_rpc_client::GatewayRpcClient::connect(format!("http://{}", fixture.rpc_address))
         .await
         .unwrap()
@@ -1011,7 +1012,7 @@ async fn gateway_rpc_registers_player_when_handoff_is_disabled() {
     // 统一入口已登记并找到管理器；交接开关在具体操作中拒绝，不影响注册。
     assert_eq!(
         client.prepare_handoff(request).await.unwrap_err().code(),
-        tok_game_rpc::tonic::Code::InvalidArgument
+        tok_message::rpc::tonic::Code::InvalidArgument
     );
     let unknown = proto::HandoffRequest {
         source_service_name: "missing".into(),
@@ -1019,7 +1020,7 @@ async fn gateway_rpc_registers_player_when_handoff_is_disabled() {
     };
     assert_eq!(
         client.prepare_handoff(unknown).await.unwrap_err().code(),
-        tok_game_rpc::tonic::Code::Unavailable
+        tok_message::rpc::tonic::Code::Unavailable
     );
     fixture.stop().await;
 }

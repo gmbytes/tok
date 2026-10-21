@@ -13,8 +13,8 @@ use std::time::Duration;
 use tok::{
     core::Identity,
     execution::{Context, Request},
-    game_rpc::protobuf::Message,
     lifecycle::task::BoxError,
+    protobuf::Message,
 };
 use tokio_util::sync::CancellationToken;
 

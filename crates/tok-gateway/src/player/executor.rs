@@ -3,8 +3,8 @@
 use crate::{ErrorCode, Result};
 use std::{future::Future, pin::Pin, sync::Arc};
 use tok_core::ServiceRouter;
-use tok_game_rpc::CallContext;
-use tok_game_rpc::{
+use tok_message::rpc::CallContext;
+use tok_message::rpc::{
     player::Client,
     protocol::internal::v1::Payload,
     tonic::{Code, Status},
@@ -170,7 +170,7 @@ impl Executor for RpcExecutor {
                 .map_err(|status| self.mapper.map(&status))?;
             let timers = response
                 .timers
-                .map(tok_game_rpc::timer::decode_update)
+                .map(tok_message::rpc::timer::decode_update)
                 .transpose()
                 .map_err(|_| ErrorCode::Internal)?;
             if let Some(error) = response.error {
@@ -239,7 +239,7 @@ impl RpcExecutor {
                 .map_err(|status| self.mapper.map(&status))?;
             let timers = response
                 .timers
-                .map(tok_game_rpc::timer::decode_update)
+                .map(tok_message::rpc::timer::decode_update)
                 .transpose()
                 .map_err(|_| ErrorCode::Internal)?;
             if let Some(error) = response.error {

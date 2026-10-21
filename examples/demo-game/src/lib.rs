@@ -12,12 +12,13 @@ pub mod protocol;
 use prost::Message;
 use protocol::GameMessage;
 use std::{sync::Arc, time::Duration};
+use tok::grpc::Client;
 use tok::{
     AppConfig,
     application::Application,
     core::ServiceDirectory,
-    game_rpc::{CallContext, Client, RpcService, protocol::internal::v1::Payload},
     lifecycle::{Init, InitFuture, task::Task},
+    message::rpc::{CallContext, Service as RpcService, protocol::internal::v1::Payload},
     observability::Error,
     player::SessionIdentity,
 };
@@ -149,7 +150,7 @@ pub fn application_with_locks(
                     Arc::clone(&endpoints.directory),
                 )?;
                 init.extensions
-                    .get::<tok::game_rpc::Binding>()
+                    .get::<tok::message::rpc::Binding>()
                     .ok_or_else(|| std::io::Error::other("服务缺少 RPC 绑定"))?
                     .install(&init, Arc::new(handlers))?;
                 Ok(Box::pin(async move {
@@ -167,7 +168,7 @@ pub fn application_with_locks(
             Box::pin(async move {
                 let handlers = guild::locked_handler(&init.identity.service_name, locks)?;
                 init.extensions
-                    .get::<tok::game_rpc::Binding>()
+                    .get::<tok::message::rpc::Binding>()
                     .ok_or_else(|| std::io::Error::other("服务缺少 RPC 绑定"))?
                     .install(&init, handlers)?;
                 Ok(Box::pin(async move {
@@ -186,8 +187,8 @@ pub async fn rpc_smoke(directory: &dyn ServiceDirectory) -> Result<(), Error> {
     let player = tok::infra::routing::route(directory, "player", "42")?;
     let guild = tok::infra::routing::route(directory, "guild", "7")?;
     let clients = Arc::new(Client::new(Duration::from_secs(2), 8)?);
-    let player_client = tok::game_rpc::player::Client::new(Arc::clone(&clients));
-    let business_client = tok::game_rpc::business::Client::new(clients);
+    let player_client = tok::message::rpc::player::Client::new(Arc::clone(&clients));
+    let business_client = tok::message::rpc::business::Client::new(clients);
     let response = player_client
         .call(
             &player,

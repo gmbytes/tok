@@ -2,16 +2,16 @@
 use super::{Application, Error};
 use std::convert::Infallible;
 use std::{collections::BTreeMap, sync::Arc};
-use tok_game_rpc::RpcService;
-use tok_lifecycle as lifecycle;
-use tok_lifecycle::Factory;
-use tok_rpc::{
+use tok_grpc::{
     Listener,
     tonic::{body::Body, codegen::http, server::NamedService},
     tower::Service,
 };
+use tok_lifecycle as lifecycle;
+use tok_lifecycle::Factory;
+use tok_message::rpc::Service as RpcService;
 
-type EndpointBinding = Box<dyn FnOnce(Listener) -> Result<Listener, tok_rpc::Error> + Send>;
+type EndpointBinding = Box<dyn FnOnce(Listener) -> Result<Listener, tok_grpc::Error> + Send>;
 pub(super) struct Registration {
     pub(super) endpoint: String,
     pub(super) service: String,
@@ -20,7 +20,7 @@ pub(super) struct Registration {
 }
 struct FactoryBinding {
     factory: Arc<dyn Factory>,
-    bindings: BTreeMap<String, tok_game_rpc::Binding>,
+    bindings: BTreeMap<String, tok_message::rpc::Binding>,
 }
 impl Factory for FactoryBinding {
     fn initialize(&self, mut init: lifecycle::Init) -> lifecycle::InitFuture {
@@ -91,7 +91,7 @@ impl Application {
         });
         Ok(())
     }
-    /// 注册统一 RPC 工厂；按配置创建入口并将一次性 game_rpc::Binding 注入 Init.extensions。
+    /// 注册统一 RPC 工厂；按配置创建入口并将一次性 message::rpc::Binding 注入 Init.extensions。
     /// 工厂必须在初始化中安装实际状态和处理链；protocol 只选择协议，不推导业务锁或中间件。
     /// 参数校验失败不保留部分工厂或绑定；没有匹配配置时仅注册工厂。
     pub fn register_rpc_factory<S>(

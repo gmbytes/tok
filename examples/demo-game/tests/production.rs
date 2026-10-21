@@ -8,10 +8,10 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 use tok::{
-    game_rpc::{
+    infra::discovery::MemoryDirectory,
+    message::rpc::{
         CallContext, Handler, protocol::internal::v1::Payload, timer::decode_update, tonic::Code,
     },
-    infra::discovery::MemoryDirectory,
     player::TimerTrigger,
     player::{SessionIdentity, TimerUpdate},
 };

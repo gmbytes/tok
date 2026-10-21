@@ -6,10 +6,10 @@ use std::{collections::BTreeMap, future::Future, sync::Arc, time::Duration};
 use tok_core::discovery::ServiceRegistry;
 use tok_core::{Extensions, service::Identity};
 use tok_core::{ServiceDescriptor, ServiceDirectory};
+use tok_grpc::{Listener, Readiness};
 use tok_infra::discovery::{MemoryDirectory, redis::RedisDirectory};
 use tok_lifecycle as lifecycle;
 use tok_lifecycle::{Builder, Factory, Handle, task::BoxError};
-use tok_rpc::{Listener, Readiness};
 use tokio::task::{JoinError, JoinSet};
 /// 服务协作退出的取消令牌；详细 API 见 tokio-util 上游文档。
 pub use tokio_util::sync::CancellationToken;
@@ -45,7 +45,7 @@ pub enum Error {
     Discovery(#[from] tok_core::discovery::Error),
     /// RPC 入口的组装错误。
     #[error(transparent)]
-    Rpc(#[from] tok_rpc::Error),
+    Rpc(#[from] tok_grpc::Error),
     /// 配置选用的初始化工厂尚未注册。
     #[error("初始化工厂未注册：{0}")]
     MissingFactory(String),

@@ -1,0 +1,36 @@
+[package]
+name = "tok-message"
+description = "tok 编号业务消息处理与玩家 RPC 协议适配"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+tok-protobuf.workspace = true
+thiserror.workspace = true
+tok-grpc.workspace = true
+tok-execution.workspace = true
+tok-lifecycle.workspace = true
+tok-events.workspace = true
+tok-core.workspace = true
+tok-player.workspace = true
+tok-proto.workspace = true
+tonic.workspace = true
+tower.workspace = true
+prost.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tracing-opentelemetry.workspace = true
+opentelemetry.workspace = true
+tokio-stream.workspace = true
+tok-infra.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
+opentelemetry_sdk.workspace = true
+tracing-subscriber.workspace = true
+
+[lints]
+workspace = true

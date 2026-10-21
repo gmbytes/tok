@@ -37,30 +37,32 @@ pub(super) struct ReplayCache {
 }
 
 impl ReplayCache {
-    pub(super) fn snapshot(&mut self) -> tok_game_rpc::protocol::internal::v1::ChannelSnapshot {
+    pub(super) fn snapshot(&mut self) -> tok_message::rpc::protocol::internal::v1::ChannelSnapshot {
         self.evict_expired();
-        tok_game_rpc::protocol::internal::v1::ChannelSnapshot {
+        tok_message::rpc::protocol::internal::v1::ChannelSnapshot {
             published_seq: self.published_seq,
             acknowledged_seq: self.acknowledged_seq,
             replay_floor_seq: self.replay_floor_seq,
             entries: self
                 .entries
                 .iter()
-                .map(|entry| tok_game_rpc::protocol::internal::v1::ReplayEntry {
-                    seq: entry.seq,
-                    body: entry.body.to_vec(),
-                    remaining_ms: self
-                        .ttl
-                        .saturating_sub(entry.published_at.elapsed())
-                        .as_millis() as u64,
-                })
+                .map(
+                    |entry| tok_message::rpc::protocol::internal::v1::ReplayEntry {
+                        seq: entry.seq,
+                        body: entry.body.to_vec(),
+                        remaining_ms: self
+                            .ttl
+                            .saturating_sub(entry.published_at.elapsed())
+                            .as_millis() as u64,
+                    },
+                )
                 .collect(),
             ..Default::default()
         }
     }
     pub(super) fn restore(
         config: &Config,
-        snapshot: &tok_game_rpc::protocol::internal::v1::ChannelSnapshot,
+        snapshot: &tok_message::rpc::protocol::internal::v1::ChannelSnapshot,
         elapsed: Duration,
     ) -> Result<Self> {
         let mut cache = Self::new(config);

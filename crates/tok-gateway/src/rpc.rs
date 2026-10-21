@@ -6,7 +6,7 @@ use std::{
     collections::BTreeMap,
     sync::{Arc, Mutex},
 };
-use tok_game_rpc::{
+use tok_message::rpc::{
     protocol::internal::v1 as proto,
     tonic::{self, Request, Response, Status},
 };

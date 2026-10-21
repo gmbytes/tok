@@ -398,7 +398,7 @@ impl Channel {
     pub(super) fn snapshot(
         &self,
         ack: u64,
-    ) -> Result<tok_game_rpc::protocol::internal::v1::ChannelSnapshot> {
+    ) -> Result<tok_message::rpc::protocol::internal::v1::ChannelSnapshot> {
         let mut state = self.state.lock().map_err(|_| ErrorCode::Internal)?;
         if state.closed || !state.handoff {
             return Err(ErrorCode::ResumeUnavailable.into());
@@ -423,7 +423,7 @@ impl Channel {
         Ok(snapshot)
     }
     pub(super) fn restore(
-        snapshot: &tok_game_rpc::protocol::internal::v1::ChannelSnapshot,
+        snapshot: &tok_message::rpc::protocol::internal::v1::ChannelSnapshot,
         elapsed: Duration,
         config: &Config,
         cancel: CancellationToken,

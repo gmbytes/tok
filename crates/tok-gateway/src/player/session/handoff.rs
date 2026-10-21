@@ -15,7 +15,7 @@ use std::{
     sync::{Arc, Mutex, atomic::AtomicBool},
     time::Duration,
 };
-use tok_game_rpc::{
+use tok_message::rpc::{
     protocol::internal::v1 as proto,
     tonic::{self, Status},
 };

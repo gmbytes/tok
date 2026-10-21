@@ -45,7 +45,7 @@
 | 配置 | [config.rs](../crates/tok/src/config.rs) 校验节点、端点、服务引用、可观测及 player_gateway 容量和期限参数 | 中间件、生产接入安全及外部依赖配置 |
 | 服务生命周期 | [runtime.rs（现 application.rs）](../crates/tok/src/application.rs) 提供工厂注册、共享端点、就绪入口、初始化期限及失败清理 | 生产依赖就绪策略与发现后端 |
 | 发现 | [MemoryDirectory](../crates/tok-infra/src/discovery/memory.rs) 支持单进程；[RedisDirectory](../crates/tok-infra/src/discovery/redis.rs) 提供多进程开发租约注册、条件撤销、本地缓存与合并通知 | Kubernetes 本地缓存与资源映射；Redis 发现不代替 session 所有权 |
-| 协议与 RPC | [tok-rpc](../crates/tok-rpc/src/lib.rs) 提供 PlayerRpc、BusinessRpc、强类型分发、连接复用、超时、追踪传播、TowerHandler 和可选请求锁 Layer | 配置式中间件及生产调用身份认证 |
+| 协议与 RPC | [tok-rpc](../crates/tok-grpc/src/lib.rs) 提供 PlayerRpc、BusinessRpc、强类型分发、连接复用、超时、追踪传播、TowerHandler 和可选请求锁 Layer | 配置式中间件及生产调用身份认证 |
 | 网关 | [Gateway](../crates/tok-gateway/src/server.rs) 统一接收、容量及监督；[Ingress](../crates/tok-gateway/src/player/ingress.rs) 提供 TCP 认证、串行 session、所有权续租、timer、下行缓存及同网关恢复 | 生产安全及 scene 接入 |
 | 路由与 Redis | bid rendezvous 路由、Memory / Redis 所有权及请求锁、条件释放及本地时间预算检查已实现 | Cluster 拓扑与故障切换适配 |
 | 事件 | [tok-events](../crates/tok-events/src/lib.rs) 提供同步本地分发、Core NATS protobuf 编解码及网关广播/转发、本地主题筛选与交接；示例已接通 | 统一事件接口、传输主题路由与动态订阅、网关生命周期及消息 Layer；后续再做 JetStream、离线加载和去重 |
@@ -595,3 +595,11 @@ registry 注册错误定名为 Error<K>，运行失败定名为 DispatchError<K,
 应用配置使用 tok::config::{Error, Result}，Application 以 Configuration / Create / Discovery 聚合配置、构造和发现错误，Unsupported 表达应用尚未实现的可选能力。玩家参数、配置、可选操作、所有权和凭证错误直接归 player::Error，不再经 Core 包装；玩家接入运行参数单独使用 gateway::player::ConfigError。示例业务状态构造采用自己的标准 I/O 参数错误，不依赖框架根错误。
 
 本轮 Windows 验收：工作区 273 项测试通过、31 项外部专项按约定跳过，包含 15 项指南示例。全目标编译与 Clippy、workspace rustdoc、dispatch / rpc / client / application / lifecycle / execution smoke、格式、206 个文本文件 UTF-8/LF 和 82 处文档相对路径检查通过。源码扫描确认无 core::Error、core::Result 或 Error::Core 遗留，core/error.rs 已删除；回归确认停止父范围的子范围创建失败不泄漏活动记录。未运行真实 Redis/NATS、Linux 或 release 构建；随本次提交交付。
+
+## 拆分 protobuf、编号消息与 gRPC（2026-10-21）
+
+tok-game-rpc 调整为 tok-message，通用正文适配独立为 tok-protobuf，原 tok-rpc 更名为 tok-grpc。tok-proto 继续只承载生成协议。tok-message 根 Registry 负责非零编号消息的注册和本地处理，复用泛型正文适配并保留业务错误；rpc 命名空间集中玩家身份、事件/timer、协议客户端及服务端结果映射，公开入口为 rpc::Service，通用 Client / Listener 直接从 grpc 导入。门面、网关、公会本地/RPC 示例及 rustdoc 同步新路径，不提供旧 crate 或 Rust 路径别名。
+
+玩家结果模型、通知构造归属及请求锁泛化继续按后续计划推进；本轮不更改线协议、预算/取消、服务器事件隔离或无自动重试约束。
+
+本轮 Windows 验收：工作区 274 项测试通过、31 项外部专项按约定跳过，包含 15 项指南示例；零消息编号的 RPC 拒绝另补定向回归。全目标编译与 Clippy、workspace rustdoc、dispatch / rpc / client / application / lifecycle / execution 六项 smoke、格式、214 个文本文件 UTF-8/LF 和 82 处相对文档路径检查通过。正常依赖确认 tok-protobuf 不依赖 Tonic、生成协议或玩家，tok-grpc 不依赖消息、事件或玩家层。未运行真实 Redis/NATS、Linux 或 release 构建；随本次提交交付。

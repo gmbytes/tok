@@ -2,7 +2,7 @@
 
 use crate::protocol::GameMessage;
 use crate::protocol::v1::{GetGuildRequest, GetGuildResponse};
-use tok::game_rpc::protobuf::{Registry, Reply};
+use tok::message::{Registry, Reply};
 
 /// 公会业务处理错误，由 RPC 适配边界决定状态映射。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -20,7 +20,7 @@ impl std::fmt::Display for Error {
 impl std::error::Error for Error {}
 
 /// 注册可供本地和 RPC 共用的公会处理链，输入状态是已解析的公会 ID。
-pub fn handlers() -> Result<Registry<u32, u64, (), Error>, tok::execution::registry::Error<u32>> {
+pub fn handlers() -> Result<Registry<u64, (), Error>, tok::message::Error> {
     let mut registry = Registry::new();
     registry.register(
         GetGuildRequest::MESSAGE_ID,
@@ -44,15 +44,15 @@ pub fn handlers() -> Result<Registry<u32, u64, (), Error>, tok::execution::regis
 pub fn locked_handler(
     namespace: &str,
     backend: std::sync::Arc<dyn tok::core::lock::Backend>,
-) -> Result<std::sync::Arc<dyn tok::game_rpc::Handler>, tok::game_rpc::Error> {
+) -> Result<std::sync::Arc<dyn tok::message::rpc::Handler>, tok::message::rpc::Error> {
     use std::sync::Arc;
-    use tok::game_rpc::{
+    use tok::message::rpc::{
         Handler, TowerHandler, business, lock,
         tonic::Status,
         tower::{self, Layer},
     };
     let registry = Arc::new(
-        handlers().map_err(|error| tok::game_rpc::Error::Configuration(error.to_string()))?,
+        handlers().map_err(|error| tok::message::rpc::Error::Configuration(error.to_string()))?,
     );
     let adapter = Arc::new(business::Handler::new(
         registry,

@@ -7,6 +7,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+tok-protobuf.workspace = true
 tok-core.workspace = true
 tok-player.workspace = true
 tok-execution.workspace = true
@@ -14,8 +15,8 @@ tok-lifecycle.workspace = true
 tok-events.workspace = true
 tok-gateway.workspace = true
 tok-infra.workspace = true
-tok-rpc.workspace = true
-tok-game-rpc.workspace = true
+tok-grpc.workspace = true
+tok-message.workspace = true
 tok-observability.workspace = true
 tracing.workspace = true
 metrics.workspace = true
