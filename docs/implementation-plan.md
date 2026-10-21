@@ -578,3 +578,42 @@ Call::new 仍保护拆装与整个自定义派发过程，停止与原始派发�
 覆盖自有实例、共享 trait 对象、直接派发、Tower 调用、扩展、未知键与停止/超时。
 
 本轮 Windows 验收：全工作区串行测试 339 项通过、32 项外部专项默认跳过，包含 21 项指南示例；全目标 Clippy、无警告 workspace rustdoc、格式与空白检查通过。223 个文本文件 UTF-8/LF、119 处相对文档路径检查通过。未运行真实 Redis/NATS、Linux 或 release 构建。
+
+
+### 可观测事件父级与采样边界校正（2026-10-21）
+
+JSON 日志关联与追踪事件过滤按事件的显式父级或当前 span 解析 SDK Context；
+显式根不继承当前链路，未进入的显式父 span 及不同当前 span 不再造成关联丢失、串链或采样事件丢弃。
+订阅者注册时保存 WeakDispatch，避免事件回调内重复读取当前 dispatcher 得到空引用，并避免引用环。
+
+采样契约按 tracing-opentelemetry 的延迟构建行为明确：首次需要 SDK 上下文时确定，
+最迟在关闭时决定；决策前补录字段及更新规则可以生效，决策后保持原结果。
+保留决策前 set_parent 接入远端父级的能力，未强行提前启动 span。
+回归覆盖 JSON 显式父级/根/当前父级、真实 OTLP 事件导出、字段与规则更新边界和远端父级接入。
+tok-lifecycle 本轮审查未发现确定性缺陷，未变更实现。
+
+本轮 Windows 验收：全工作区串行测试 341 项通过、32 项外部专项默认跳过；全目标 Clippy、无警告 workspace rustdoc、格式、空白及 LF 检查通过。未运行真实 Redis/NATS、Linux 或 release 构建。
+
+
+### 日志过滤与上下文解析隔离校正（2026-10-21）
+
+JSON 与追踪过滤统一从事件显式父级或完整 subscriber 的 current_span 解析 OTel Context，
+不再使用日志层过滤后的 scope。日志隐藏 debug 父 span 时，INFO 事件仍关联实际父级，
+不会丢失标识或错误归属到可见祖先；显式根继续不继承当前 span。
+
+上下文 resolver 的注册层使用独立 OFF 过滤，仅保存 WeakDispatch，不参与事件和 span 准入；
+未启用 OTLP 时，日志关闭或级别不符仍跳过字段表达式，enabled! 与日志过滤保持一致。
+新增回归覆盖隐藏父级、隐藏子级、不同当前 span、显式根以及 off/info 下的禁用埋点。
+
+本轮 Windows 验收：全工作区串行测试 343 项通过、32 项外部专项默认跳过；全目标 Clippy、无警告 workspace rustdoc、格式、空白及 LF 检查通过。未运行真实 Redis/NATS、Linux 或 release 构建。
+
+
+### OTLP HTTPS 支持校正（2026-10-21）
+
+OTLP gRPC 启用 tls-ring 和系统根证书支持，HTTPS 导出器显式加载系统信任的 CA，
+校验服务端证书与主机名。HTTP 保持原有明文连接路径；私有 CA 通过系统信任库配置。
+更新 Cargo.lock，未新增 crate 版本。新增独立进程测试，覆盖 HTTPS 配置校验、
+TLS 导出器初始化与关闭；保留真实 HTTP Collector 导出回归。
+初始化使用延迟连接，不承诺 Collector 可达或 TLS 握手成功；本轮未进行外部 HTTPS Collector 验证。
+
+本轮 Windows 验收：全工作区串行测试 344 项通过、32 项外部专项默认跳过；全目标 Clippy、无警告 workspace rustdoc、格式、空白及 LF 检查通过。未运行真实 Redis/NATS、外部 HTTPS Collector、Linux 或 release 构建。

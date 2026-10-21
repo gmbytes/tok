@@ -14,6 +14,7 @@ use tracing_subscriber::{
 pub(crate) struct JsonFormatter {
     pub service_name: String,
     pub node_id: String,
+    pub contexts: crate::context::Resolver,
 }
 
 impl<S> FormatEvent<S, JsonFields> for JsonFormatter
@@ -26,7 +27,7 @@ where
         mut writer: Writer<'_>,
         event: &Event<'_>,
     ) -> fmt::Result {
-        let context = opentelemetry::Context::current();
+        let context = self.contexts.event_context(event);
         let span = context.span();
         let span_context = span.span_context();
         let mut output = String::new();

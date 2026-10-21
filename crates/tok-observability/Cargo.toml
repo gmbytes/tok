@@ -19,10 +19,10 @@ metrics-exporter-prometheus.workspace = true
 opentelemetry.workspace = true
 opentelemetry_sdk.workspace = true
 opentelemetry-otlp.workspace = true
+tonic.workspace = true
 axum.workspace = true
 
 [dev-dependencies]
-tonic.workspace = true
 opentelemetry-proto.workspace = true
 tokio-stream.workspace = true
 

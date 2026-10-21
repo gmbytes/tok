@@ -331,10 +331,17 @@ Application 默认每服务允许 64 个后台名额，可用 [`application::App
 在 Tokio 运行时内调用 [`observability::Observability::init`]，每个进程初始化一次。
 服务结束后调用 [`observability::Observability::shutdown`]，关闭指标端口并刷新追踪。
 默认启用 INFO 文本日志；Prometheus 端口和 OTLP 导出按配置开启。
+OTLP gRPC 支持 `http://` 与 `https://`。HTTPS 使用系统信任的 CA 校验证书与主机名；私有 CA 需安装到系统信任库。
+初始化仅构建延迟连接的导出器，成功不表示已连接 Collector 或完成 TLS 握手。
 
 `RUST_LOG` 覆盖初始日志过滤规则。运行时可通过 [`observability::LogControl`]
 调整日志过滤，通过 [`observability::TraceControl`] 调整采样规则。
 无效规则会保留原配置；日志过滤与追踪采样分别管理。
+采样延迟到首次需要 span 的 SDK 上下文时确定，包括进入、读取 context、处理关联事件或作为子 span 的父级，最迟在关闭时决定。
+创建 span 本身不冻结规则与字段；决策前的 `record` 和配置更新可以生效，决策后不会改变该 span 的采样结果。
+接入远端上下文的 `set_parent` 必须在决策前调用；如需立即固定结果，可在设置父级和初始字段后读取 `context()`。
+JSON 的 trace_id / span_id 与追踪事件过滤均遵循事件自身的父级；显式 `parent: None` 不继承当前 span，显式父级也不要求先 enter。父 span 被日志级别过滤隐藏时，关联仍以完整 tracing 父级为准。
+上下文解析设施不单独启用埋点；未启用 OTLP 时，日志过滤仍会跳过已关闭的事件、span 及其字段表达式。
 
 ```toml
 [observability]

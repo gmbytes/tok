@@ -9,7 +9,7 @@ use opentelemetry::{
 };
 use opentelemetry_sdk::trace::{Sampler, SamplingResult, ShouldSample};
 use serde::Deserialize;
-use tracing::{Metadata, Subscriber};
+use tracing::{Event, Metadata, Subscriber};
 use tracing_subscriber::{
     filter::Targets,
     layer::{Context as LayerContext, Filter},
@@ -25,7 +25,8 @@ pub struct ForceTraceRule {
     pub span: Option<String>,
     /// 需要精确匹配的 tracing target；None 不限制模块。
     pub target: Option<String>,
-    /// 创建 span 时提供的标量字段，全部匹配才命中此规则。
+    /// 采样决策时已有的标量字段，全部匹配才命中此规则。
+    /// 仅采样决策前补录的字段可以参与匹配，决策时机见 TraceControl。
     pub fields: BTreeMap<String, serde_json::Value>,
 }
 
@@ -101,7 +102,12 @@ impl State {
     }
 }
 
-/// 与 SDK sampler 共享快照，更新影响后续采样决定，不修改已开始的 span。
+/// 与 SDK sampler 共享配置，更新影响尚未确定采样的 span。
+///
+/// SDK 延迟到首次需要追踪上下文时确定采样，包括进入、读取上下文、处理关联事件、
+/// 作为新 span 的父级，最迟在关闭时决定；
+/// 创建 span 本身不冻结配置或字段。决策后补录字段、更新配置均不改变该 span 的采样，
+/// 但后续创建的子 span 仍可命中新的强规则。set_parent 须在决策前调用。
 #[derive(Debug, Clone)]
 pub struct TraceControl {
     state: Arc<RwLock<Arc<State>>>,
@@ -258,20 +264,26 @@ impl ShouldSample for RuleSampler {
     }
 }
 
-/// 所有 span 进入 SDK 以读取创建字段并沿用父级决定，普通根 span 在 sampler 中过滤。
+/// 所有 span 进入 SDK，以决策时的字段沿用父级决定，普通根 span 在 sampler 中过滤。
 /// 不以 metadata 预过滤 span，避免字段规则或已采样链路被截断。
-pub(crate) struct TraceFilter(pub TraceControl);
+pub(crate) struct TraceFilter {
+    pub control: TraceControl,
+    pub contexts: crate::context::Resolver,
+}
 
 impl<S: Subscriber> Filter<S> for TraceFilter {
-    fn enabled(&self, metadata: &Metadata<'_>, _: &LayerContext<'_, S>) -> bool {
-        if metadata.is_span() {
-            return true;
-        }
-        let context = Context::current();
+    fn enabled(&self, _: &Metadata<'_>, _: &LayerContext<'_, S>) -> bool {
+        // metadata 尚未包含事件父级，必须延迟到 event_enabled 判断。
+        true
+    }
+
+    fn event_enabled(&self, event: &Event<'_>, _: &LayerContext<'_, S>) -> bool {
+        let context = self.contexts.event_context(event);
         if context.span().span_context().is_sampled() {
             return true;
         }
-        self.0.state.read().is_ok_and(|state| {
+        let metadata = event.metadata();
+        self.control.state.read().is_ok_and(|state| {
             state
                 .targets
                 .would_enable(metadata.target(), metadata.level())

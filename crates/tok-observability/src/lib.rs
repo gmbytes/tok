@@ -2,6 +2,7 @@
 
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
 
+mod context;
 mod json;
 mod sampling;
 pub use sampling::{ForceTraceRule, SamplingConfig, TraceControl};
@@ -14,7 +15,7 @@ use std::{
 
 use axum::{Router, routing::get};
 use opentelemetry::{KeyValue, global, trace::TracerProvider};
-use opentelemetry_otlp::WithExportConfig;
+use opentelemetry_otlp::{WithExportConfig, WithTonicConfig};
 use opentelemetry_sdk::{Resource, propagation::TraceContextPropagator, trace::SdkTracerProvider};
 use serde::Deserialize;
 use tokio::task::JoinSet;
@@ -58,7 +59,8 @@ pub struct Config {
     pub log_format: LogFormat,
     /// None 禁用指标端口，Some 时仅提供 /metrics。
     pub metrics_address: Option<SocketAddr>,
-    /// None 禁用导出；Some 为 OTLP gRPC Collector 地址。
+    /// None 禁用导出；Some 为 HTTP/HTTPS OTLP gRPC Collector 地址。
+    /// HTTPS 校验证书及主机名，使用操作系统信任的 CA。
     pub otlp_endpoint: Option<String>,
     /// 普通根 span 的级别和模块过滤规则。
     pub trace_filter: String,
@@ -178,7 +180,15 @@ impl Observability {
                 let exporter = opentelemetry_otlp::SpanExporter::builder()
                     .with_tonic()
                     .with_endpoint(endpoint)
-                    .with_timeout(Duration::from_secs(3))
+                    .with_timeout(Duration::from_secs(3));
+                let exporter =
+                    if endpoint.parse::<axum::http::Uri>()?.scheme_str() == Some("https") {
+                        exporter.with_tls_config(
+                            tonic::transport::ClientTlsConfig::new().with_native_roots(),
+                        )
+                    } else {
+                        exporter
+                    }
                     .build()?;
                 Some(
                     SdkTracerProvider::builder()
@@ -195,13 +205,17 @@ impl Observability {
             }
             None => None,
         };
+        let contexts = context::Resolver::default();
         let trace_layer = provider.as_ref().map(|provider| {
             tracing_opentelemetry::layer()
                 .with_tracer(provider.tracer("tok"))
                 .with_context_activation(true)
                 .with_level(true)
                 .with_target(true)
-                .with_filter(sampling::TraceFilter(traces.clone()))
+                .with_filter(sampling::TraceFilter {
+                    control: traces.clone(),
+                    contexts: contexts.clone(),
+                })
         });
         let log_layer = match config.log_format {
             LogFormat::Text => tracing_subscriber::fmt::layer().with_filter(filter).boxed(),
@@ -210,6 +224,7 @@ impl Observability {
                 .event_format(json::JsonFormatter {
                     service_name: service_name.into(),
                     node_id: node_id.into(),
+                    contexts: contexts.clone(),
                 })
                 .with_filter(filter)
                 .boxed(),
@@ -217,6 +232,7 @@ impl Observability {
         tracing_subscriber::registry()
             .with(log_layer)
             .with(trace_layer)
+            .with(contexts.layer())
             .try_init()?;
         global::set_text_map_propagator(TraceContextPropagator::new());
         let mut result = Self {
@@ -415,6 +431,7 @@ mod tests {
         let provider = SdkTracerProvider::builder().build();
         let bytes = Arc::new(Mutex::new(Vec::new()));
         let writer = Buffer(Arc::clone(&bytes));
+        let contexts = context::Resolver::default();
         let subscriber = tracing_subscriber::registry()
             .with(
                 tracing_subscriber::fmt::layer()
@@ -422,6 +439,7 @@ mod tests {
                     .event_format(json::JsonFormatter {
                         service_name: "game".into(),
                         node_id: "node".into(),
+                        contexts: contexts.clone(),
                     })
                     .with_writer(move || writer.clone()),
             )
@@ -429,7 +447,8 @@ mod tests {
                 tracing_opentelemetry::layer()
                     .with_tracer(provider.tracer("test"))
                     .with_context_activation(true),
-            );
+            )
+            .with(contexts.layer());
         tracing::subscriber::with_default(subscriber, || {
             let span = tracing::info_span!("request", player_id = 123);
             let _entered = span.enter();
@@ -442,5 +461,227 @@ mod tests {
         assert_eq!(value["span_id"].as_str().unwrap().len(), 16);
         assert_eq!(value["fields"]["message"], "test");
         provider.shutdown().unwrap();
+    }
+    #[test]
+    fn json_correlation_follows_event_parent_instead_of_ambient_span() {
+        use opentelemetry::trace::TraceContextExt;
+
+        let provider = SdkTracerProvider::builder().build();
+        let bytes = Arc::new(Mutex::new(Vec::new()));
+        let writer = Buffer(Arc::clone(&bytes));
+        let contexts = context::Resolver::default();
+        let subscriber = tracing_subscriber::registry()
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .json()
+                    .event_format(json::JsonFormatter {
+                        service_name: "game".into(),
+                        node_id: "node".into(),
+                        contexts: contexts.clone(),
+                    })
+                    .with_writer(move || writer.clone()),
+            )
+            .with(
+                tracing_opentelemetry::layer()
+                    .with_tracer(provider.tracer("test"))
+                    .with_context_activation(true),
+            )
+            .with(contexts.layer());
+        tracing::subscriber::with_default(subscriber, || {
+            let parent = tracing::info_span!(parent: None, "explicit_parent");
+            // 关联事件也可以是尚未进入的 span 的首次使用。
+            tracing::info!(parent: &parent, "explicit_without_ambient");
+            let expected = parent.context();
+            let expected = expected.span().span_context().clone();
+            let other = tracing::info_span!(parent: None, "other");
+            let _entered = other.enter();
+            tracing::info!(parent: &parent, "explicit_with_other_ambient");
+            tracing::info!(parent: None, "explicit_root");
+            tracing::info!("contextual");
+            let text = String::from_utf8(bytes.lock().unwrap().clone()).unwrap();
+            let logs: Vec<serde_json::Value> = text
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect();
+            assert_eq!(logs.len(), 4);
+            for log in &logs[..2] {
+                assert_eq!(log["trace_id"], expected.trace_id().to_string());
+                assert_eq!(log["span_id"], expected.span_id().to_string());
+            }
+            assert!(logs[2].get("trace_id").is_none());
+            assert!(logs[2].get("span_id").is_none());
+            assert_eq!(
+                logs[3]["span_id"],
+                other.context().span().span_context().span_id().to_string()
+            );
+        });
+        provider.shutdown().unwrap();
+    }
+
+    #[test]
+    fn sampling_freezes_at_first_context_use_and_preserves_remote_parent_setup() {
+        use opentelemetry::trace::{
+            SpanContext, SpanId, TraceContextExt, TraceFlags, TraceId, TraceState,
+        };
+
+        let control = TraceControl::new(SamplingConfig {
+            filter: "off".into(),
+            ratio: 0.0,
+            force_rules: Vec::new(),
+        })
+        .unwrap();
+        let provider = SdkTracerProvider::builder()
+            .with_sampler(sampling::RuleSampler(control.clone()))
+            .build();
+        let subscriber = tracing_subscriber::registry().with(
+            tracing_opentelemetry::layer()
+                .with_tracer(provider.tracer("test"))
+                .with_context_activation(true),
+        );
+        tracing::subscriber::with_default(subscriber, || {
+            let pending =
+                tracing::info_span!(parent: None, "pending", player_id = tracing::field::Empty);
+            let decided =
+                tracing::info_span!(parent: None, "decided", player_id = tracing::field::Empty);
+            assert!(!decided.context().span().span_context().is_sampled());
+            control
+                .set_force_rules(vec![ForceTraceRule {
+                    fields: std::collections::BTreeMap::from([(
+                        "player_id".into(),
+                        serde_json::json!(123),
+                    )]),
+                    ..ForceTraceRule::default()
+                }])
+                .unwrap();
+            pending.record("player_id", 123_u64);
+            decided.record("player_id", 123_u64);
+            assert!(pending.context().span().span_context().is_sampled());
+            assert!(!decided.context().span().span_context().is_sampled());
+            control.set_force_rules(Vec::new()).unwrap();
+            assert!(pending.context().span().span_context().is_sampled());
+            let incoming = tracing::info_span!(parent: None, "incoming");
+            let remote = SpanContext::new(
+                TraceId::from(23),
+                SpanId::from(42),
+                TraceFlags::SAMPLED,
+                true,
+                TraceState::default(),
+            );
+            incoming
+                .set_parent(opentelemetry::Context::new().with_remote_span_context(remote.clone()))
+                .unwrap();
+            let context = incoming.context();
+            assert_eq!(context.span().span_context().trace_id(), remote.trace_id());
+            assert!(context.span().span_context().is_sampled());
+        });
+        provider.shutdown().unwrap();
+    }
+
+    #[test]
+    fn json_correlation_ignores_log_span_filtering() {
+        use opentelemetry::trace::TraceContextExt;
+
+        let provider = SdkTracerProvider::builder().build();
+        let bytes = Arc::new(Mutex::new(Vec::new()));
+        let writer = Buffer(Arc::clone(&bytes));
+        let contexts = context::Resolver::default();
+        let subscriber = tracing_subscriber::registry()
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .json()
+                    .event_format(json::JsonFormatter {
+                        service_name: "game".into(),
+                        node_id: "node".into(),
+                        contexts: contexts.clone(),
+                    })
+                    .with_writer(move || writer.clone())
+                    .with_filter(parse_filter("info").unwrap()),
+            )
+            .with(
+                tracing_opentelemetry::layer()
+                    .with_tracer(provider.tracer("test"))
+                    .with_context_activation(true),
+            )
+            .with(contexts.layer());
+        tracing::subscriber::with_default(subscriber, || {
+            let parent = tracing::debug_span!(parent: None, "hidden_parent");
+            tracing::info!(parent: &parent, "explicit_hidden_parent");
+            let ancestor = tracing::info_span!(parent: None, "visible_ancestor");
+            let _ancestor = ancestor.enter();
+            let child = tracing::debug_span!("hidden_child");
+            let _child = child.enter();
+            tracing::info!("contextual_hidden_child");
+            tracing::info!(parent: &parent, "explicit_with_other_ambient");
+            tracing::info!(parent: None, "explicit_root");
+            let text = String::from_utf8(bytes.lock().unwrap().clone()).unwrap();
+            let logs: Vec<serde_json::Value> = text
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect();
+            assert_eq!(logs.len(), 4);
+            let expected = parent.context();
+            for log in [&logs[0], &logs[2]] {
+                assert_eq!(
+                    log["trace_id"],
+                    expected.span().span_context().trace_id().to_string()
+                );
+                assert_eq!(
+                    log["span_id"],
+                    expected.span().span_context().span_id().to_string()
+                );
+            }
+            assert_eq!(
+                logs[1]["span_id"],
+                child.context().span().span_context().span_id().to_string()
+            );
+            assert_ne!(
+                logs[1]["span_id"],
+                ancestor
+                    .context()
+                    .span()
+                    .span_context()
+                    .span_id()
+                    .to_string()
+            );
+            assert!(logs[3].get("trace_id").is_none());
+            assert!(logs[3].get("span_id").is_none());
+        });
+        provider.shutdown().unwrap();
+    }
+
+    #[test]
+    fn context_registration_does_not_enable_filtered_instrumentation() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        for directive in ["off", "info"] {
+            let subscriber = tracing_subscriber::registry()
+                .with(
+                    tracing_subscriber::fmt::layer()
+                        .with_writer(std::io::sink)
+                        .with_filter(parse_filter(directive).unwrap()),
+                )
+                .with(context::Resolver::default().layer());
+            tracing::subscriber::with_default(subscriber, || {
+                assert!(!tracing::enabled!(tracing::Level::TRACE));
+                assert!(!tracing::enabled!(tracing::Level::DEBUG));
+                assert_eq!(tracing::enabled!(tracing::Level::INFO), directive == "info");
+                let evaluated = AtomicBool::new(false);
+                tracing::trace!(
+                    value = {
+                        evaluated.store(true, Ordering::SeqCst);
+                        42
+                    }
+                );
+                let span = tracing::debug_span!(
+                    "disabled",
+                    value = {
+                        evaluated.store(true, Ordering::SeqCst);
+                        42
+                    }
+                );
+                assert!(span.is_disabled());
+                assert!(!evaluated.load(Ordering::SeqCst));
+            });
+        }
     }
 }

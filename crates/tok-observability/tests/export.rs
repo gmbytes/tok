@@ -91,8 +91,15 @@ async fn metrics_are_scrapable_and_traces_survive_log_filter_changes() {
     }
     {
         let root = tracing::debug_span!("forced_request", player_id = 123_u64);
+        tracing::trace!(parent: &root, "explicit_before_enter");
         assert!(root.context().span().span_context().is_sampled());
+        {
+            let other = tracing::info_span!(parent: None, "other_unsampled");
+            let _entered = other.enter();
+            tracing::trace!(parent: &root, "explicit_under_unsampled");
+        }
         let _entered = root.enter();
+        tracing::trace!(parent: None, "root_must_not_attach");
         // 移除规则不改变已经开始的链路，过滤关闭的子 span 仍继承采样。
         telemetry.traces.set_force_rules(Vec::new()).unwrap();
         let child = tracing::trace_span!("forced_child");
@@ -178,6 +185,18 @@ async fn metrics_are_scrapable_and_traces_survive_log_filter_changes() {
         .iter()
         .find(|span| span.name == "forced_request")
         .unwrap();
+    for name in ["explicit_before_enter", "explicit_under_unsampled"] {
+        assert!(
+            forced.events.iter().any(|event| event.name == name),
+            "missing event: {name}"
+        );
+    }
+    assert!(
+        !forced
+            .events
+            .iter()
+            .any(|event| event.name == "root_must_not_attach")
+    );
     let child = spans
         .iter()
         .find(|span| span.name == "forced_child")
