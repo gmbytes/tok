@@ -80,7 +80,7 @@ async fn arbitrary_client_protocol_gets_a_deadline_without_business_types() {
         )
         .await
         .unwrap();
-    assert_eq!(result, 6);
+    assert_eq!(result.output, 6);
 }
 
 fn target() -> ServiceDescriptor {
@@ -232,13 +232,17 @@ async fn custom_endpoint_factory_uses_cache_and_can_be_replaced() {
 
 async fn borrowed_sender(
     call: tok_execution::Request<tok_grpc::Outgoing<&mut String>>,
-) -> Result<tonic::Response<usize>, tonic::Status> {
+) -> Result<tok_execution::Response<tonic::Response<usize>>, tonic::Status> {
     let (_, request) = call.input.into_parts(&call.context)?;
     assert_eq!(request.metadata().get("x-policy").unwrap(), "checked");
     let value = request.into_inner();
     tokio::task::yield_now().await;
     value.push_str(" sender");
-    Ok(tonic::Response::new(value.len()))
+    let mut response = tok_execution::Response::new(tonic::Response::new(value.len()));
+    response
+        .extensions_mut()
+        .insert(String::from("sender-result"));
+    Ok(response)
 }
 
 #[tokio::test]
@@ -269,7 +273,11 @@ async fn outgoing_tower_chain_receives_target_and_can_mutate_borrowed_input() {
         .await
         .unwrap();
     assert_eq!(value, "source middleware sender");
-    assert_eq!(result, value.len());
+    assert_eq!(
+        result.extensions().get::<String>().unwrap(),
+        "sender-result"
+    );
+    assert_eq!(result.output, value.len());
 }
 
 #[derive(Clone)]
@@ -278,7 +286,7 @@ struct ReadinessProbe {
     calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
 impl tower::Service<tok_execution::Request<tok_grpc::Outgoing<()>>> for ReadinessProbe {
-    type Response = tonic::Response<()>;
+    type Response = tok_execution::Response<tonic::Response<()>>;
     type Error = tonic::Status;
     type Future = std::future::Ready<Result<Self::Response, Self::Error>>;
     fn poll_ready(
@@ -296,7 +304,7 @@ impl tower::Service<tok_execution::Request<tok_grpc::Outgoing<()>>> for Readines
     }
     fn call(&mut self, _: tok_execution::Request<tok_grpc::Outgoing<()>>) -> Self::Future {
         self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        std::future::ready(Ok(tonic::Response::new(())))
+        std::future::ready(Ok(tok_execution::Response::new(tonic::Response::new(()))))
     }
 }
 
@@ -351,7 +359,7 @@ async fn outgoing_sender_shortens_remote_budget_after_middleware_wait_and_keeps_
                 .unwrap()
                 .remaining();
             assert!(after + Duration::from_millis(20) < before);
-            Ok::<_, tonic::Status>(tonic::Response::new(after))
+            Ok::<_, tonic::Status>(tok_execution::Response::new(tonic::Response::new(after)))
         },
     );
     let mut request = tonic::Request::new(());
@@ -361,6 +369,7 @@ async fn outgoing_sender_shortens_remote_budget_after_middleware_wait_and_keeps_
             .execute_service(&target(), 1, root(request, tracing::Span::none()), service)
             .await
             .unwrap()
+            .output
             < Duration::from_millis(180)
     );
     // 中间件主动缩短的远端期限不被发送器放大。
@@ -373,7 +382,7 @@ async fn outgoing_sender_shortens_remote_budget_after_middleware_wait_and_keeps_
                 .unwrap()
                 .remaining();
             assert!(remaining <= Duration::from_millis(5));
-            Ok::<_, tonic::Status>(tonic::Response::new(()))
+            Ok::<_, tonic::Status>(tok_execution::Response::new(tonic::Response::new(())))
         },
     );
     client
@@ -394,7 +403,7 @@ async fn outgoing_sender_shortens_remote_budget_after_middleware_wait_and_keeps_
                 .unwrap()
                 .remaining();
             assert!(remaining <= Duration::from_millis(5));
-            Ok::<_, tonic::Status>(tonic::Response::new(()))
+            Ok::<_, tonic::Status>(tok_execution::Response::new(tonic::Response::new(())))
         },
     );
     client
@@ -419,7 +428,8 @@ async fn outgoing_work_timeout_is_not_retried_and_invalid_budget_skips_readiness
     let observed = Arc::clone(&calls);
     let service = tower::service_fn(move |_: tok_execution::Request<tok_grpc::Outgoing<()>>| {
         observed.fetch_add(1, Ordering::SeqCst);
-        std::future::pending::<Result<tonic::Response<()>, tonic::Status>>()
+        std::future::pending::<Result<tok_execution::Response<tonic::Response<()>>, tonic::Status>>(
+        )
     });
     let error = client
         .execute_service(
@@ -472,12 +482,15 @@ async fn client_layer_preserves_borrowed_input_and_response_metadata() {
                 .insert("x-policy", "checked".parse().unwrap());
             call
         })
-        .map_response(|mut response: tonic::Response<usize>| {
-            response
-                .metadata_mut()
-                .insert("x-response", "retained".parse().unwrap());
-            response
-        })
+        .map_response(
+            |mut response: tok_execution::Response<tonic::Response<usize>>| {
+                response
+                    .output
+                    .metadata_mut()
+                    .insert("x-response", "retained".parse().unwrap());
+                response
+            },
+        )
         .service(tower::service_fn(borrowed_sender));
     let mut value = String::from("direct");
     let response = service
@@ -491,8 +504,11 @@ async fn client_layer_preserves_borrowed_input_and_response_metadata() {
         ))
         .await
         .unwrap();
-    assert_eq!(response.metadata().get("x-response").unwrap(), "retained");
-    assert_eq!(*response.get_ref(), value.len());
+    assert_eq!(
+        response.output.metadata().get("x-response").unwrap(),
+        "retained"
+    );
+    assert_eq!(*response.output.get_ref(), value.len());
     assert_eq!(value, "direct sender");
 }
 
@@ -509,7 +525,7 @@ async fn outer_client_policy_can_reject_before_connection_preparation() {
             |_: tok_execution::Request<Outgoing<()>>| async {
                 panic!("rejected call must not dispatch");
                 #[allow(unreachable_code)]
-                Ok::<_, tonic::Status>(tonic::Response::new(()))
+                Ok::<_, tonic::Status>(tok_execution::Response::new(tonic::Response::new(())))
             },
         ));
     let service = tower::service_fn(move |call: tok_execution::Request<Call<()>>| {
@@ -566,7 +582,7 @@ async fn cloned_client_layer_shares_cache_and_bounds_inner_readiness() {
             |_: tok_execution::Request<tok_grpc::Outgoing<()>>| async {
                 panic!("no permit available");
                 #[allow(unreachable_code)]
-                Ok::<_, tonic::Status>(tonic::Response::new(()))
+                Ok::<_, tonic::Status>(tok_execution::Response::new(tonic::Response::new(())))
             },
         ));
     for service in [service.clone(), service] {
@@ -663,7 +679,7 @@ async fn convenience_callback_can_consume_non_clone_capture_and_borrowed_input()
         .await
         .unwrap();
     assert_eq!(value, "borrowed once");
-    assert_eq!(size, value.len());
+    assert_eq!(size.output, value.len());
 }
 
 fn root<T>(input: T, span: tracing::Span) -> tok_execution::Request<T> {
@@ -691,7 +707,6 @@ async fn outgoing_context_keeps_local_identity_extensions_and_elapsed_upstream_b
         .context
         .with_budget_limit(Duration::from_millis(300));
     request
-        .context
         .extensions_mut()
         .insert(String::from("outer-policy"));
     let original = request.context.deadline();
@@ -699,10 +714,7 @@ async fn outgoing_context_keeps_local_identity_extensions_and_elapsed_upstream_b
     let service = tower::service_fn(
         move |call: tok_execution::Request<tok_grpc::Outgoing<()>>| async move {
             assert_eq!(call.context.service().service_name, "test-caller");
-            assert_eq!(
-                call.context.extensions().get::<String>().unwrap(),
-                "outer-policy"
-            );
+            assert_eq!(call.extensions().get::<String>().unwrap(), "outer-policy");
             assert!(call.context.deadline() <= original);
             assert_eq!(call.input.target().service_name, "custom");
             let (_, request) = call.input.into_parts(&call.context)?;
@@ -710,7 +722,7 @@ async fn outgoing_context_keeps_local_identity_extensions_and_elapsed_upstream_b
                 .context(request.metadata(), "remote")
                 .unwrap();
             assert!(remote.remaining() < Duration::from_millis(280));
-            Ok::<_, tonic::Status>(tonic::Response::new(()))
+            Ok::<_, tonic::Status>(tok_execution::Response::new(tonic::Response::new(())))
         },
     );
     client

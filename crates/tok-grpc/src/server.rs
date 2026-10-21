@@ -1,5 +1,5 @@
 //! 服务端 metadata 到执行上下文的边界转换及标准 Tower 执行链。
-//! Server 负责配置与 context，Layer / Service 负责执行和结果映射。
+//! Server 负责配置与请求构造，Layer / Service 负责执行和结果映射。
 mod middleware;
 pub use middleware::{Layer, ResponseFuture, Service};
 use std::time::Duration;
@@ -52,7 +52,7 @@ impl Server {
         self.extensions = extensions;
         Ok(self)
     }
-    /// 从 RPC 元数据建立原调用范围；稳定操作名及协议扩展由可信适配器提供。
+    /// 从 RPC 元数据建立执行范围，不安装扩展；框架入口应使用 request 构造完整请求。
     pub fn context(
         &self,
         metadata: &MetadataMap,
@@ -66,7 +66,7 @@ impl Server {
             reason = "追踪关联失败不能中断有效调用。"
         )]
         let _ = span.set_parent(crate::propagation::extract(metadata));
-        let mut context = Context::new(
+        let context = Context::new(
             self.identity.clone(),
             operation,
             budget,
@@ -74,8 +74,17 @@ impl Server {
         )
         .map_err(|_| Status::invalid_argument("调用执行上下文无效"))?
         .with_span(span);
-        *context.extensions_mut() = self.extensions.clone();
         Ok(context)
+    }
+    /// 从 metadata 建立执行请求，安装本服务的本地输入能力。
+    pub fn request<T>(
+        &self,
+        metadata: &MetadataMap,
+        operation: impl Into<String>,
+        input: T,
+    ) -> Result<Request<T>, Status> {
+        Ok(Request::new(self.context(metadata, operation)?, input)
+            .with_extensions(self.extensions.clone()))
     }
     /// 构造标准 Tower 执行 Layer，复用本入口的服务身份校验和共同执行约束。
     pub fn layer(&self) -> Layer {
@@ -84,7 +93,7 @@ impl Server {
 
     /// 执行任意类型化协议入口，包含就绪等待、取消、期限和指标；不隐式入队或重试。
     ///
-    /// 请求上下文应由本入口的 context 建立或从中派生；此方法保留其原期限与停止信号。
+    /// 请求应由本入口的 request 建立或从其范围派生；保留原期限、停止信号与输入扩展。
     pub async fn execute<T, R, S>(&self, request: Request<T>, service: S) -> Result<R, Status>
     where
         S: tower::Service<Request<T>, Response = R, Error = Status> + Clone,

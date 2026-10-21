@@ -6,7 +6,7 @@ use tok::{
     application::CancellationToken,
     core::Identity as SessionOwner,
     core::service::Identity,
-    execution::{Context, Layer as ExecutionLayer, Request},
+    execution::{Context, Layer as ExecutionLayer, Request, Response},
     gateway::{Gateway, player},
     infra::ownership::MemoryOwnership,
     lifecycle::task,
@@ -48,14 +48,14 @@ fn context(service: &str, operation: &str) -> Result<Context, tok::execution::Co
         CancellationToken::new(),
     )
 }
-async fn add(request: Request<(&mut State, &Added)>) -> io::Result<()> {
+async fn add(request: Request<(&mut State, &Added)>) -> io::Result<Response<()>> {
     tokio::task::yield_now().await;
     let (state, event) = request.input;
     state.value = state
         .value
         .checked_add(event.amount)
         .ok_or_else(|| io::Error::other("数值溢出"))?;
-    Ok(())
+    Ok(Response::new(()))
 }
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -66,10 +66,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             request
                 .input
                 .checked_add(1)
-                .ok_or_else(|| io::Error::other("数值溢出")),
+                .ok_or_else(|| io::Error::other("数值溢出"))
+                .map(Response::new),
         )
     }));
-    let response = rpc.oneshot(Request::new(parent.clone(), 41)).await?;
+    let response = rpc.oneshot(Request::new(parent.clone(), 41)).await?.output;
     let mut state = State::default();
     let event = Added { amount: response };
     let event_context = parent.child("counter.added")?;
@@ -77,16 +78,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .layer(service_fn(add))
         .oneshot(Request::new(event_context, (&mut state, &event)))
         .await?;
-    let mut timer = parent.child("counter.tick")?;
+    let mut timer = Request::new(parent.child("counter.tick")?, ());
     timer.extensions_mut().insert(Tick);
     let tick = ExecutionLayer
         .layer(service_fn(|request: Request<()>| {
-            std::future::ready(Ok::<_, io::Error>(
-                request.context.extensions().get::<Tick>().is_some(),
-            ))
+            std::future::ready(Ok::<_, io::Error>(Response::new(
+                request.extensions().get::<Tick>().is_some(),
+            )))
         }))
-        .oneshot(Request::new(timer, ()))
-        .await?;
+        .oneshot(timer)
+        .await?
+        .output;
 
     // gateway 只添加自身能力，同一执行设施没有 gateway 依赖，也未改现有 worker。
     let config = player::Config::default();
@@ -103,21 +105,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             Arc::new(ReadOnly),
         )
     })?;
-    let mut gateway_context = context("gateway", "gateway.sessions")?;
-    drop(gateway_context.extensions_mut().insert(gateway.tasks()));
+    let mut gateway_request = Request::new(context("gateway", "gateway.sessions")?, ());
+    drop(gateway_request.extensions_mut().insert(gateway.tasks()));
     drop(
-        gateway_context
+        gateway_request
             .extensions_mut()
             .insert(gateway.ingress().sessions()),
     );
     let query = ExecutionLayer.layer(service_fn(|request: Request<()>| async move {
         let tasks = request
-            .context
             .extensions()
             .get::<task::Handle>()
             .ok_or_else(|| io::Error::other("缺少网关能力"))?;
         let sessions = request
-            .context
             .extensions()
             .get::<player::SessionManager>()
             .ok_or_else(|| io::Error::other("缺少会话目录"))?;
@@ -126,10 +126,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         }
         sessions
             .sessions()
-            .map(|sessions| sessions.len())
+            .map(|sessions| Response::new(sessions.len()))
             .map_err(io::Error::other)
     }));
-    let sessions = query.oneshot(Request::new(gateway_context, ())).await?;
+    let sessions = query.oneshot(gateway_request).await?.output;
     if response != 42 || state.value != 42 || !tick || sessions != 0 {
         return Err(io::Error::other("统一执行示例结果不符合预期").into());
     }

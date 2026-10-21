@@ -9,7 +9,7 @@ tok 是实验性的 Rust 游戏服务器框架。游戏通过本 crate 组装组
 | 范围 | 接口与边界 |
 | --- | --- |
 | 服务构建与运行 | Factory / Init / Builder / Running；Application 按配置组装，Gateway 作为扩展 |
-| 统一处理协议 | Request / execution::Context / Tower Layer；保留各入口的输入、结果及调度约束 |
+| 统一处理协议 | Request / Response / execution::Context / Tower Layer；保留各入口的输入、结果及调度约束 |
 | RPC 与事件 | 配置驱动的 RPC 工厂、统一事件 Registry，本地借用与远程解码共用处理链 |
 | 主题兴趣 | Event::topic 决定路由，Pool 聚合固定与会话兴趣，group 属于订阅组件 |
 | 生命周期扩展 | 网关、管理器、会话快照与结束等待，会话状态工厂及显式交接适配 |
@@ -120,7 +120,7 @@ tok-core 不提供根 Error / Result；各能力只定义和返回自己能够�
 
 ## 通用执行与处理链
 
-使用 [`execution::Context`]、类型化 [`execution::Request`] 与共同的 [`execution::Layer`]。
+使用 [`execution::Context`]、类型化 [`execution::Request`] / [`execution::Response`] 与共同的 [`execution::Layer`]。
 上下文的 `service()` 表示当前执行所属服务，`operation()` 是入口适配器填写的稳定操作标识，不拼接实体或请求 ID。业务实体身份、路由输入等按需使用类型化输入或扩展携带；当前未提供通用路由器或熔断器。
 执行上下文和类型化处理链位于 tok-execution，服务构建、生命周期和任务监督位于 tok-lifecycle，两者只共同依赖 tok-core；类型化能力容器使用 tok_core::Extensions；普通服务与 gateway 共用这两组设施，网关另行增加会话能力及专用协议状态机。
 
@@ -128,13 +128,13 @@ tok-core 不提供根 Error / Result；各能力只定义和返回自己能够�
 
 ```rust
 use std::{io, time::Duration};
-use tok::{execution::{Context, Layer as ExecutionLayer, Request}, core::Identity, application::CancellationToken};
+use tok::{execution::{Context, Layer as ExecutionLayer, Request, Response}, core::Identity, application::CancellationToken};
 use tower::{Layer, ServiceExt, service_fn};
 
-async fn update(request: Request<&mut u64>) -> io::Result<u64> {
+async fn update(request: Request<&mut u64>) -> io::Result<Response<u64>> {
     tokio::task::yield_now().await;
     *request.input = request.input.checked_add(1).ok_or_else(|| io::Error::other("计数溢出"))?;
-    Ok(*request.input)
+    Ok(Response::new(*request.input))
 }
 
 # async fn example() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -146,14 +146,14 @@ let context = Context::new(
 let mut value = 0;
 let result = ExecutionLayer.layer(service_fn(update))
     .oneshot(Request::new(context, &mut value)).await?;
-assert_eq!((result, value), (1, 1));
+assert_eq!((result.output, value), (1, 1));
 # Ok(())
 # }
 # #[tokio::main]
 # async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> { example().await }
 ```
 
-Context::child 继承当前服务身份、原截止点、追踪和扩展，父取消向子传播，子取消不关闭父调用。
+Context::child 继承当前服务身份、原截止点与追踪；输入扩展由 Request::from_parts 显式接续，父取消向子传播，子取消不关闭父调用。
 Extensions 共享类型化能力；插入 Arc 状态等能力由游戏明确选择，不强制把本地 &mut 状态转换为共享锁。
 Context 不固定调用来源。入口适配器通过 Extensions 提供自己的类型化元信息，各维度可同时存在：
 
@@ -164,7 +164,7 @@ Context 不固定调用来源。入口适配器通过 Extensions 提供自己的
 | 玩家请求准入与执行 | [`gateway::player::ClientRequest`]，只含 request_id / message_id |
 | session 事件与 timer 执行 | 事件头及原始 `Arc<Message>`，或既有 TimerTrigger |
 
-事件 Registry 派生子上下文，使用当前事件的 ID / topic 覆盖继承值，不改变父上下文；本地派生事件清除继承的原始编码消息。其余扩展按 Context::child 规则保留，因此 RPC 关联信息与事件头可以共存。这些值用于中间件观察，不构成认证或分发权限；请求、事件和 timer 仍由各自协议入口及分发表隔离。
+事件 Registry 派生子上下文，使用当前事件的 ID / topic 覆盖继承值，不改变父上下文；本地派生事件清除继承的原始编码消息。其余适用扩展由注册表显式克隆到派生 Request，因此 RPC 关联信息与事件头可以共存。这些值用于中间件观察，不构成认证或分发权限；请求、事件和 timer 仍由各自协议入口及分发表隔离。
 
 ExecutionLayer 将内层就绪与执行放入同一预算，执行前后检查取消和截止点，丢弃 future 会停止本地等待，不回滚副作用。
 外层 poll_ready 立即就绪，内层 readiness 在调用 future 内等待；它不承诺内层立即可执行。
@@ -352,9 +352,9 @@ trace_sample_ratio = 0.1
 ## 按自定义键分发处理链
 
 [`execution::registry::Registry`] 只根据键选择和执行 Tower 处理链，不规定输入、结果或编码方式。
-`Registry<K, T, R, E>` 中，K 是实现 Ord + Clone 的分发键，T 是每次调用的自有输入，R 是结果，E 是原始业务错误。键可以是枚举、字符串或自定义类型，不要求 Display；零值和空字符串是否有效由协议或业务决定。
+`Registry<K, T, R, E>` 中，K 是实现 Ord + Clone 的分发键，T 是每次调用的自有输入，R 是 `Response<R>` 的正文，E 是原始业务错误。键可以是枚举、字符串或自定义类型，不要求 Display；零值和空字符串是否有效由协议或业务决定。
 组装完成后通过 [`execution::registry::Registry::into_service`] 注入 `Fn(&Request<T>) -> K` 取键函数，得到 [`execution::registry::Service`]。取键可读取正文或扩展，只负责返回路由键；输入与能力校验由前置 Layer 完成，未注册键返回 Unknown。公共 Layer 放在分发表外，路由专用 Layer 继续通过 register_service 安装。
-核心执行库不依赖 prost、Tonic 或框架生成协议。分发保留输入 Context 的操作名、期限、取消和扩展，不创建队列、增加预算或重试。共享业务状态可放在输入的 Arc 中；借用输入仍可直接通过 execution 的 Tower 调用执行，当前注册器只保存静态处理链。
+核心执行库不依赖 prost、Tonic 或框架生成协议。分发保留输入 Context 的操作名、期限、取消，以及 Request 的扩展，不创建队列、增加预算或重试。共享业务状态可放在输入的 Arc 中；借用输入仍可直接通过 execution 的 Tower 调用执行，当前注册器只保存静态处理链。
 
 ```rust
 use std::time::Duration;
@@ -370,13 +370,13 @@ struct Command { operation: Operation, value: u64 }
 # async fn main() -> Result<(), Box<dyn std::error::Error>> {
 let mut registry = Registry::<Operation, Command, u64, std::io::Error>::new();
 registry.register(Operation::Increment, |request| async move {
-    assert_eq!(request.context.extensions().get::<u64>(), Some(&42));
-    Ok(request.input.value + 1)
+    assert_eq!(request.extensions().get::<u64>(), Some(&42));
+    Ok(tok::execution::Response::new(request.input.value + 1))
 })?;
 let service = ServiceBuilder::new()
     .layer(execution::Layer) // 同时约束公共策略的等待。
     .map_request(|mut request: Request<Command>| {
-        request.context.extensions_mut().insert(42u64);
+        request.extensions_mut().insert(42u64);
         request
     })
     .service(registry.into_service(|request| request.input.operation.clone()));
@@ -386,7 +386,7 @@ let context = Context::new(
 )?;
 assert_eq!(service.oneshot(Request::new(context, Command {
     operation: Operation::Increment, value: 41,
-})).await?, 42);
+})).await?.output, 42);
 # Ok(())
 # }
 ```
@@ -426,7 +426,7 @@ registry.register(1, 2, |request: tok::execution::Request<(u64, Value)>| async m
     if input.value != target {
         return Err(std::io::Error::other("目标不匹配"));
     }
-    Ok(Reply { message: input, output: () })
+    Ok(tok::execution::Response::new(Reply { message: input, output: () }))
 })?;
 let registry = Arc::new(registry);
 let context = Context::new(
@@ -443,7 +443,7 @@ let reply = service.oneshot(Request::new(context, (42, Message {
     key: 1,
     body: Value { value: 42 }.encode_to_vec(),
 }))).await?;
-assert_eq!(Value::decode(reply.message.body.as_slice())?.value, 42);
+assert_eq!(Value::decode(reply.output.message.body.as_slice())?.value, 42);
 
 // 游戏线协议明确使用 u32 消息 ID；同一分发表由本地和 RPC 共用。
 let adapter = message::rpc::business::Handler::new(
@@ -465,9 +465,9 @@ let rpc = message::rpc::Service::new("local", "custom", Arc::new(adapter))?;
 
 ## 执行上下文的承载与边界
 
-框架处理链与注册回调接收 `execution::Request<T>`。使用 [`execution::Request::map`] 转换正文会移交原 Context；本地嵌套操作使用 Context::child，保留截止点、取消关系、Span 与 Extensions。Context.service 表示本地执行所属服务，出站目标独立表达。根入口显式创建 Context，不从当前任务自动恢复一个父 Context。
+框架业务处理链接收 `execution::Request<T>`，成功返回 `execution::Response<R>`，错误仍为原始 E。Request 包含 Context、input 和输入 Extensions；Response 包含 output 和输出 Extensions，不含 Context。Context 只管理服务、操作、截止点、取消和 Span。使用 [`execution::Request::map`] / try_map 转换正文会移交原 Context 与输入扩展；本地派生由 Context::child 完成，再用 Request::from_parts 显式接续输入扩展。Request / Response 不依赖 ContextError，也不替调用方创建执行范围。Context.service 表示本地执行所属服务，出站目标独立表达。根入口显式创建 Context，不从当前任务自动恢复一个父 Context。
 
-Extensions 提供可选元信息和本地能力；类型相同的值克隆后共享，某个容器的 insert/remove 不回写其他克隆。业务必需输入放在正文，固定处理器依赖由构造注入。跨 gRPC / NATS 只传允许的协议 metadata，接收端校验后安装自身能力，不恢复源 SessionHandle。
+Request 的 Extensions 提供可选输入元信息和本地能力；Response 的 Extensions 承载处理器及内层中间件向外返回的本地元信息，不自动复制输入扩展。Response::map / try_map 转换结果时保留输出扩展，into_parts 用于显式拆装；Err 分支所需元信息由具体错误类型承载。通用 execution::Layer、锁 Layer 与 sync_handler 透明支持任意结果，不强制包装第三方或基础设施接口；框架业务注册器、协议适配和网关 Pipeline 使用 Response。类型相同的值克隆后共享，某个容器的 insert/remove 不回写其他克隆。业务必需输入放在正文，固定处理器依赖由构造注入。跨 gRPC / NATS 只传允许的协议 metadata，接收端校验后安装自身能力，不恢复源 SessionHandle。
 
 Context::with_budget_limit 只能收紧原截止点。with_cancellation 由可信适配器用于明确的停止边界，不能用于普通嵌套调用规避父取消。独立消费、timer 和补偿任务可以新建有限范围；排队本身不能隐式重置预算。
 
@@ -475,11 +475,41 @@ SessionManager::deliver 接收 `Request<events::Delivery>`；同步通知保留�
 
 已有调用中发客户端通知用 SessionHandle::notify_request；notify / submit / post_event 是显式独立提交入口。独立通知与回应发布不自动放大其来源调用的业务预算，也不回滚已执行的业务。
 
+输入与输出扩展独立流动，外层中间件可以保留所需请求信息，在 await 后读取输出扩展：
+
+```rust
+use tok::{execution::{Context, Request, Response}, core::Identity, application::CancellationToken};
+use std::time::Duration;
+use tower::{ServiceBuilder, ServiceExt};
+# #[tokio::main]
+# async fn main() -> Result<(), Box<dyn std::error::Error>> {
+let context = Context::new(Identity { node_id: "local".into(), service_name: "counter".into() },
+    "increment", Duration::from_secs(1), CancellationToken::new())?;
+let mut request = Request::new(context, 41u32);
+request.extensions_mut().insert(String::from("request-marker"));
+let chain = ServiceBuilder::new()
+    .map_response(|response: Response<u32>| {
+        assert_eq!(response.extensions().get::<bool>(), Some(&true));
+        assert!(response.extensions().get::<String>().is_none());
+        response.map(|value| value.to_string())
+    })
+    .service(tower::service_fn(|request: Request<u32>| async move {
+        assert_eq!(request.extensions().get::<String>().unwrap(), "request-marker");
+        let mut response = Response::new(request.input + 1);
+        response.extensions_mut().insert(true);
+        Ok::<_, std::io::Error>(response)
+    }));
+let response = chain.oneshot(request).await?;
+assert_eq!(response.output, "42");
+# Ok(())
+# }
+```
+
 ## 内部 RPC 与共享端点
 
 通用 RPC 设施从 [`grpc`] 导入；游戏消息、玩家事件、timer 和 CallContext 从 [`message::rpc`] 导入。通用 Client / Listener 直接从 grpc 导入，消息协议适配器不重导出它们。
 
-自定义 protobuf 不需要依赖游戏协议：用 [`grpc::Client::execute`] 包装生成客户端；服务端由 [`grpc::Server::context`] 建立预算、追踪和取消范围，再用 [`grpc::Server::execute`] 调用任意类型化 Tower Service。协议适配器负责认证、输入校验、操作名和类型化元信息，Server 不负责解码或决定业务入口。
+自定义 protobuf 不需要依赖游戏协议：用 [`grpc::Client::execute`] 包装生成客户端；服务端由 [`grpc::Server::request`] 建立预算、追踪和取消范围并安装本地请求扩展，再用 [`grpc::Server::execute`] 调用任意类型化 Tower Service。协议适配器负责认证、输入校验、操作名和类型化元信息，Server 不负责解码或决定业务入口。
 
 先用 [`message::rpc::HandlerRegistry`] 注册游戏消息，再用 [`message::rpc::Service`] 显式绑定节点和业务服务名。
 player 使用 `into_player`，普通业务服务使用 `into_business`，两者使用不同的 protobuf 服务。
@@ -522,7 +552,7 @@ endpoint = "internal-rpc"
                 if context.bid.as_deref() != Some(request.guild_id.to_string().as_str()) {
                     return Err(tok::message::rpc::tonic::Status::invalid_argument("业务 ID 不匹配"));
                 }
-                Ok(request)
+                Ok(tok::execution::Response::new(request))
             })?;
             init.extensions.get::<tok::message::rpc::Binding>()
                 .ok_or_else(|| std::io::Error::other("缺少 RPC 初始化绑定"))?
@@ -573,6 +603,7 @@ let sender = tower::service_fn(|call: Request<grpc::Outgoing<proto::CallRequest>
     // 在真实发送前重新扣减中间件等待消耗的预算，过期时不会发出调用。
     let (channel, request) = call.input.into_parts(&call.context)?;
     proto::business_rpc_client::BusinessRpcClient::new(channel).call(request).await
+        .map(tok::execution::Response::new)
 });
 let chain = ServiceBuilder::new()
     .layer(client.layer())
@@ -585,7 +616,7 @@ let response = chain.oneshot(Request::new(context, grpc::client::Call {
     target: target.clone(), request_id: 1,
     request: tonic::Request::new(request),
 })).await?;
-// 直接 Service 保留完整 tonic::Response，包括 metadata。
+// response.output 保留完整 tonic::Response；response.extensions() 是本地输出元信息。
 # drop(response);
 # Ok(())
 # }
@@ -595,11 +626,11 @@ let response = chain.oneshot(Request::new(context, grpc::client::Call {
 
 可重复调用的 client::Service 每次克隆内层 Service，限流与熔断等状态应显式共享，例如使用 GlobalConcurrencyLimitLayer。Client 克隆共享连接缓存和工厂；替换某个克隆的工厂会为该实例建立独立配置与空缓存。不要求输入或 Future 为 static，可以处理借用；Buffer 等中间件可有自己的附加限制。
 
-[`grpc::Client::execute_service`] 便捷方法接收内层 `Service<execution::Request<Outgoing<Req>>, Response = tonic::Response<Res>, Error = Status>`，接收 `Request<tonic::Request<Req>>`，消费该 Service 后返回响应正文，不要求 Service 克隆；execute 使用相同请求承载，保留 FnOnce 发送回调。两者从 Context 取得期限、取消与 Span，不另外传入 Span。二者复用同一客户端 Layer 执行实现，准备阶段失败也计入其调用指标。已有协议客户端不自动安装用户出站链。框架不主动重试，中间件自行重试时须承担幂等与剩余预算约束；丢弃 Future 不回滚远端副作用。
+[`grpc::Client::execute_service`] 便捷方法接收内层 `Service<execution::Request<Outgoing<Req>>, Response = execution::Response<tonic::Response<Res>>, Error = Status>`，接收 `Request<tonic::Request<Req>>`，消费该 Service 后返回 `execution::Response<Res>`，保留输出扩展，不要求 Service 克隆；execute 使用相同请求承载，保留 FnOnce 发送回调。两者从 Context 取得期限、取消与 Span，不另外传入 Span。二者复用同一客户端 Layer 执行实现，准备阶段失败也计入其调用指标。已有协议客户端不自动安装用户出站链。框架不主动重试，中间件自行重试时须承担幂等与剩余预算约束；丢弃 Future 不回滚远端副作用。
 
 ### 服务端类型化处理链
 
-[`grpc::Server::layer`] 提供 [`grpc::server::Layer`]，接收 `execution::Request<T>`；metadata 转换仍由 Server::context 完成。Layer 校验目标服务身份，复用 execution 的就绪等待、期限、取消和追踪，映射停止原因并记录 gRPC 指标；不重新分配预算。Server::execute 是这条链的便捷方法。
+[`grpc::Server::layer`] 提供 [`grpc::server::Layer`]，接收 `execution::Request<T>`；Server::request 完成 metadata 转换并安装本服务输入扩展；Server::context 仅构造执行范围。Layer 校验目标服务身份，复用 execution 的就绪等待、期限、取消和追踪，映射停止原因并记录 gRPC 指标；不重新分配预算。Server::execute 是这条链的便捷方法。
 
 ```rust
 use tok::{core::Identity, execution::{self, Request}, grpc};
@@ -610,10 +641,10 @@ let server = grpc::Server::new(Identity { node_id: "node".into(), service_name: 
 let chain = ServiceBuilder::new()
     .layer(server.layer())
     .service(execution::sync_handler(|request: Request<String>| {
-        Ok::<_, grpc::tonic::Status>(request.input.len())
+        Ok::<_, grpc::tonic::Status>(execution::Response::new(request.input.len()))
     }));
-let context = server.context(&grpc::tonic::metadata::MetadataMap::new(), "length")?;
-assert_eq!(chain.oneshot(Request::new(context, String::from("hello"))).await?, 5);
+let request = server.request(&grpc::tonic::metadata::MetadataMap::new(), "length", String::from("hello"))?;
+assert_eq!(chain.oneshot(request).await?.output, 5);
 # Ok(())
 # }
 ```
@@ -703,16 +734,16 @@ let layer = lock::Layer::new(
     |request: &Request<u64>| Ok::<_, std::io::Error>(Key {
         namespace: "inventory".into(), bid: request.input.to_string(),
     }),
-    |_: &u64| true, // 此处理链的 Ok 回应都表示成功。
+    |_: &tok::execution::Response<u64>| true, // 此处理链的 Ok 回应都表示成功。
 )?;
 let service = layer.layer(tower::service_fn(|request: Request<u64>| async move {
-    Ok::<_, std::io::Error>(request.input + 1)
+    Ok::<_, std::io::Error>(tok::execution::Response::new(request.input + 1))
 }));
 let context = Context::new(
     Identity { node_id: "local".into(), service_name: "inventory".into() },
     "inventory/update", Duration::from_secs(2), CancellationToken::new(),
 )?;
-assert_eq!(service.oneshot(Request::new(context, 41)).await?, 42);
+assert_eq!(service.oneshot(Request::new(context, 41)).await?.output, 42);
 # Ok(())
 # }
 ```
@@ -1186,20 +1217,20 @@ let mut handlers = HandlerRegistry::new();
 handlers.register_with_timers(1, 2, |_request: tok::execution::Request<(tok::message::rpc::CallContext, StartProduction)>| async move {
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
         .map_err(|_| tok::message::rpc::tonic::Status::internal("系统时钟无效"))?.as_millis() as i64;
-    Ok(HandlerReply {
+    Ok(tok::execution::Response::new(HandlerReply {
         message: StartProduction {},
         timers: Some(TimerUpdate::ReplaceAll(vec![TimerSpec {
             timer_id: "production".into(), message_id: 3, body: ProductionFinished {}.encode_to_vec(),
             due_at_ms: now + 1000, interval_ms: None,
         }])),
-    })
+    }))
 })?;
 handlers.register_timer(3, |request: tok::execution::Request<(tok::message::rpc::CallContext, ProductionFinished)>| async move {
     let (context, _event) = request.input;
     let trigger = context.timer.expect("分发表已确认内部计时来源");
     // 在这里根据可信 session 和服务端生产规则结算产出。
     let _ = (context.session, trigger.scheduled_at_ms, trigger.fired_at_ms);
-    Ok(None) // 不改变当前 timer 集合。
+    Ok(tok::execution::Response::new(None)) // 不改变当前 timer 集合。
 })?;
 # Ok(())
 # }
@@ -1279,14 +1310,14 @@ events.register::<Changed, _>(|request| Box::pin(async move {
     tokio::task::yield_now().await;
     *request.input.state = request.input.state.checked_add(request.input.event.payload.delta)
         .ok_or_else(|| std::io::Error::other("数值溢出"))?;
-    Ok(())
+    Ok(tok::execution::Response::new(()))
 }))?;
 let parent = Context::new(Identity { node_id: "node-a".into(), service_name: "player".into() },
     "update", Duration::from_secs(1), CancellationToken::new())?;
 let event = Envelope::new(EventId::generate(), Changed { delta: 3 })?;
 let mut value = 0;
 let results = events.dispatch(&mut value, Request::new(parent, &event)).await?;
-assert_eq!(results.len(), 1);
+assert_eq!(results.output.len(), 1);
 assert_eq!(value, 3);
 # Ok(())
 # }
@@ -1294,7 +1325,7 @@ assert_eq!(value, 3);
 
 事件上下文由注册表派生为 `event/<NAME>`，继承原期限、取消、追踪和本地能力；同一次分发中的处理者共享期限，不逐个重置预算。
 首错停止，`DispatchError::Handler` 保留原业务错误；协议/解码失败、未知类型和取消/超时分别表达。
-零订阅者返回空结果。已执行的状态修改不回滚，不自动重试或去重，也不截获 panic。
+零订阅者返回 output 为空数组的 Response。多个处理者的输出扩展按注册顺序合并，同类型以后者覆盖；每个处理者的输入容器各自克隆，不把前一个输出隐式注入后一个输入。已执行的状态修改不回滚，不自动重试或去重，也不截获 panic。
 异步回调可以借用 `&mut` 状态，调用方必须保障状态的串行访问；不应持有标准互斥锁跨 await。
 
 远程接收通过 `enable_protobuf::<E>()` 给同一类型安装解码器，再调用 `receive(...).await` 执行同一组处理者。
@@ -1340,7 +1371,7 @@ handlers.register::<GuildChanged, _>(|request| Box::pin(async move {
     let event = &request.input.event.payload;
     // 这里可以更新公会状态、处理邮件或编排其他服务器操作。
     println!("{}: {}", request.input.event.event_id, event.guild_id);
-    Ok(events::Outcome::Handled)
+    Ok(tok::execution::Response::new(events::Outcome::Handled))
 }))?;
 handlers.enable_protobuf::<GuildChanged>()?;
 let subscription = bus.subscribe(events::Subscriber::new(
@@ -1370,7 +1401,7 @@ handler 有有限等待期限，退出或超时会取消在途 future，已产�
 取消、退出或丢弃一个订阅只退订自身，不关闭共享连接；Bus::close 由连接持有者显式调用。
 断线、发布入队失败或取消会保守停用连接；SDK 报告慢消费者时停止本连接上的所有消费任务并上报，发布仍可使用。需要消费故障隔离时使用独立 Bus。
 
-回调收到 `Request<Input<...>>`，包含当前状态借用、强类型 Envelope 及执行上下文；路由主题可从 `request.input.event.topic` 读取，原始编码可用 `context.extensions().get::<Arc<Message>>()` 取得。转发直接共享原始 Message，不重新编码，也不重新采集追踪头。
+回调收到 `Request<Input<...>>`，包含当前状态借用、强类型 Envelope 及执行上下文；路由主题可从 `request.input.event.topic` 读取，原始编码可用 `request.extensions().get::<Arc<Message>>()` 取得。转发直接共享原始 Message，不重新编码，也不重新采集追踪头。
 `Outcome` 区分 Ignored、Handled、Rejected、Partial，表示当前 handler 阶段的处理结果；日志/指标另列错误与超时。
 网关可把 deliver 的 Report 转为 Outcome，Handled 只表示完成本地准入，不表示后续 player 执行完成。
 内部 Executor::execute_event 只返回可选 TimerUpdate，类型上不包含客户端回应；业务执行结果由会话处理，不返回 NATS 发布者。
@@ -1567,8 +1598,8 @@ Scene 目前仅预留模块，不套用 Player 的串行与所有权语义。
 ## 玩家中间件与扩展状态
 
 [`gateway::player::Pipeline`] 使用同一 Tower 协议，分别安装 `with_admission_layer`、`with_request_layer`、`with_event_layer`、`with_timer_layer`、`with_downlink_layer`。
-准入与新下行使用 `Request<LogicalMessage>`，准入结果也返回同类型 Request，以保留中间件写入的扩展；执行器使用 `Request<RequestInput>`、`Request<EventInput>`、`Request<TimerInput>`，不再使用无共同上下文的多参数调用。
-准入成功后传递原截止点与扩展到 FIFO，等待消耗预算；停止关系显式转交 session，在途业务不随连接替换被取消。回应发布采用独立有限范围，继承请求标记，使超时错误仍可下发。每个入口保留自己的结果类型。事件只返回 timer 效果，不生成客户端 Response；timer 也不自动下发客户端回应。
+准入与新下行使用 `Request<LogicalMessage>`，准入结果返回 `Response<Request<LogicalMessage>>`，以保留中间件写入的输入扩展；执行器使用 `Request<RequestInput>`、`Request<EventInput>`、`Request<TimerInput>`，不再使用无共同上下文的多参数调用。
+准入成功后传递原截止点与扩展到 FIFO，等待消耗预算；停止关系显式转交 session，在途业务不随连接替换被取消。回应发布采用独立有限范围，继承请求标记，使超时错误仍可下发。每个入口以 Response 包装自己的结果类型；try_request 返回的 PendingResponse 保留执行结果扩展，客户端编码和 replay 只消费正文。事件只返回 timer 效果，不生成客户端 Response；timer 也不自动下发客户端回应。
 
 ```rust
 use std::sync::Arc;
@@ -1576,7 +1607,7 @@ use tok::{player::LogicalMessage, gateway::player::{Executor, Pipeline, SessionH
 fn pipeline(executor: Arc<dyn Executor>) -> Pipeline {
     let downlink = MapRequestLayer::new(|mut request: Request<LogicalMessage>| {
         // 此时尚未编号和编码；可查询当前会话并修改新消息正文。
-        if let Some(session) = request.context.extensions().get::<SessionHandle>() {
+        if let Some(session) = request.extensions().get::<SessionHandle>() {
             let _identity = session.identity();
             request.input.body.push(1);
         }
@@ -1588,7 +1619,7 @@ fn pipeline(executor: Arc<dyn Executor>) -> Pipeline {
 
 在 Gateway 构造回调内，通过 `Ingress::with_pipeline` 安装完整链；配置完成后再导出 manager/session 句柄。`with_gateway_rpc` 只声明绑定，实际注册在组件 initialize 时执行，避免链式配置顺序使 RPC 看见旧工厂；stop 按实例撤销注册。
 准入 Layer 不能绕过认证、当前绑定、来源、序号及容量校验；拒绝也会消耗已收到的请求 ID。执行 Layer 在原 session FIFO 内、所有权检查之后运行，不改变单玩家串行约束。
-准入预算从连接处理开始，执行预算从出队并完成所有权检查后开始；两者是独立阶段，FIFO 等待由容量约束。一个阶段内的 readiness、中间件与处理者共享同一期限，本地派生事件继续继承该期限。
+准入建立有限预算，成功后将原截止点与输入扩展交给 FIFO，等待和所有权检查均消耗该预算；已接受工作显式脱离连接取消范围。一个阶段内的 readiness、中间件与处理者共享同一期限，本地派生事件继续继承该期限。
 顶号、关闭和停机停止新业务，在途执行按原预算收束；会话取消信号可通过 SessionHandle 观察，本次执行上下文的取消令牌用于本次调用，不因优雅停止立即中断已开始的业务。
 准入及绑定回应使用连接代次的取消范围，同会话重连也会使旧绑定的异步准入失效。
 

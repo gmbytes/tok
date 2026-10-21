@@ -19,7 +19,7 @@ where
     F: FnOnce(Channel, Request<T>) -> Fut,
     Fut: Future<Output = Result<Response<R>, Status>>,
 {
-    type Response = Response<R>;
+    type Response = tok_execution::Response<Response<R>>;
     type Error = Status;
     type Future = SendFuture<Fut>;
     fn poll_ready(&mut self, _: &mut Context<'_>) -> Poll<Result<(), Status>> {
@@ -50,11 +50,14 @@ impl<F, R> Future for SendFuture<F>
 where
     F: Future<Output = Result<Response<R>, Status>>,
 {
-    type Output = Result<Response<R>, Status>;
+    type Output = Result<tok_execution::Response<Response<R>>, Status>;
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
         match &mut this.running {
-            Some(future) => future.as_mut().poll(cx),
+            Some(future) => future
+                .as_mut()
+                .poll(cx)
+                .map(|result| result.map(tok_execution::Response::new)),
             None => Poll::Ready(Err(this
                 .error
                 .take()

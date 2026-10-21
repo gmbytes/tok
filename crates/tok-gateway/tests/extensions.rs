@@ -67,13 +67,7 @@ impl extension::Factory for StateFactory {
         "test.state.v1"
     }
     fn initialize(&self, request: Request<tok_player::SessionIdentity>) -> Result<Extensions> {
-        assert!(
-            request
-                .context
-                .extensions()
-                .get::<SessionManager>()
-                .is_some()
-        );
+        assert!(request.extensions().get::<SessionManager>().is_some());
         if self.initialize_failure {
             return Err(ErrorCode::Internal.into());
         }
@@ -117,11 +111,10 @@ impl extension::Factory for StateFactory {
         Ok(extensions)
     }
     fn on_change(&self, request: Request<Change>) {
-        let session = request.context.extensions().get::<SessionHandle>().unwrap();
+        let session = request.extensions().get::<SessionHandle>().unwrap();
         // 查询自身与管理器，证明游戏回调不在通道或目录锁内执行。
         session.snapshot().unwrap();
         request
-            .context
             .extensions()
             .get::<SessionManager>()
             .unwrap()
@@ -140,19 +133,27 @@ impl player::Authenticator for Auth {
         })
     }
 }
+#[derive(Debug, PartialEq, Eq)]
+struct ExecutionOutput;
+#[derive(Debug, PartialEq, Eq)]
+struct DownlinkOutput;
+fn completed(reply: Reply) -> tok_execution::Response<Reply> {
+    let mut response = tok_execution::Response::new(reply);
+    response.extensions_mut().insert(ExecutionOutput);
+    response
+}
 struct Execution(Arc<Counts>);
 impl Executor for Execution {
     fn execute_request(&self, request: Request<RequestInput>) -> player::Task<'_> {
         Box::pin(async move {
             assert_eq!(
-                request.context.extensions().get::<player::ClientRequest>(),
+                request.extensions().get::<player::ClientRequest>(),
                 Some(&player::ClientRequest {
                     request_id: request.input.message.request_id,
                     message_id: request.input.message.message_id,
                 })
             );
             request
-                .context
                 .extensions()
                 .get::<SessionData>()
                 .unwrap()
@@ -173,7 +174,7 @@ impl Executor for Execution {
             } else {
                 None
             };
-            Ok(Reply {
+            Ok(completed(Reply {
                 response: Some(LogicalMessage {
                     kind: MessageKind::Response,
                     message_id: 100,
@@ -183,42 +184,39 @@ impl Executor for Execution {
                     body: request.input.message.body,
                 }),
                 timers,
-            })
+            }))
         })
     }
     fn execute_event(&self, request: Request<EventInput>) -> player::EventTask<'_> {
         Box::pin(async move {
             request
-                .context
                 .extensions()
                 .get::<SessionData>()
                 .unwrap()
                 .value
                 .fetch_add(10, Ordering::SeqCst);
             self.0.events.lock().unwrap().push(request.input.event);
-            Ok(None)
+            Ok(tok_execution::Response::new(None))
         })
     }
     fn execute_timer(&self, request: Request<TimerInput>) -> player::Task<'_> {
         Box::pin(async move {
             request
-                .context
                 .extensions()
                 .get::<SessionData>()
                 .unwrap()
                 .value
                 .fetch_add(100, Ordering::SeqCst);
             request
-                .context
                 .extensions()
                 .get::<SessionHandle>()
                 .unwrap()
                 .notify(notification(b"tick"))
                 .await?;
-            Ok(Reply {
+            Ok(completed(Reply {
                 response: None,
                 timers: None,
-            })
+            }))
         })
     }
 }
@@ -262,7 +260,7 @@ where
         let audit = self.audit.clone();
         Box::pin(async move {
             if request.context.operation().contains("/admission/") {
-                request.context.extensions_mut().insert(ScopeMark(37));
+                request.extensions_mut().insert(ScopeMark(37));
                 let limit = audit.counts.admission_budget_ms.load(Ordering::SeqCst);
                 if limit > 0 {
                     request.context = request
@@ -272,14 +270,10 @@ where
             }
             audit.counts.contexts.lock().unwrap().push((
                 request.context.operation().to_owned(),
-                request
-                    .context
-                    .extensions()
-                    .get::<ScopeMark>()
-                    .map(|mark| mark.0),
+                request.extensions().get::<ScopeMark>().map(|mark| mark.0),
                 request.context.deadline(),
             ));
-            let capabilities = request.context.extensions();
+            let capabilities = request.extensions();
             assert!(capabilities.get::<GatewayData>().is_some());
             assert!(capabilities.get::<ManagerData>().is_some());
             let gateway = capabilities.get::<tok_gateway::Handle>().unwrap();
@@ -326,15 +320,19 @@ impl<S> Layer<S> for Append {
 }
 impl<S> Service<Request<LogicalMessage>> for Appended<S>
 where
-    S: Service<Request<LogicalMessage>, Response = LogicalMessage, Error = GatewayError>
-        + Clone
+    S: Service<
+            Request<LogicalMessage>,
+            Response = tok_execution::Response<LogicalMessage>,
+            Error = GatewayError,
+        > + Clone
         + Send
         + 'static,
     S::Future: Send,
 {
-    type Response = LogicalMessage;
+    type Response = tok_execution::Response<LogicalMessage>;
     type Error = GatewayError;
-    type Future = Pin<Box<dyn Future<Output = Result<LogicalMessage>> + Send>>;
+    type Future =
+        Pin<Box<dyn Future<Output = Result<tok_execution::Response<LogicalMessage>>> + Send>>;
     fn poll_ready(&mut self, _: &mut TaskContext<'_>) -> Poll<Result<()>> {
         Poll::Ready(Ok(()))
     }
@@ -342,7 +340,11 @@ where
         assert!(request.input.server_seq.is_none());
         request.input.body.push(9);
         let service = self.0.clone();
-        Box::pin(service.oneshot(request))
+        Box::pin(async move {
+            let mut response = service.oneshot(request).await?;
+            response.extensions_mut().insert(DownlinkOutput);
+            Ok(response)
+        })
     }
 }
 fn notification(body: &[u8]) -> LogicalMessage {
@@ -731,7 +733,7 @@ async fn topic_membership_is_rechecked_after_async_downlink_before_assigning_seq
     session.leave_topic("room").await.unwrap();
     gate.permits.add_permits(1);
     let report = delivery.await.unwrap();
-    assert_eq!(report.skipped, 1);
+    assert_eq!(report.output.skipped, 1);
     assert_eq!(session.snapshot().unwrap().last_server_seq, 0);
     fixture.stop().await;
 }
@@ -971,8 +973,9 @@ async fn independent_event_keeps_selected_metadata_after_source_cancellation() {
     let fixture = Fixture::new(Some(Arc::clone(&gate))).await;
     let mut client = fixture.connect().await;
     client.login().await;
-    let mut context = delivery_context();
-    context.extensions_mut().insert(ScopeMark(99));
+    let mut extensions = tok_core::Extensions::default();
+    extensions.insert(ScopeMark(99));
+    let context = delivery_context();
     let source_stop = context.cancellation();
     let event = Arc::new(
         tok_events::Message::new(
@@ -982,12 +985,13 @@ async fn independent_event_keeps_selected_metadata_after_source_cancellation() {
     );
     fixture
         .manager
-        .deliver(Request::new(
+        .deliver(Request::from_parts(
             context,
             player::events::Delivery {
                 target: player::events::Target::Players(vec!["1".into()]),
                 action: player::events::Action::Forward(event),
             },
+            extensions,
         ))
         .await
         .unwrap();
@@ -1061,11 +1065,12 @@ async fn synchronous_notification_keeps_metadata_and_stops_before_sequence_on_ex
     let mut client = fixture.connect().await;
     client.login().await;
     let session = fixture.manager.session("1").unwrap().unwrap();
-    let mut context = delivery_context().with_budget_limit(Duration::from_millis(30));
-    context.extensions_mut().insert(ScopeMark(99));
+    let context = delivery_context().with_budget_limit(Duration::from_millis(30));
+    let mut extensions = tok_core::Extensions::default();
+    extensions.insert(ScopeMark(99));
     let result = fixture
         .manager
-        .deliver(Request::new(
+        .deliver(Request::from_parts(
             context,
             player::events::Delivery {
                 target: player::events::Target::Players(vec!["1".into()]),
@@ -1074,6 +1079,7 @@ async fn synchronous_notification_keeps_metadata_and_stops_before_sequence_on_ex
                     body: vec![],
                 },
             },
+            extensions,
         ))
         .await;
     assert_eq!(result.unwrap_err().code, ErrorCode::Timeout);
@@ -1090,5 +1096,59 @@ async fn synchronous_notification_keeps_metadata_and_stops_before_sequence_on_ex
     gate.permits.add_permits(1);
     session.notify(notification(b"still-online")).await.unwrap();
     assert_eq!(session.snapshot().unwrap().last_server_seq, 1);
+    fixture.stop().await;
+}
+
+#[tokio::test]
+async fn local_request_and_notification_return_output_extensions_to_their_callers() {
+    let fixture = Fixture::new(None).await;
+    let mut client = fixture.connect().await;
+    client.login().await;
+    let session = fixture.manager.session("1").unwrap().unwrap();
+    let response = session
+        .try_request(LogicalMessage {
+            kind: MessageKind::Request,
+            message_id: 1,
+            request_id: 1,
+            server_seq: None,
+            error_code: 0,
+            body: vec![],
+        })
+        .unwrap()
+        .await;
+    assert_eq!(
+        response.extensions().get::<ExecutionOutput>(),
+        Some(&ExecutionOutput)
+    );
+    assert!(response.extensions().get::<SessionData>().is_none());
+    assert_eq!(response.output.error_code, 0);
+    let response = session
+        .notify_request(Request::new(delivery_context(), notification(b"local")))
+        .await
+        .unwrap();
+    assert_eq!(
+        response.extensions().get::<DownlinkOutput>(),
+        Some(&DownlinkOutput)
+    );
+    assert!(response.extensions().get::<SessionHandle>().is_none());
+    let response = fixture
+        .manager
+        .deliver(Request::new(
+            delivery_context(),
+            player::events::Delivery {
+                target: player::events::Target::Players(vec!["1".into()]),
+                action: player::events::Action::Notify {
+                    message_id: 90,
+                    body: vec![],
+                },
+            },
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.output.admitted, 1);
+    assert_eq!(
+        response.extensions().get::<DownlinkOutput>(),
+        Some(&DownlinkOutput)
+    );
     fixture.stop().await;
 }

@@ -1,7 +1,7 @@
 use super::CallContext;
 use prost::Message;
 use std::{collections::BTreeMap, future::Future, pin::Pin, sync::Arc};
-use tok_execution::{Request as ExecutionRequest, StopReason};
+use tok_execution::{Request as ExecutionRequest, Response, StopReason};
 use tok_player::TimerTrigger;
 use tok_player::TimerUpdate;
 use tok_proto::internal::v1::{self as proto, CallResponse, Payload};
@@ -9,10 +9,11 @@ use tonic::Status;
 use tower::{Layer as _, Service, ServiceExt};
 
 /// RPC 边界处理结果；通用处理链保留各自业务错误，边界映射为 Status。
-pub type CallTask<'a> = Pin<Box<dyn Future<Output = Result<CallResponse, Status>> + Send + 'a>>;
+pub type CallTask<'a> =
+    Pin<Box<dyn Future<Output = Result<Response<CallResponse>, Status>> + Send + 'a>>;
 /// 内部事件执行结果，不含客户端业务回应。
 pub type EventTask<'a> =
-    Pin<Box<dyn Future<Output = Result<proto::EventResponse, Status>> + Send + 'a>>;
+    Pin<Box<dyn Future<Output = Result<Response<proto::EventResponse>, Status>> + Send + 'a>>;
 
 /// 游戏协议处理入口；请求、timer 与服务器事件保持各自语义和结果类型。
 ///
@@ -36,8 +37,11 @@ pub struct TowerHandler<S>(
 );
 impl<S> Handler for TowerHandler<S>
 where
-    S: Service<ExecutionRequest<(CallContext, Payload)>, Response = CallResponse, Error = Status>
-        + Clone
+    S: Service<
+            ExecutionRequest<(CallContext, Payload)>,
+            Response = Response<CallResponse>,
+            Error = Status,
+        > + Clone
         + Send
         + Sync
         + 'static,
@@ -89,15 +93,15 @@ impl HandlerRegistry {
         Req: Message + Default + Send + 'static,
         Resp: Message + Send + 'static,
         F: Fn(ExecutionRequest<(CallContext, Req)>) -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = Result<Resp, Status>> + Send + 'static,
+        Fut: Future<Output = Result<Response<Resp>, Status>> + Send + 'static,
     {
         self.register_with_timers(request_id, response_id, move |request| {
             let future = handler(request);
             async move {
-                Ok(HandlerReply {
-                    message: future.await?,
+                Ok(future.await?.map(|message| HandlerReply {
+                    message,
                     timers: None,
-                })
+                }))
             }
         })
     }
@@ -112,7 +116,7 @@ impl HandlerRegistry {
         Req: Message + Default + Send + 'static,
         Resp: Message + Send + 'static,
         F: Fn(ExecutionRequest<(CallContext, Req)>) -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = Result<HandlerReply<Resp>, Status>> + Send + 'static,
+        Fut: Future<Output = Result<Response<HandlerReply<Resp>>, Status>> + Send + 'static,
     {
         let handler = Arc::new(handler);
         self.register_service(
@@ -136,7 +140,7 @@ impl HandlerRegistry {
         Resp: Message + Send + 'static,
         S: Service<
                 ExecutionRequest<(CallContext, Req)>,
-                Response = HandlerReply<Resp>,
+                Response = Response<HandlerReply<Resp>>,
                 Error = Status,
             > + Clone
             + Send
@@ -148,9 +152,11 @@ impl HandlerRegistry {
             .register_service(
                 request_id,
                 response_id,
-                service.map_response(|reply: HandlerReply<Resp>| tok_protobuf::Reply {
-                    message: reply.message,
-                    output: reply.timers,
+                service.map_response(|response: Response<HandlerReply<Resp>>| {
+                    response.map(|reply| tok_protobuf::Reply {
+                        message: reply.message,
+                        output: reply.timers,
+                    })
                 }),
             )
             .map_err(|error| super::Error::Configuration(error.to_string()))
@@ -161,7 +167,7 @@ impl HandlerRegistry {
         E: tok_events::Event + Message + Default,
         H: for<'a> Fn(
                 ExecutionRequest<tok_events::Input<'a, CallContext, E>>,
-            ) -> tok_events::Task<'a, Option<TimerUpdate>, Status>
+            ) -> tok_events::Task<'a, Response<Option<TimerUpdate>>, Status>
             + Send
             + Sync
             + 'static,
@@ -190,7 +196,7 @@ impl HandlerRegistry {
     where
         Req: Message + Default + Send + 'static,
         F: Fn(ExecutionRequest<(CallContext, Req)>) -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = Result<Option<TimerUpdate>, Status>> + Send + 'static,
+        Fut: Future<Output = Result<Response<Option<TimerUpdate>>, Status>> + Send + 'static,
     {
         let handler = Arc::new(handler);
         self.register_timer_service(
@@ -211,7 +217,7 @@ impl HandlerRegistry {
         Req: Message + Default + Send + 'static,
         S: Service<
                 ExecutionRequest<(CallContext, Req)>,
-                Response = Option<TimerUpdate>,
+                Response = Response<Option<TimerUpdate>>,
                 Error = Status,
             > + Clone
             + Send
@@ -229,21 +235,25 @@ impl HandlerRegistry {
             Arc::new(move |request| {
                 let service = service.clone();
                 Box::pin(async move {
-                    let (call, body) = request.input;
+                    let (context, (call, body), extensions) = request.into_parts();
                     let input = Req::decode(body.as_slice())
                         .map_err(|_| Status::invalid_argument("计时参数解码失败"))?;
                     let id = call.request_id;
                     let timers = tok_execution::Layer
                         .layer(service)
-                        .oneshot(ExecutionRequest::new(request.context, (call, input)))
+                        .oneshot(ExecutionRequest::from_parts(
+                            context,
+                            (call, input),
+                            extensions,
+                        ))
                         .await
                         .map_err(execution_status)?;
-                    Ok(CallResponse {
+                    Ok(timers.map(|timers| CallResponse {
                         request_id: id,
                         payload: None,
                         error: None,
                         timers: timers.map(super::timer::encode_update),
-                    })
+                    }))
                 })
             }),
         );
@@ -256,34 +266,35 @@ impl Handler for HandlerRegistry {
         request: ExecutionRequest<(CallContext, Arc<tok_events::Message>)>,
     ) -> EventTask<'_> {
         Box::pin(async move {
-            let (mut call, event) = request.input;
+            let (context, (mut call, event), mut extensions) = request.into_parts();
             if call.timer.is_some() {
                 return Err(Status::invalid_argument("timer 不能进入事件入口"));
             }
             let id = call.request_id;
-            let mut context = request.context;
-            context.extensions_mut().insert(call.clone());
+            extensions.insert(call.clone());
             let effects = self
                 .events
-                .receive(&mut call, ExecutionRequest::new(context, event))
+                .receive(
+                    &mut call,
+                    ExecutionRequest::from_parts(context, event, extensions),
+                )
                 .await
                 .map_err(event_status)?;
-            Ok(proto::EventResponse {
+            Ok(effects.map(|effects| proto::EventResponse {
                 request_id: id,
                 error: None,
                 timers: merge_timers(effects).map(super::timer::encode_update),
-            })
+            }))
         })
     }
     fn call(&self, request: ExecutionRequest<(CallContext, Payload)>) -> CallTask<'_> {
         Box::pin(async move {
-            let (call, payload) = request.input;
-            let mut request_context = request.context;
-            request_context.extensions_mut().insert(call.clone());
+            let (request_context, (call, payload), mut extensions) = request.into_parts();
+            extensions.insert(call.clone());
             if let Some(trigger) = &call.timer {
-                request_context.extensions_mut().insert(trigger.clone());
+                extensions.insert(trigger.clone());
             } else {
-                drop(request_context.extensions_mut().remove::<TimerTrigger>());
+                drop(extensions.remove::<TimerTrigger>());
             }
             let timer = call.timer.is_some();
             let context = request_context
@@ -298,12 +309,17 @@ impl Handler for HandlerRegistry {
                     .timers
                     .get(&payload.message_id)
                     .ok_or_else(|| Status::unimplemented("游戏消息尚未注册"))?;
-                return handler(ExecutionRequest::new(context, (call, payload.body))).await;
+                return handler(ExecutionRequest::from_parts(
+                    context,
+                    (call, payload.body),
+                    extensions,
+                ))
+                .await;
             }
             let id = call.request_id;
             let reply = self
                 .handlers
-                .dispatch(ExecutionRequest::new(
+                .dispatch(ExecutionRequest::from_parts(
                     context,
                     (
                         call,
@@ -312,10 +328,11 @@ impl Handler for HandlerRegistry {
                             body: payload.body,
                         },
                     ),
+                    extensions,
                 ))
                 .await
                 .map_err(|error| dispatch_status(error, |error| error))?;
-            Ok(CallResponse {
+            Ok(reply.map(|reply| CallResponse {
                 request_id: id,
                 payload: Some(Payload {
                     message_id: reply.message.key,
@@ -323,7 +340,7 @@ impl Handler for HandlerRegistry {
                 }),
                 error: None,
                 timers: reply.output.map(super::timer::encode_update),
-            })
+            }))
         })
     }
 }

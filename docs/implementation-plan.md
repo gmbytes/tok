@@ -481,3 +481,9 @@ Listener::from_server 已支持带 Tower Layer 的 Tonic Server。内部改为 R
 本批已实现三项：通用分发表显式取键的 into_service 适配、protobuf / message 直接 Service 入口、普通业务 RPC 与本地示例接入及 rustdoc 指南同步。分发表是路由末端，公共 Layer 和路由专用 Layer 分别组合，不为形式统一新增 Registry Layer。
 
 验收覆盖公共/路由策略的 Context 传递、未知键和原错误、停止前不取键、路由就绪与非协作式取键的原预算，以及注册后的快照隔离；工作区串行 311 项通过、32 项外部专项默认跳过，Clippy、rustdoc（19 项指南示例）、dispatch / rpc / client smoke、格式及 UTF-8/LF 和文档链接检查通过。环境边界与详细结果见 status.md；本轮随本次提交交付。
+
+## Request / Response 扩展分离校正（2026-10-21）
+
+本批交付：Context 与输入扩展分离、独立 Response 成功封装、请求/结果转换与拆装、各注册器和协议适配迁移，以及 gateway 准入/FIFO/投递结果接续。Request / Response 不依赖 ContextError，Context::child 与能力转移明确分工。泛型保护中间件不强制包装结果；生命周期与后端契约保持各自类型。
+
+验收已覆盖输入能力穿过转换/排队、输出元信息经内层处理到外层策略、编解码后的双向扩展、事件聚合冲突规则、独立范围、传输边界和原始 Err。AGENTS、运行模型和 rustdoc 指南已同步；工作区 317 项、真实 NATS 16 项、Clippy、rustdoc 和六个 smoke 通过，详细结果见 status.md。不增加线协议兼容层或自动重试。

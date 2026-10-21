@@ -36,7 +36,7 @@ impl Handler for Capture {
     fn handle(&self, request: tok_execution::Request<Arc<Message>>) -> Task<'_> {
         Box::pin(async move {
             self.0.lock().unwrap().push(request.input);
-            Ok(Outcome::Handled)
+            Ok(tok_execution::Response::new(Outcome::Handled))
         })
     }
 }
@@ -335,7 +335,7 @@ async fn handler_timeout_does_not_retry_or_block_later_events() {
                     std::future::pending::<()>().await;
                 }
                 done.notify_one();
-                Ok(Outcome::Handled)
+                Ok(tok_execution::Response::new(Outcome::Handled))
             })
         })
         .unwrap();
@@ -409,7 +409,7 @@ async fn ordinary_service_can_subscribe_handle_and_publish_another_event() {
                         Recorded { value: event.value },
                     )?)
                     .await
-                    .map(|()| Outcome::Handled)
+                    .map(|()| tok_execution::Response::new(Outcome::Handled))
             })
         })
         .unwrap();
@@ -423,7 +423,7 @@ async fn ordinary_service_can_subscribe_handle_and_publish_another_event() {
             let result = Arc::clone(&result);
             Box::pin(async move {
                 result.lock().unwrap().push(event.value);
-                Ok(Outcome::Handled)
+                Ok(tok_execution::Response::new(Outcome::Handled))
             })
         })
         .unwrap();
@@ -1229,12 +1229,12 @@ async fn scoped_publisher_keeps_local_extensions_and_receiver_installs_its_own_s
             let seen = Arc::clone(&seen);
             assert_eq!(request.context.service().service_name, "consumer");
             assert_eq!(
-                request.context.extensions().get::<String>().unwrap(),
+                request.extensions().get::<String>().unwrap(),
                 "consumer-capability"
             );
             Box::pin(async move {
                 seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                Ok(Outcome::Handled)
+                Ok(tok_execution::Response::new(Outcome::Handled))
             })
         })
         .unwrap();
@@ -1255,7 +1255,7 @@ async fn scoped_publisher_keeps_local_extensions_and_receiver_installs_its_own_s
     let subscription = bus.subscribe(subscriber).await.unwrap();
     let stop = CancellationToken::new();
     let task = tokio::spawn(subscription.run(stop.clone()));
-    let mut context = tok_execution::Context::new(
+    let context = tok_execution::Context::new(
         tok_core::Identity {
             node_id: "test".into(),
             service_name: "producer".into(),
@@ -1265,13 +1265,12 @@ async fn scoped_publisher_keeps_local_extensions_and_receiver_installs_its_own_s
         CancellationToken::new(),
     )
     .unwrap();
-    context
-        .extensions_mut()
-        .insert(String::from("producer-capability"));
+    let mut extensions = tok_core::Extensions::default();
+    extensions.insert(String::from("producer-capability"));
     let policy = tower::ServiceBuilder::new()
         .map_request(|request: tok_execution::Request<Message>| {
             assert_eq!(
-                request.context.extensions().get::<String>().unwrap(),
+                request.extensions().get::<String>().unwrap(),
                 "producer-capability"
             );
             request
@@ -1295,16 +1294,24 @@ async fn scoped_publisher_keeps_local_extensions_and_receiver_installs_its_own_s
     assert!(matches!(
         policy
             .clone()
-            .oneshot(tok_execution::Request::new(expired, message()))
+            .oneshot(tok_execution::Request::from_parts(
+                expired,
+                message(),
+                extensions.clone()
+            ))
             .await,
         Err(tok_events::Error::Stopped(
             tok_execution::StopReason::DeadlineExceeded
         ))
     ));
-    tokio::spawn(policy.oneshot(tok_execution::Request::new(context, message())))
-        .await
-        .unwrap()
-        .unwrap();
+    tokio::spawn(policy.oneshot(tok_execution::Request::from_parts(
+        context,
+        message(),
+        extensions,
+    )))
+    .await
+    .unwrap()
+    .unwrap();
     tokio::time::timeout(Duration::from_secs(2), async {
         while count.load(std::sync::atomic::Ordering::SeqCst) < 1 {
             tokio::task::yield_now().await;

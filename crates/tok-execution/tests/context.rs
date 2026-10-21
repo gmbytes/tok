@@ -7,7 +7,7 @@ use std::{
     time::Duration,
 };
 use tok_core::service::Identity;
-use tok_execution::{Context, ContextError, StopReason};
+use tok_execution::{Context, ContextError, Request, StopReason};
 use tokio_util::sync::CancellationToken;
 
 fn context(cancellation: CancellationToken) -> Context {
@@ -25,7 +25,7 @@ fn context(cancellation: CancellationToken) -> Context {
 #[test]
 fn child_preserves_budget_and_typed_extensions_without_cancelling_parent() {
     let cancellation = CancellationToken::new();
-    let mut parent = context(cancellation.clone());
+    let mut parent = Request::new(context(cancellation.clone()), ());
     #[derive(Debug, PartialEq, Eq)]
     struct EntityId(u64);
     parent.extensions_mut().insert(EntityId(7));
@@ -33,9 +33,13 @@ fn child_preserves_budget_and_typed_extensions_without_cancelling_parent() {
         .extensions_mut()
         .insert(Arc::new(AtomicUsize::new(0)));
     parent.extensions_mut().insert(String::from("parent"));
-    let mut child = parent.child("ordinary.changed").unwrap();
-    assert_eq!(child.deadline(), parent.deadline());
-    assert_eq!(child.service(), parent.service());
+    let mut child = Request::from_parts(
+        parent.context.child("ordinary.changed").unwrap(),
+        (),
+        parent.extensions().clone(),
+    );
+    assert_eq!(child.context.deadline(), parent.context.deadline());
+    assert_eq!(child.context.service(), parent.context.service());
     assert_eq!(child.extensions().get::<EntityId>(), Some(&EntityId(7)));
     child
         .extensions()
@@ -53,10 +57,10 @@ fn child_preserves_budget_and_typed_extensions_without_cancelling_parent() {
     child.extensions_mut().insert(String::from("child"));
     assert_eq!(parent.extensions().get::<String>().unwrap(), "parent");
     assert_eq!(child.extensions().get::<String>().unwrap(), "child");
-    child.cancellation().cancel();
-    assert_eq!(child.check(), Err(StopReason::Cancelled));
-    assert!(parent.check().is_ok());
-    let another = parent.child("another").unwrap();
+    child.context.cancellation().cancel();
+    assert_eq!(child.context.check(), Err(StopReason::Cancelled));
+    assert!(parent.context.check().is_ok());
+    let another = parent.context.child("another").unwrap();
     cancellation.cancel();
     assert_eq!(another.check(), Err(StopReason::Cancelled));
 }
@@ -95,11 +99,11 @@ fn zero_budget_is_already_expired_and_invalid_metadata_is_rejected() {
 #[test]
 fn request_mapping_and_explicit_stop_boundary_preserve_deadline_and_extensions() {
     let stop = CancellationToken::new();
-    let mut original = context(stop.clone());
+    let mut original = Request::new(context(stop.clone()), 1);
     original.extensions_mut().insert(String::from("marker"));
-    let deadline = original.deadline();
-    let request = tok_execution::Request::new(original, 1).map(|value| value.to_string());
-    let narrowed = request.context.with_budget_limit(Duration::MAX);
+    let deadline = original.context.deadline();
+    let request = original.map(|value| value.to_string());
+    let narrowed = request.context.clone().with_budget_limit(Duration::MAX);
     assert_eq!(narrowed.deadline(), deadline);
     let independent_stop = CancellationToken::new();
     let narrowed = narrowed
@@ -107,7 +111,7 @@ fn request_mapping_and_explicit_stop_boundary_preserve_deadline_and_extensions()
         .with_budget_limit(Duration::from_millis(10))
         .with_cancellation(independent_stop.clone());
     assert!(narrowed.deadline() < deadline);
-    assert_eq!(narrowed.extensions().get::<String>().unwrap(), "marker");
+    assert_eq!(request.extensions().get::<String>().unwrap(), "marker");
     stop.cancel();
     assert!(narrowed.check().is_ok());
     independent_stop.cancel();

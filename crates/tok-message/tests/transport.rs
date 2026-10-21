@@ -58,9 +58,9 @@ fn handler() -> HandlerRegistry {
     let mut registry = HandlerRegistry::new();
     registry
         .register(1, 2, |execution_request: tok_execution::Request<(tok_message::rpc::CallContext, Data)>| async move { let (_, data) = execution_request.input;
-            Ok(Data {
+            Ok(tok_execution::Response::new(Data {
                 value: data.value + 1,
-            })
+            }))
         })
         .unwrap();
     registry
@@ -124,8 +124,8 @@ async fn shared_endpoint_dispatches_and_rejects_unready_malformed_and_wrong_targ
                 .await
         }
         .unwrap();
-        assert_eq!(response.request_id, 99);
-        let body = response.payload.unwrap();
+        assert_eq!(response.output.request_id, 99);
+        let body = response.output.payload.unwrap();
         assert_eq!(body.message_id, 2);
         assert_eq!(Data::decode(body.body.as_slice()).unwrap().value, 42);
     }
@@ -217,12 +217,12 @@ impl Handler for Slow {
         Box::pin(async move {
             self.calls.fetch_add(1, Ordering::SeqCst);
             tokio::time::sleep(Duration::from_secs(10)).await;
-            Ok(CallResponse {
+            Ok(tok_execution::Response::new(CallResponse {
                 request_id: context.request_id,
                 payload: None,
                 error: None,
                 timers: None,
-            })
+            }))
         })
     }
 }
@@ -286,7 +286,7 @@ fn duplicate_message_and_proto_service_bindings_are_rejected() {
                     Data
                 )>| async move {
                     let (_, data) = execution_request.input;
-                    Ok(data)
+                    Ok(tok_execution::Response::new(data))
                 }
             )
             .is_err()
@@ -301,7 +301,7 @@ fn duplicate_message_and_proto_service_bindings_are_rejected() {
                     Data
                 )>| async move {
                     let (_, data) = execution_request.input;
-                    Ok(data)
+                    Ok(tok_execution::Response::new(data))
                 }
             )
             .is_err()
@@ -333,12 +333,12 @@ async fn user_tower_concurrency_limit_is_preserved_across_handler_clones() {
                     peak.fetch_max(count, Ordering::SeqCst);
                     tokio::time::sleep(Duration::from_millis(20)).await;
                     active.fetch_sub(1, Ordering::SeqCst);
-                    Ok::<_, tonic::Status>(CallResponse {
+                    Ok::<_, tonic::Status>(tok_execution::Response::new(CallResponse {
                         request_id: context.request_id,
                         payload: Some(payload),
                         error: None,
                         timers: None,
-                    })
+                    }))
                 }
             },
         ));
@@ -372,8 +372,11 @@ async fn user_tower_concurrency_limit_is_preserved_across_handler_clones() {
             root((context(&target), payload(2)), tracing::Span::current())
         )
     );
-    assert_eq!(first.unwrap().payload.unwrap().body, payload(1).body);
-    assert_eq!(second.unwrap().payload.unwrap().body, payload(2).body);
+    assert_eq!(first.unwrap().output.payload.unwrap().body, payload(1).body);
+    assert_eq!(
+        second.unwrap().output.payload.unwrap().body,
+        payload(2).body
+    );
     assert_eq!(peak.load(Ordering::SeqCst), 1);
     shutdown.cancel();
     tokio::time::timeout(Duration::from_secs(2), server)
@@ -527,7 +530,7 @@ async fn listener_tower_layers_cover_shared_routes_and_preserve_readiness() {
                     response.metadata().get("x-listener-layer").unwrap(),
                     "applied"
                 );
-                Ok(response)
+                Ok(tok_execution::Response::new(response))
             },
         )
     };
@@ -546,7 +549,7 @@ async fn listener_tower_layers_cover_shared_routes_and_preserve_readiness() {
         .await
         .unwrap();
     assert_eq!(
-        Data::decode(response.payload.unwrap().body.as_slice())
+        Data::decode(response.output.payload.unwrap().body.as_slice())
             .unwrap()
             .value,
         42
@@ -561,6 +564,7 @@ async fn listener_tower_layers_cover_shared_routes_and_preserve_readiness() {
             )
             .await
             .unwrap()
+            .output
             .request_id,
         99
     );

@@ -49,12 +49,10 @@ where
         let inner = self.0.clone();
         Box::pin(async move {
             let session = request
-                .context
                 .extensions()
                 .get::<SessionHandle>()
                 .ok_or(ErrorCode::InvalidState)?;
             let manager = request
-                .context
                 .extensions()
                 .get::<SessionManager>()
                 .ok_or(ErrorCode::InvalidState)?;
@@ -63,7 +61,6 @@ where
                 || request.context.operation().starts_with("player/timer/")
             {
                 request
-                    .context
                     .extensions()
                     .get::<Statistics>()
                     .ok_or(ErrorCode::InvalidState)?

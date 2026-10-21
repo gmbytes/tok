@@ -3,8 +3,8 @@
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
 
 use std::{future::Future, sync::Arc};
-use tok_execution::Request;
 use tok_execution::registry::{self, DispatchError};
+use tok_execution::{Request, Response};
 use tower::{Service, ServiceExt};
 
 /// 已编码的正文与调用方定义的消息键。
@@ -82,7 +82,7 @@ where
         Req: prost::Message + Default + Send + 'static,
         Resp: prost::Message + Send + 'static,
         F: Fn(Request<(C, Req)>) -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = Result<Reply<Resp, O>, E>> + Send + 'static,
+        Fut: Future<Output = Result<Response<Reply<Resp, O>>, E>> + Send + 'static,
     {
         let handler = Arc::new(handler);
         self.register_service(
@@ -104,7 +104,7 @@ where
     where
         Req: prost::Message + Default + Send + 'static,
         Resp: prost::Message + Send + 'static,
-        S: Service<Request<(C, Req)>, Response = Reply<Resp, O>, Error = E>
+        S: Service<Request<(C, Req)>, Response = Response<Reply<Resp, O>>, Error = E>
             + Clone
             + Send
             + Sync
@@ -117,19 +117,19 @@ where
                 let service = service.clone();
                 let response_key = response_key.clone();
                 async move {
-                    let (state, body) = request.input;
+                    let (context, (state, body), extensions) = request.into_parts();
                     let input = Req::decode(body.as_slice()).map_err(Error::Decode)?;
                     let reply = service
-                        .oneshot(Request::new(request.context, (state, input)))
+                        .oneshot(Request::from_parts(context, (state, input), extensions))
                         .await
                         .map_err(Error::Handler)?;
-                    Ok(Reply {
+                    Ok(reply.map(|reply| Reply {
                         message: Message {
                             key: response_key,
                             body: reply.message.encode_to_vec(),
                         },
                         output: reply.output,
-                    })
+                    }))
                 }
             }),
         )
@@ -138,7 +138,7 @@ where
     pub async fn dispatch(
         &self,
         request: Request<(C, Message<K>)>,
-    ) -> Result<Reply<Message<K>, O>, DispatchError<K, Error<E>>> {
+    ) -> Result<Response<Reply<Message<K>, O>>, DispatchError<K, Error<E>>> {
         self.clone().oneshot(request).await
     }
 }
@@ -150,7 +150,7 @@ where
     O: Send + 'static,
     E: Send + 'static,
 {
-    type Response = Reply<Message<K>, O>;
+    type Response = Response<Reply<Message<K>, O>>;
     type Error = DispatchError<K, Error<E>>;
     type Future =
         std::pin::Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
@@ -163,11 +163,11 @@ where
     fn call(&mut self, request: Request<(C, Message<K>)>) -> Self::Future {
         let inner = Arc::clone(&self.inner);
         Box::pin(async move {
-            let (state, message) = request.input;
+            let (context, (state, message), extensions) = request.into_parts();
             inner
                 .dispatch(
                     &message.key,
-                    Request::new(request.context, (state, message.body)),
+                    Request::from_parts(context, (state, message.body), extensions),
                 )
                 .await
         })

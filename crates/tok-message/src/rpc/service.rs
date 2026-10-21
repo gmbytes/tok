@@ -1,7 +1,6 @@
 use super::{CallContext, Handler};
 use std::{sync::Arc, time::Duration};
 use tok_core::service::Identity;
-use tok_execution::Request as ExecutionRequest;
 use tok_player::{SessionIdentity, TimerTrigger};
 use tok_proto::internal::v1::{self as proto, CallRequest, CallResponse};
 use tonic::{Request, Response, Status};
@@ -157,7 +156,9 @@ impl Service {
             },
             payload.message_id
         );
-        let mut execution = self.server.context(&metadata, operation)?;
+        let mut execution =
+            self.server
+                .request(&metadata, operation, (context.clone(), payload))?;
         execution.extensions_mut().insert(context.clone());
         if let Some(trigger) = &context.timer {
             execution.extensions_mut().insert(trigger.clone());
@@ -166,15 +167,15 @@ impl Service {
         let mut response = self
             .server
             .execute(
-                ExecutionRequest::new(execution, (context, payload)),
+                execution,
                 tower::service_fn(move |request| {
                     let handler = Arc::clone(&handler);
                     async move { handler.call(request).await }
                 }),
             )
             .await?;
-        response.request_id = request_id;
-        Ok(Response::new(response))
+        response.output.request_id = request_id;
+        Ok(Response::new(response.output))
     }
 }
 
@@ -205,27 +206,29 @@ impl proto::player_rpc_server::PlayerRpc for Service {
             .validate(1_048_576)
             .map_err(|_| Status::invalid_argument("事件参数无效"))?;
         let request_id = context.request_id;
-        let mut execution = self
-            .server
-            .context(&metadata, format!("event/{}", event.event_type))?;
+        let event = Arc::new(event);
+        let mut execution = self.server.request(
+            &metadata,
+            format!("event/{}", event.event_type),
+            (context.clone(), Arc::clone(&event)),
+        )?;
         execution.extensions_mut().insert(context.clone());
         execution.extensions_mut().insert(event.event_id.clone());
         execution.extensions_mut().insert(event.topic.clone());
-        let event = Arc::new(event);
         execution.extensions_mut().insert(Arc::clone(&event));
         let handler = Arc::clone(&self.handler);
         let mut response = self
             .server
             .execute(
-                ExecutionRequest::new(execution, (context, event)),
+                execution,
                 tower::service_fn(move |request| {
                     let handler = Arc::clone(&handler);
                     async move { handler.event(request).await }
                 }),
             )
             .await?;
-        response.request_id = request_id;
-        Ok(Response::new(response))
+        response.output.request_id = request_id;
+        Ok(Response::new(response.output))
     }
 
     async fn call(&self, request: Request<CallRequest>) -> Result<Response<CallResponse>, Status> {

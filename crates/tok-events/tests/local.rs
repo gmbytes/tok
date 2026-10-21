@@ -32,7 +32,7 @@ async fn async_handlers_borrow_current_state_in_order_and_support_multiple_types
                 request.input.state.push(request.input.event.payload.0);
                 tokio::task::yield_now().await;
                 request.input.state.push(2);
-                Ok(())
+                Ok(tok_execution::Response::new(()))
             })
         })
         .unwrap();
@@ -40,7 +40,7 @@ async fn async_handlers_borrow_current_state_in_order_and_support_multiple_types
         .register_service::<Changed, _>(sync_handler(
             |request: Request<Input<'_, Vec<i32>, Changed>>| {
                 request.input.state.push(request.input.state[0] + 1);
-                Ok(())
+                Ok(tok_execution::Response::new(()))
             },
         ))
         .unwrap();
@@ -48,7 +48,7 @@ async fn async_handlers_borrow_current_state_in_order_and_support_multiple_types
         .register::<Other, _>(|request| {
             Box::pin(async move {
                 request.input.state.push(9);
-                Ok(())
+                Ok(tok_execution::Response::new(()))
             })
         })
         .unwrap();
@@ -58,6 +58,7 @@ async fn async_handlers_borrow_current_state_in_order_and_support_multiple_types
             .dispatch(&mut state, support::request(&changed(7)))
             .await
             .unwrap()
+            .output
             .len(),
         2
     );
@@ -76,7 +77,7 @@ async fn first_error_preserves_original_identity_and_keeps_prior_changes() {
         .register::<Changed, _>(|request| {
             Box::pin(async move {
                 request.input.state.push(request.input.event.payload.0);
-                Ok(())
+                Ok(tok_execution::Response::new(()))
             })
         })
         .unwrap();
@@ -114,18 +115,20 @@ async fn registration_bounds_type_collisions_and_empty_dispatch_are_explicit() {
     let mut registry = Registry::<(), (), Error>::new(1).unwrap();
     assert!(
         registry
-            .register::<Invalid, _>(|_| Box::pin(async { Ok(()) }))
+            .register::<Invalid, _>(|_| Box::pin(async { Ok(tok_execution::Response::new(())) }))
             .is_err()
     );
     registry
-        .register::<Changed, _>(|_| Box::pin(async { Ok(()) }))
+        .register::<Changed, _>(|_| Box::pin(async { Ok(tok_execution::Response::new(())) }))
         .unwrap();
     assert!(matches!(
-        registry.register::<Changed, _>(|_| Box::pin(async { Ok(()) })),
+        registry
+            .register::<Changed, _>(|_| Box::pin(async { Ok(tok_execution::Response::new(())) })),
         Err(Error::CapacityExceeded)
     ));
     assert!(matches!(
-        registry.register::<Collision, _>(|_| Box::pin(async { Ok(()) })),
+        registry
+            .register::<Collision, _>(|_| Box::pin(async { Ok(tok_execution::Response::new(())) })),
         Err(Error::InvalidInput(_))
     ));
     let other = Envelope::new(EventId::generate(), Other).unwrap();
@@ -134,6 +137,7 @@ async fn registration_bounds_type_collisions_and_empty_dispatch_are_explicit() {
             .dispatch(&mut (), support::request(&other))
             .await
             .unwrap()
+            .output
             .is_empty()
     );
     let collision = Envelope::new(EventId::generate(), Collision).unwrap();
@@ -195,18 +199,49 @@ async fn local_execution_stays_on_callers_thread_and_carries_capabilities() {
                 assert_eq!(std::thread::current().id(), thread);
                 tokio::task::yield_now().await;
                 assert_eq!(std::thread::current().id(), thread);
-                assert_eq!(request.context.extensions().get::<u32>(), Some(&42));
+                assert_eq!(request.extensions().get::<u32>(), Some(&42));
                 *request.input.state += 1;
-                Ok(())
+                Ok(tok_execution::Response::new(()))
             })
         })
         .unwrap();
-    let mut context = support::context();
+    let mut context = tok_execution::Request::new(support::context(), ());
     context.extensions_mut().insert(42u32);
     let mut state = 0;
+    let event = changed(1);
     registry
-        .dispatch(&mut state, Request::new(context, &changed(1)))
+        .dispatch(&mut state, context.map(|()| &event))
         .await
         .unwrap();
     assert_eq!(state, 1);
+}
+
+#[tokio::test]
+async fn fanout_merges_only_output_metadata_in_registration_order() {
+    let mut registry = Registry::<(), u32, Error>::new(2).unwrap();
+    for value in [1u32, 2] {
+        registry
+            .register::<Changed, _>(move |mut request| {
+                Box::pin(async move {
+                    assert_eq!(request.extensions().get::<String>().unwrap(), "input");
+                    assert!(request.extensions().get::<u32>().is_none());
+                    request.extensions_mut().insert(value);
+                    let mut response = tok_execution::Response::new(value);
+                    response.extensions_mut().insert(value);
+                    if value == 1 {
+                        response.extensions_mut().insert(true);
+                    }
+                    Ok(response)
+                })
+            })
+            .unwrap();
+    }
+    let event = changed(0);
+    let mut request = support::request(&event);
+    request.extensions_mut().insert(String::from("input"));
+    let response = registry.dispatch(&mut (), request).await.unwrap();
+    assert_eq!(response.output, [1, 2]);
+    assert_eq!(response.extensions().get::<u32>(), Some(&2));
+    assert_eq!(response.extensions().get::<bool>(), Some(&true));
+    assert!(response.extensions().get::<String>().is_none());
 }

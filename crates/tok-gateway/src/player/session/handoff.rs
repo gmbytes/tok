@@ -157,10 +157,8 @@ impl SessionManager {
         &self,
         request: tok_execution::Request<proto::HandoffRequest>,
     ) -> Result<proto::HandoffResponse> {
-        let tok_execution::Request {
-            context,
-            input: request,
-        } = request;
+        let (execution, request, extensions) = request.into_parts();
+        let scope = tok_execution::Request::from_parts(execution, (), extensions);
         let _activity = self.activity()?;
         if !self.inner.config.handoff_enabled
             || uuid::Uuid::parse_str(&request.handoff_id).is_err()
@@ -292,14 +290,11 @@ impl SessionManager {
                 execution: Some(execution),
                 extension: Some(proto::ExtensionSnapshot {
                     kind: session.extension.kind().to_owned(),
-                    body: session.extension.snapshot(tok_execution::Request::new(
-                        SessionHandle(Arc::clone(&session)).delivery_context(
-                            Some(&context),
-                            "player/session/snapshot".into(),
-                            false,
-                        )?,
-                        SessionHandle(Arc::clone(&session)),
-                    ))?,
+                    body: session.extension.snapshot(
+                        SessionHandle(Arc::clone(&session))
+                            .delivery_scope(Some(&scope), "player/session/snapshot".into(), false)?
+                            .map(|()| SessionHandle(Arc::clone(&session))),
+                    )?,
                 }),
             };
             if Instant::now() >= deadline {
@@ -492,7 +487,7 @@ pub(super) async fn receive(
     )
     .map_err(|_| ErrorCode::Internal)?;
     context = context.with_deadline_limit(deadline.into_std());
-    *context.extensions_mut() = manager.extensions();
+    let context = tok_execution::Request::new(context, ()).with_extensions(manager.extensions());
     let limit = manager.inner.config.max_handoff_bytes + 65536;
     let mut request = proto::HandoffRequest {
         handoff_id: uuid::Uuid::new_v4().to_string(),
@@ -529,7 +524,7 @@ pub(super) async fn receive(
                 remote_call(
                     &client,
                     &target,
-                    compensation_context(manager)?,
+                    compensation_scope(manager)?,
                     request.clone(),
                     Some(HandoffAction::Cancel),
                     limit,
@@ -635,9 +630,9 @@ pub(super) async fn receive(
             .await;
             return Err(ErrorCode::Timeout.into());
         }
-        let extensions = match manager.inner.extension.restore(tok_execution::Request::new(
-            context.child("player/session/restore").map_err(|_| ErrorCode::Internal)?,
-            (acquired.identity.clone(), extension.body.as_slice()),
+        let extensions = match manager.inner.extension.restore(tok_execution::Request::from_parts(
+            context.context.child("player/session/restore").map_err(|_| ErrorCode::Internal)?,
+            (acquired.identity.clone(), extension.body.as_slice()), context.extensions().clone(),
         )) {
             Ok(extensions) => extensions,
             Err(error) => {
@@ -757,7 +752,7 @@ pub(super) async fn receive(
             remote_call(
                 &client,
                 &target,
-                compensation_context(manager)?,
+                compensation_scope(manager)?,
                 request,
                 Some(HandoffAction::Cancel),
                 limit,
@@ -769,30 +764,30 @@ pub(super) async fn receive(
 }
 
 // 取消补偿在协调调用过期后仍须尽力通知，使用独立有限范围；原状态机监督负责最终兜底。
-fn compensation_context(manager: &SessionManager) -> Result<tok_execution::Context> {
-    let mut context = tok_execution::Context::new(
+fn compensation_scope(manager: &SessionManager) -> Result<tok_execution::Request<()>> {
+    let context = tok_execution::Context::new(
         manager.gateway().identity().clone(),
         "gateway/cancel_handoff",
         Duration::from_millis(manager.inner.config.rpc_timeout_ms),
         tokio_util::sync::CancellationToken::new(),
     )
     .map_err(|_| ErrorCode::Internal)?;
-    *context.extensions_mut() = manager.extensions();
+    let context = tok_execution::Request::new(context, ()).with_extensions(manager.extensions());
     Ok(context)
 }
 async fn remote_call(
     client: &tok_grpc::Client,
     target: &tok_core::ServiceDescriptor,
-    context: tok_execution::Context,
+    context: tok_execution::Request<()>,
     request: proto::HandoffRequest,
     action: Option<HandoffAction>,
     limit: usize,
-) -> std::result::Result<tonic::Response<proto::HandoffResponse>, Status> {
+) -> std::result::Result<tok_execution::Response<proto::HandoffResponse>, Status> {
     client
         .execute(
             target,
             0,
-            tok_execution::Request::new(context, tonic::Request::new(request)),
+            context.map(|()| tonic::Request::new(request)),
             move |channel, request| async move {
                 let mut client = proto::gateway_rpc_client::GatewayRpcClient::new(channel)
                     .max_decoding_message_size(limit)
@@ -806,7 +801,6 @@ async fn remote_call(
             },
         )
         .await
-        .map(tonic::Response::new)
 }
 async fn release_failed_restore(manager: &SessionManager, ownership: SessionOwnership) {
     #[expect(

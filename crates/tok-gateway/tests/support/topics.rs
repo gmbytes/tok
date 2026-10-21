@@ -60,7 +60,7 @@ impl Handler for Ignore {
         vec!["test.topic"]
     }
     fn handle(&self, _: tok_execution::Request<Arc<Message>>) -> Task<'_> {
-        Box::pin(async { Ok(Outcome::Ignored) })
+        Box::pin(async { Ok(tok_execution::Response::new(Outcome::Ignored)) })
     }
 }
 struct Active(Arc<AtomicUsize>);

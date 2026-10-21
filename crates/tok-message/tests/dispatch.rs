@@ -27,7 +27,7 @@ struct Value {
 struct Denied;
 
 fn context() -> Context {
-    let mut ctx = Context::new(
+    Context::new(
         Identity {
             node_id: "node".into(),
             service_name: "custom".into(),
@@ -36,9 +36,7 @@ fn context() -> Context {
         Duration::from_secs(1),
         CancellationToken::new(),
     )
-    .unwrap();
-    ctx.extensions_mut().insert(42u64);
-    ctx
+    .unwrap()
 }
 fn call() -> CallContext {
     CallContext {
@@ -63,17 +61,17 @@ async fn local_and_rpc_share_one_chain_and_map_errors_only_at_rpc_boundary() {
             tower::service_fn(move |request: Request<(u32, Value)>| {
                 let observed = Arc::clone(&observed);
                 async move {
-                    assert_eq!(request.context.extensions().get::<u64>(), Some(&42));
+                    assert_eq!(request.extensions().get::<u64>(), Some(&42));
                     observed.fetch_add(1, Ordering::SeqCst);
                     if request.input.1.value == 0 {
                         return Err(Denied);
                     }
-                    Ok(Reply {
+                    Ok(tok_execution::Response::new(Reply {
                         message: Value {
                             value: request.input.0 + request.input.1.value,
                         },
                         output: (),
-                    })
+                    }))
                 }
             }),
         )
@@ -81,29 +79,23 @@ async fn local_and_rpc_share_one_chain_and_map_errors_only_at_rpc_boundary() {
     let registry = Arc::new(registry);
     let body = Value { value: 3 }.encode_to_vec();
     let local = registry
-        .dispatch(Request::new(
-            context(),
-            (
-                5,
-                Message {
-                    key: 1,
-                    body: body.clone(),
-                },
-            ),
-        ))
+        .dispatch(request((
+            5,
+            Message {
+                key: 1,
+                body: body.clone(),
+            },
+        )))
         .await
         .unwrap();
     let denied = registry
-        .dispatch(Request::new(
-            context(),
-            (
-                5,
-                Message {
-                    key: 1,
-                    body: vec![],
-                },
-            ),
-        ))
+        .dispatch(request((
+            5,
+            Message {
+                key: 1,
+                body: vec![],
+            },
+        )))
         .await
         .unwrap_err();
     assert!(matches!(
@@ -128,16 +120,13 @@ async fn local_and_rpc_share_one_chain_and_map_errors_only_at_rpc_boundary() {
     });
     assert_eq!(
         adapter
-            .call(Request::new(
-                context(),
-                (
-                    timer,
-                    Payload {
-                        message_id: 1,
-                        body: body.clone()
-                    }
-                )
-            ))
+            .call(request((
+                timer,
+                Payload {
+                    message_id: 1,
+                    body: body.clone()
+                }
+            )))
             .await
             .unwrap_err()
             .code(),
@@ -181,10 +170,10 @@ async fn local_and_rpc_share_one_chain_and_map_errors_only_at_rpc_boundary() {
         )
         .await
         .unwrap();
-    let payload = result.payload.unwrap();
-    assert_eq!(result.request_id, 7);
-    assert_eq!(payload.message_id, local.message.key);
-    assert_eq!(payload.body, local.message.body);
+    let payload = result.output.payload.unwrap();
+    assert_eq!(result.output.request_id, 7);
+    assert_eq!(payload.message_id, local.output.message.key);
+    assert_eq!(payload.body, local.output.message.body);
     for (id, body, code) in [
         (0, vec![], Code::InvalidArgument),
         (1, vec![], Code::PermissionDenied),
@@ -231,10 +220,10 @@ fn numbered_registry_rejects_zero_and_duplicate_registration() {
                 response,
                 |execution_request: tok_execution::Request<((), Value)>| async move {
                     let (_, value) = execution_request.input;
-                    Ok(Reply {
+                    Ok(tok_execution::Response::new(Reply {
                         message: value,
                         output: (),
-                    })
+                    }))
                 }
             ),
             Err(tok_message::Error::Invalid(_))
@@ -246,10 +235,10 @@ fn numbered_registry_rejects_zero_and_duplicate_registration() {
             2,
             |execution_request: tok_execution::Request<((), Value)>| async move {
                 let (_, value) = execution_request.input;
-                Ok(Reply {
+                Ok(tok_execution::Response::new(Reply {
                     message: value,
                     output: (),
-                })
+                }))
             },
         )
         .unwrap();
@@ -259,10 +248,10 @@ fn numbered_registry_rejects_zero_and_duplicate_registration() {
             3,
             |execution_request: tok_execution::Request<((), Value)>| async move {
                 let (_, value) = execution_request.input;
-                Ok(Reply {
+                Ok(tok_execution::Response::new(Reply {
                     message: value,
                     output: (),
-                })
+                }))
             }
         ),
         Err(tok_message::Error::Registration(_))
@@ -292,40 +281,50 @@ async fn numbered_registry_is_a_tower_service_with_common_policy_and_original_bu
     let mut registry = Registry::<(), (), Denied>::new();
     registry
         .register(1, 2, |request: Request<((), Value)>| async move {
-            assert_eq!(request.context.extensions().get::<u64>(), Some(&99));
+            assert_eq!(request.extensions().get::<u64>(), Some(&99));
             if request.input.1.value == 0 {
                 return Err(Denied);
             }
-            Ok(Reply {
+            Ok(tok_execution::Response::new(Reply {
                 message: request.input.1,
                 output: (),
-            })
+            }))
         })
         .unwrap();
     let service = tower::ServiceBuilder::new()
         .map_request(|mut request: Request<((), Message)>| {
-            request.context.extensions_mut().insert(99u64);
+            request.extensions_mut().insert(99u64);
             request
         })
         .service(registry);
     let input = |value| {
-        Request::new(
-            context(),
-            (
-                (),
-                Message {
-                    key: 1,
-                    body: Value { value }.encode_to_vec(),
-                },
-            ),
-        )
+        request((
+            (),
+            Message {
+                key: 1,
+                body: Value { value }.encode_to_vec(),
+            },
+        ))
     };
     assert_eq!(
-        service.clone().oneshot(input(7)).await.unwrap().message.key,
+        service
+            .clone()
+            .oneshot(input(7))
+            .await
+            .unwrap()
+            .output
+            .message
+            .key,
         2
     );
     assert!(matches!(
         service.oneshot(input(0)).await,
         Err(DispatchError::Handler(protobuf::Error::Handler(Denied)))
     ));
+}
+
+fn request<T>(input: T) -> Request<T> {
+    let mut request = Request::new(context(), input);
+    request.extensions_mut().insert(42u64);
+    request
 }

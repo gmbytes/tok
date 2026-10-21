@@ -1,5 +1,5 @@
 use std::{future::Future, sync::Arc};
-use tok_execution::Request;
+use tok_execution::{Request, Response};
 use tower::{Service, ServiceExt};
 
 /// 编号消息的参数或注册错误。
@@ -57,7 +57,7 @@ where
         Req: prost::Message + Default + Send + 'static,
         Resp: prost::Message + Send + 'static,
         F: Fn(Request<(C, Req)>) -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = Result<tok_protobuf::Reply<Resp, O>, E>> + Send + 'static,
+        Fut: Future<Output = Result<Response<tok_protobuf::Reply<Resp, O>>, E>> + Send + 'static,
     {
         let handler = Arc::new(handler);
         self.register_service(
@@ -79,7 +79,7 @@ where
     where
         Req: prost::Message + Default + Send + 'static,
         Resp: prost::Message + Send + 'static,
-        S: Service<Request<(C, Req)>, Response = tok_protobuf::Reply<Resp, O>, Error = E>
+        S: Service<Request<(C, Req)>, Response = Response<tok_protobuf::Reply<Resp, O>>, Error = E>
             + Clone
             + Send
             + Sync
@@ -98,7 +98,7 @@ where
         &self,
         request: Request<(C, tok_protobuf::Message<u32>)>,
     ) -> Result<
-        tok_protobuf::Reply<tok_protobuf::Message<u32>, O>,
+        Response<tok_protobuf::Reply<tok_protobuf::Message<u32>, O>>,
         tok_execution::registry::DispatchError<u32, tok_protobuf::Error<E>>,
     > {
         self.clone().oneshot(request).await
@@ -111,7 +111,7 @@ where
     O: Send + 'static,
     E: Send + 'static,
 {
-    type Response = tok_protobuf::Reply<tok_protobuf::Message<u32>, O>;
+    type Response = Response<tok_protobuf::Reply<tok_protobuf::Message<u32>, O>>;
     type Error = tok_execution::registry::DispatchError<u32, tok_protobuf::Error<E>>;
     type Future = <tok_protobuf::Registry<u32, C, O, E> as Service<
         Request<(C, tok_protobuf::Message<u32>)>,

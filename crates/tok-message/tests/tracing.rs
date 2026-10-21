@@ -34,10 +34,12 @@ impl Handler for Capture {
                     .span_context()
                     .trace_id(),
             );
-            Ok(tok_proto::internal::v1::EventResponse {
-                request_id: context.request_id,
-                ..Default::default()
-            })
+            Ok(tok_execution::Response::new(
+                tok_proto::internal::v1::EventResponse {
+                    request_id: context.request_id,
+                    ..Default::default()
+                },
+            ))
         })
     }
 
@@ -51,12 +53,12 @@ impl Handler for Capture {
                     .span_context()
                     .trace_id(),
             );
-            Ok(CallResponse {
+            Ok(tok_execution::Response::new(CallResponse {
                 request_id: context.request_id,
                 payload: Some(payload),
                 error: None,
                 timers: None,
-            })
+            }))
         })
     }
 }

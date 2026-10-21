@@ -21,7 +21,7 @@ impl Client {
         &self,
         target: &ServiceDescriptor,
         request: tok_execution::Request<(CallContext, Payload)>,
-    ) -> Result<CallResponse, Status> {
+    ) -> Result<tok_execution::Response<CallResponse>, Status> {
         call::call(
             &self.connections,
             target,
@@ -39,11 +39,8 @@ impl Client {
         &self,
         target: &ServiceDescriptor,
         request: tok_execution::Request<(CallContext, std::sync::Arc<tok_events::Message>)>,
-    ) -> Result<proto::EventResponse, Status> {
-        let tok_execution::Request {
-            context: execution,
-            input: (context, event),
-        } = request;
+    ) -> Result<tok_execution::Response<proto::EventResponse>, Status> {
+        let (execution, (context, event), extensions) = request.into_parts();
         call::validate_target(target, &context)?;
         if context.timer.is_some() || context.request_id == 0 {
             return Err(Status::invalid_argument("内部事件上下文无效"));
@@ -65,7 +62,7 @@ impl Client {
             .execute(
                 target,
                 request_id,
-                tok_execution::Request::new(execution.with_span(span), request),
+                tok_execution::Request::from_parts(execution.with_span(span), request, extensions),
                 |channel, request| async move {
                     proto::player_rpc_client::PlayerRpcClient::new(channel)
                         .handle_event(request)
@@ -73,7 +70,7 @@ impl Client {
                 },
             )
             .await?;
-        if response.request_id != request_id {
+        if response.output.request_id != request_id {
             return Err(Status::data_loss("内部事件回应无效"));
         }
         Ok(response)

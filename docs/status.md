@@ -95,7 +95,7 @@ P1–P7 方向校正完成本轮验收，P7 随本次提交交付。后续功能
 
 ## 执行上下文移除固定来源（2026-10-21）
 
-Context 移除 source 字段、Source 枚举和构造/child 的来源参数。执行核心只管理服务、操作、期限、取消、追踪和 Extensions。RPC、事件与网关在入口提供类型化扩展：复用游戏 CallContext、EventId / Topic / Arc<Message>、TimerTrigger，仅网关新增无正文的 ClientRequest 关联标识。RPC 关联信息与事件元信息可以共存，不再将传输方式、触发原因和客户端入口混成互斥枚举。
+Context 移除 source 字段、Source 枚举和构造/child 的来源参数。执行 Context 只管理服务、操作、期限、取消与追踪；类型化扩展位于 Request / Response。RPC、事件与网关在入口提供类型化扩展：复用游戏 CallContext、EventId / Topic / Arc<Message>、TimerTrigger，仅网关新增无正文的 ClientRequest 关联标识。RPC 关联信息与事件元信息可以共存，不再将传输方式、触发原因和客户端入口混成互斥枚举。
 
 事件 Registry 的本地与远端分发提供相同事件头，派生子上下文覆盖当前事件头，不修改父扩展；本地派生仍清除继承的原始编码。客户端无法发布事件、请求与 timer 分表、会话身份校验、预算和取消约束保持不变；Extensions 元信息不作为认证证明。调用方和指南已迁移，不保留 Source 兼容类型。
 
@@ -228,9 +228,9 @@ Listener::from_server 已支持带 Tower Layer 的 Tonic Server。内部改为 R
 
 ### 已符合或不应机械迁移的部分
 
-- [Context::child](../crates/tok-execution/src/context.rs) 保留当前服务、原截止点、父子取消关系、Span 与扩展；[通用分发表](../crates/tok-execution/src/registry.rs)、[protobuf 适配](../crates/tok-protobuf/src/lib.rs)、[游戏处理适配](../crates/tok-message/src/rpc/handler.rs) 转换输入时移交原 context。无需因文件拆分重建另一套上下文。
+- [Context::child](../crates/tok-execution/src/context.rs) 保留当前服务、原截止点、父子取消关系与 Span；输入扩展由 Request 转换与显式拆装保留；[通用分发表](../crates/tok-execution/src/registry.rs)、[protobuf 适配](../crates/tok-protobuf/src/lib.rs)、[游戏处理适配](../crates/tok-message/src/rpc/handler.rs) 转换输入时移交原 context。无需因文件拆分重建另一套上下文。
 - [本地事件 Registry](../crates/tok-events/src/registry.rs) 从父范围派生事件操作，保留自定义扩展，显式覆盖事件头并清除不适用于新事件的原编码；这是有意的扩展作用域处理，不是任意丢失。
-- [普通 RPC 接收端](../crates/tok-message/src/rpc/service.rs) 经 Server::context 重建本地范围，注入本地能力和可信协议关联，再进入共同执行链。远端重建本身符合规范，不要求恢复源进程的 Extensions。
+- [普通 RPC 接收端](../crates/tok-message/src/rpc/service.rs) 经 Server::request 重建本地范围，注入本地请求能力和可信协议关联，再进入共同执行链。远端重建本身符合规范，不要求恢复源进程的 Extensions。
 - [NATS 消费](../crates/tok-events/src/nats.rs) 使用订阅服务身份、消费预算、停止信号与 [Subscriber 本地扩展](../crates/tok-events/src/subscriber.rs) 建立独立执行范围，随后提交 Request。无需复制发布者的本地能力或执行期限。
 - timer 触发、独立生命周期通知和新登录初始化建立新范围有合理职责；应明确入口语义，而不是把所有 Context::new 都替换为 child。SessionManager / SessionHandle 的目标本地能力注入应保留。
 - Extensions、生命周期初始化容器、发现/路由/锁/所有权后端、编解码和底层 Channel 不是业务处理链承载，无需机械增加 Request 参数。scene 仍是预留实现，不计为已完成的执行适配。
@@ -256,3 +256,13 @@ Listener::from_server 已支持带 Tower Layer 的 Tonic Server。内部改为 R
 protobuf 表克隆改为共享路由快照，注册时写时复制，服务调用不复制整张表；旧克隆不因后续注册变化，实际策略状态仍由 Layer 共享。普通业务 RPC 适配和本地公会示例已切换到 Service 入口；显式 dispatch 保留，编码适配复用 Service 路径。未新增 Registry Layer、路由 fallback、后台队列或自动重试。
 
 本轮 Windows 验收：工作区串行 311 项测试通过、32 项外部专项按默认规则跳过，包含 19 项指南示例。新增 5 项回归覆盖公共与路由 Layer 的 Context 传递、原错误与未知键、非 Clone 取键函数共享、停止前不取键、就绪等待和非协作式取键的期限，以及 protobuf / message 直接 Service 与注册快照隔离。全目标编译与 Clippy、workspace rustdoc、dispatch / rpc / client 三个 smoke、格式、220 个文本文件 UTF-8/LF、119 处相对文档路径及空白检查通过。未运行真实 Redis/NATS、Linux 或 release 构建；本轮随本次提交交付。
+
+## Request / Response 与扩展位置（2026-10-21）
+
+已将 Extensions 从 Context 移到 Request，新增根导出的 Response<R>，私有实现分别位于 request.rs / response.rs。Context 保留服务、操作、截止点、取消与 Span；Request / Response 的构造、转换、拆装不依赖 ContextError，也不派生执行范围。原 Context::child 负责范围派生，适配器明确移交输入扩展。
+
+execution / protobuf / message 注册器、事件处理、RPC 协议适配与网关 Pipeline 已使用 Response 包装成功结果；泛型执行/锁设施保持透明。输入与输出转换分别保留对应扩展，Err 不改为回应。事件聚合按注册顺序合并输出扩展，同类型后者覆盖；同步会话通知按遍历顺序合并，入队后的独立事件不回传业务结果。PendingResponse 保留本地业务输出扩展，notify_request / deliver 保留下行输出扩展；客户端编码和 replay 只消费协议正文。
+
+gRPC Server::request 负责安装本地输入扩展，Server::context 只解析范围。Client::execute / execute_service 返回 Response<R>；内层发送 Service 使用 Response<tonic::Response<R>>，便利方法转换正文仍保留本地输出扩展。原生 FnOnce 发送回调继续使用 tonic 类型。gRPC / NATS 不序列化 Extensions，网络接收端重新安装自己的能力。指南、真实调用与示例同步迁移。
+
+本轮 Windows 验收：工作区串行 317 项通过、32 项外部专项默认跳过，其中包含 20 项指南示例；隔离真实 NATS 的 14 项事件测试及 2 项多网关专项通过。新增回归覆盖借用输入转换、显式范围派生与输入隔离、输出转换及原始错误、protobuf 输出扩展、事件聚合顺序，以及网关独立回应与通知输出元信息。Clippy、无警告 workspace rustdoc、execution / events / dispatch / rpc / client / application 六个 smoke、格式与空白检查通过；222 个文本文件 UTF-8/LF 和 119 处相对文档路径检查通过。未运行真实 Redis、Linux 或 release 构建。

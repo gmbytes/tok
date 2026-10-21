@@ -99,7 +99,7 @@ pub fn handlers(
                         .get(&player_id)
                         .copied()
                         .unwrap_or_default();
-                    Ok(HandlerReply {
+                    Ok(tok::execution::Response::new(HandlerReply {
                         message: GetPlayerResponse {
                             player_id,
                             value: stored.value,
@@ -111,7 +111,7 @@ pub fn handlers(
                                 .map(production_spec)
                                 .collect(),
                         )),
-                    })
+                    }))
                 }
             }
         },
@@ -134,10 +134,10 @@ pub fn handlers(
                         return Err(Status::resource_exhausted("示例存储容量已满"));
                     }
                     values.entry(player_id).or_default().value = request.value;
-                    Ok(SetPlayerResponse {
+                    Ok(tok::execution::Response::new(SetPlayerResponse {
                         player_id,
                         value: request.value,
-                    })
+                    }))
                 }
             }
         },
@@ -165,13 +165,13 @@ pub fn handlers(
                         return Err(Status::resource_exhausted("示例存储容量已满"));
                     }
                     values.entry(id).or_default().production_due = Some(due);
-                    Ok(HandlerReply {
+                    Ok(tok::execution::Response::new(HandlerReply {
                         message: StartProductionResponse {},
                         timers: Some(TimerUpdate::Patch {
                             upsert: vec![production_spec(due)],
                             cancel: vec![],
                         }),
-                    })
+                    }))
                 }
             }
         },
@@ -185,8 +185,7 @@ pub fn handlers(
         ProductionFinished::MESSAGE_ID,
         tok::message::rpc::tower::service_fn(
             move |request: tok::execution::Request<(CallContext, ProductionFinished)>| {
-                let execution = request.context;
-                let context = request.input.0;
+                let (execution, (context, _), extensions) = request.into_parts();
                 let state = Arc::clone(&state);
                 let production = Arc::clone(&production);
                 async move {
@@ -209,13 +208,16 @@ pub fn handlers(
                     )
                     .map_err(|error| Status::internal(error.to_string()))?;
                     production
-                        .dispatch(stored, tok::execution::Request::new(execution, &event))
+                        .dispatch(
+                            stored,
+                            tok::execution::Request::from_parts(execution, &event, extensions),
+                        )
                         .await
                         .map_err(|error| match error {
                             tok::events::DispatchError::Handler(error) => error,
                             other => Status::internal(other.to_string()),
                         })?;
-                    Ok(None)
+                    Ok(tok::execution::Response::new(None))
                 }
             },
         ),
@@ -235,7 +237,7 @@ pub fn handlers(
                 .value
                 .checked_add(event.delta)
                 .ok_or_else(|| Status::out_of_range("事件产出溢出"))?;
-            Ok(None)
+            Ok(tok::execution::Response::new(None))
         })
     })?;
     let client = tok::message::rpc::business::Client::new(Arc::new(Client::new(
@@ -249,8 +251,7 @@ pub fn handlers(
             tok::message::rpc::CallContext,
             QueryGuildRequest,
         )>| {
-            let execution = execution_request.context;
-            let (context, request) = execution_request.input;
+            let (execution, (context, request), extensions) = execution_request.into_parts();
             let directory = Arc::clone(&directory);
             let client = client.clone();
             async move {
@@ -263,7 +264,7 @@ pub fn handlers(
                 let response = client
                     .call(
                         &target,
-                        tok::execution::Request::new(
+                        tok::execution::Request::from_parts(
                             execution,
                             (
                                 CallContext {
@@ -282,17 +283,22 @@ pub fn handlers(
                                     .encode_to_vec(),
                                 },
                             ),
+                            extensions,
                         ),
                     )
                     .await?;
+                let (response, extensions) = response.into_parts();
                 let payload = response
                     .payload
                     .ok_or_else(|| Status::internal("公会回应缺少消息正文"))?;
                 let body = GetGuildResponse::decode(payload.body.as_slice())
                     .map_err(|_| Status::internal("公会回应解码失败"))?;
-                Ok(QueryGuildResponse {
-                    guild_id: body.guild_id,
-                })
+                Ok(tok::execution::Response::from_parts(
+                    QueryGuildResponse {
+                        guild_id: body.guild_id,
+                    },
+                    extensions,
+                ))
             }
         },
     )?;

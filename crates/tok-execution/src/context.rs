@@ -1,5 +1,5 @@
 use std::time::{Duration, Instant};
-use tok_core::{Extensions, service::Identity};
+use tok_core::service::Identity;
 use tokio_util::sync::CancellationToken;
 
 /// 执行上下文构造失败，与处理链运行错误分开。
@@ -31,7 +31,7 @@ pub enum StopReason {
 ///
 /// 入口适配器负责认证、来源与关联字段校验。本结构不构成调用者认证，
 /// 不能直接反序列化不可信正文作为上下文。跨进程只传播允许的元数据。
-/// 业务实体身份、入口元信息、路由输入和选定端点不属于固定字段，应以各自的类型传入正文或扩展。
+/// 业务实体身份、入口元信息、路由输入和选定端点不属于固定字段，应以各自的类型放在 Request 正文或扩展中。
 /// RPC 关联信息、事件标识和计时触发可以同时存在，不以互斥来源枚举表示。
 #[derive(Debug, Clone)]
 pub struct Context {
@@ -40,7 +40,6 @@ pub struct Context {
     deadline: Instant,
     cancellation: CancellationToken,
     span: tracing::Span,
-    extensions: Extensions,
 }
 impl Context {
     /// 建立有限预算并捕获当前 span；零预算合法，但执行时立即超时。
@@ -64,10 +63,9 @@ impl Context {
             deadline,
             cancellation,
             span: tracing::Span::current(),
-            extensions: Extensions::default(),
         })
     }
-    /// 为嵌套调用派生上下文，继承当前服务身份、原期限、追踪和扩展；父取消向子传播。
+    /// 为嵌套调用派生上下文，继承当前服务身份、原期限、追踪；父取消向子传播。
     ///
     /// 子取消不取消父调用；本方法不会重新分配一份预算或自动进入队列。
     /// 此方法保持当前执行服务身份，不负责构建出站 RPC 的路由目标或跨服务上下文。
@@ -80,7 +78,6 @@ impl Context {
             deadline: self.deadline,
             cancellation: self.cancellation.child_token(),
             span: self.span.clone(),
-            extensions: self.extensions.clone(),
         })
     }
     /// 以当前时刻起的本地上限收紧原截止点，绝不扩大原预算。
@@ -95,7 +92,7 @@ impl Context {
         self.deadline = self.deadline.min(deadline);
         self
     }
-    /// 由可信适配器显式改变停止关系；保留期限、追踪与扩展。
+    /// 由可信适配器显式改变停止关系；保留期限与追踪。
     ///
     /// 用于已接受工作脱离连接生命周期等明确的范围边界，不能隐式用于普通嵌套调用。
     pub fn with_cancellation(mut self, cancellation: CancellationToken) -> Self {
@@ -133,14 +130,6 @@ impl Context {
     /// 已关联的追踪 span。
     pub fn span(&self) -> &tracing::Span {
         &self.span
-    }
-    /// 只读访问本调用安装的类型化能力。
-    pub fn extensions(&self) -> &Extensions {
-        &self.extensions
-    }
-    /// 由可信组装层或中间件安装能力。
-    pub fn extensions_mut(&mut self) -> &mut Extensions {
-        &mut self.extensions
     }
     /// 执行前及接受结果前的本地预算检查；不能消除检查后的暂停窗口。
     pub fn check(&self) -> std::result::Result<(), StopReason> {

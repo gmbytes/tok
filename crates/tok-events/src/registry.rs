@@ -7,7 +7,7 @@ use std::{
     sync::Arc,
     task::{Context as TaskContext, Poll},
 };
-use tok_execution::{Context, Request, StopReason};
+use tok_execution::{Request, Response, StopReason};
 use tower::{Layer as _, ServiceExt};
 
 /// 当前处理阶段的结果；转发完成不代表后续 session 业务已完成。
@@ -48,7 +48,7 @@ impl Outcome {
 }
 
 /// 可借用当前状态和事件的异步处理任务，不隐式 spawn。
-pub type Task<'a, Output = Outcome, Failure = Error> =
+pub type Task<'a, Output = Response<Outcome>, Failure = Error> =
     Pin<Box<dyn Future<Output = Result<Output, Failure>> + Send + 'a>>;
 
 /// 服务器订阅适配器；只处理远程接收，不决定业务注册或编码方式。
@@ -98,9 +98,9 @@ trait Route<C, O, F>: Send + Sync {
     fn call<'a>(
         &'a self,
         state: &'a mut C,
-        context: Context,
+        request: Request<()>,
         event: &'a Erased,
-    ) -> Task<'a, O, DispatchError<F>>;
+    ) -> Task<'a, Response<O>, DispatchError<F>>;
 }
 struct TypedRoute<E, S> {
     service: S,
@@ -109,15 +109,15 @@ struct TypedRoute<E, S> {
 impl<C: Send, O, F, E: Event, S> Route<C, O, F> for TypedRoute<E, S>
 where
     S: Clone + Send + Sync + 'static,
-    for<'a> S: tower::Service<Request<Input<'a, C, E>>, Response = O, Error = F>,
+    for<'a> S: tower::Service<Request<Input<'a, C, E>>, Response = Response<O>, Error = F>,
     for<'a> <S as tower::Service<Request<Input<'a, C, E>>>>::Future: Send,
 {
     fn call<'a>(
         &'a self,
         state: &'a mut C,
-        context: Context,
+        request: Request<()>,
         event: &'a Erased,
-    ) -> Task<'a, O, DispatchError<F>> {
+    ) -> Task<'a, Response<O>, DispatchError<F>> {
         Box::pin(async move {
             let event = event
                 .downcast_ref::<Envelope<E>>()
@@ -126,7 +126,7 @@ where
                 )))?;
             tok_execution::Layer
                 .layer(self.service.clone())
-                .oneshot(Request::new(context, Input { state, event }))
+                .oneshot(request.map(|()| Input { state, event }))
                 .await
                 .map_err(Into::into)
         })
@@ -173,7 +173,7 @@ impl<C: Send, O, F> Registry<C, O, F> {
     pub fn register<E, H>(&mut self, handler: H) -> Result<(), Error>
     where
         E: Event,
-        H: for<'a> Fn(Request<Input<'a, C, E>>) -> Task<'a, O, F> + Send + Sync + 'static,
+        H: for<'a> Fn(Request<Input<'a, C, E>>) -> Task<'a, Response<O>, F> + Send + Sync + 'static,
     {
         self.register_service::<E, _>(Callback(Arc::new(handler)))
     }
@@ -182,7 +182,7 @@ impl<C: Send, O, F> Registry<C, O, F> {
     where
         E: Event,
         S: Clone + Send + Sync + 'static,
-        for<'a> S: tower::Service<Request<Input<'a, C, E>>, Response = O, Error = F>,
+        for<'a> S: tower::Service<Request<Input<'a, C, E>>, Response = Response<O>, Error = F>,
         for<'a> <S as tower::Service<Request<Input<'a, C, E>>>>::Future: Send,
     {
         validate_name(E::NAME)?;
@@ -230,81 +230,92 @@ impl<C: Send, O, F> Registry<C, O, F> {
         Ok(())
     }
     /// 在当前任务直接分发强类型事件；没有订阅者返回空结果，不产生客户端回应。
+    /// 输出扩展按注册顺序合并，同类型后者覆盖；不将输出扩展注入下一处理者的输入。
     pub async fn dispatch<E: Event>(
         &self,
         state: &mut C,
         request: Request<&Envelope<E>>,
-    ) -> Result<Vec<O>, DispatchError<F>> {
+    ) -> Result<Response<Vec<O>>, DispatchError<F>> {
         request.input.validate().map_err(DispatchError::Invalid)?;
-        let mut context = event_context(
-            &request.context,
+        let mut execution = event_request(
+            &request,
             E::NAME,
             &request.input.event_id,
             &request.input.topic,
         )?;
-        drop(context.extensions_mut().remove::<Arc<Message>>());
+        drop(execution.extensions_mut().remove::<Arc<Message>>());
         let Some(entry) = self.entries.get(E::NAME) else {
-            context.check().map_err(DispatchError::Stopped)?;
-            return Ok(Vec::new());
+            execution.context.check().map_err(DispatchError::Stopped)?;
+            return Ok(Response::new(Vec::new()));
         };
         if entry.type_id != TypeId::of::<E>() {
             return Err(DispatchError::Invalid(Error::InvalidInput(
                 "事件 Rust 类型与注册不匹配",
             )));
         }
-        Self::execute(entry, state, context, request.input).await
+        Self::execute(entry, state, execution, request.input).await
     }
     /// 解码一次后执行同一注册链；保留原 `Arc<Message>` 于扩展中，转发不得重新编码。
     pub async fn receive(
         &self,
         state: &mut C,
         request: Request<Arc<Message>>,
-    ) -> Result<Vec<O>, DispatchError<F>> {
+    ) -> Result<Response<Vec<O>>, DispatchError<F>> {
         request
             .input
             .validate(1_048_576)
             .map_err(DispatchError::Invalid)?;
-        let mut context = event_context(
-            &request.context,
+        let mut execution = event_request(
+            &request,
             &request.input.event_type,
             &request.input.event_id,
             &request.input.topic,
         )?;
-        context.check().map_err(DispatchError::Stopped)?;
+        execution.context.check().map_err(DispatchError::Stopped)?;
         let entry = self
             .entries
             .get(&request.input.event_type)
             .ok_or(DispatchError::Unknown)?;
         let decoder = entry.decoder.ok_or(DispatchError::Unknown)?;
         let event = decoder(&request.input).map_err(DispatchError::Invalid)?;
-        context.extensions_mut().insert(request.input);
-        Self::execute(entry, state, context, event.as_ref()).await
+        execution.extensions_mut().insert(request.input);
+        Self::execute(entry, state, execution, event.as_ref()).await
     }
     async fn execute(
         entry: &Entry<C, O, F>,
         state: &mut C,
-        context: Context,
+        request: Request<()>,
         event: &Erased,
-    ) -> Result<Vec<O>, DispatchError<F>> {
+    ) -> Result<Response<Vec<O>>, DispatchError<F>> {
         let mut results = Vec::with_capacity(entry.handlers.len());
+        let mut extensions = tok_core::Extensions::default();
         for handler in &entry.handlers {
-            results.push(handler.call(state, context.clone(), event).await?);
+            let context = request
+                .context
+                .child(request.context.operation())
+                .map_err(|_| DispatchError::Invalid(Error::InvalidInput("事件执行上下文无效")))?;
+            let child = Request::from_parts(context, (), request.extensions().clone());
+            let response = handler.call(state, child, event).await?;
+            extensions.extend(response.extensions());
+            results.push(response.output);
         }
-        Ok(results)
+        Ok(Response::from_parts(results, extensions))
     }
 }
-fn event_context<F>(
-    parent: &Context,
+fn event_request<T, F>(
+    parent: &Request<T>,
     name: &str,
     id: &EventId,
     topic: &Topic,
-) -> Result<Context, DispatchError<F>> {
-    let mut context = parent
+) -> Result<Request<()>, DispatchError<F>> {
+    let context = parent
+        .context
         .child(format!("event/{name}"))
         .map_err(|_| DispatchError::Invalid(Error::InvalidInput("事件执行上下文无效")))?;
-    context.extensions_mut().insert(id.clone());
-    context.extensions_mut().insert(topic.clone());
-    Ok(context)
+    let mut request = Request::from_parts(context, (), parent.extensions().clone());
+    request.extensions_mut().insert(id.clone());
+    request.extensions_mut().insert(topic.clone());
+    Ok(request)
 }
 impl Handler for Registry {
     fn event_types(&self) -> Vec<&str> {
@@ -317,8 +328,8 @@ impl Handler for Registry {
     fn handle(&self, request: Request<Arc<Message>>) -> Task<'_> {
         Box::pin(async move {
             match self.receive(&mut (), request).await {
-                Ok(results) => Ok(Outcome::combine(results)),
-                Err(DispatchError::Unknown) => Ok(Outcome::Ignored),
+                Ok(results) => Ok(results.map(Outcome::combine)),
+                Err(DispatchError::Unknown) => Ok(Response::new(Outcome::Ignored)),
                 Err(DispatchError::Invalid(error) | DispatchError::Handler(error)) => Err(error),
                 Err(DispatchError::Stopped(reason)) => Err(Error::Stopped(reason)),
             }
@@ -329,7 +340,7 @@ impl Handler for Registry {
 /// 将借用输入的异步回调适配成 Tower Service；可继续安装通用或路由级 Layer。
 pub fn handler<C, E, O, F, H>(callback: H) -> Callback<H>
 where
-    H: for<'a> Fn(Request<Input<'a, C, E>>) -> Task<'a, O, F>,
+    H: for<'a> Fn(Request<Input<'a, C, E>>) -> Task<'a, Response<O>, F>,
 {
     Callback(Arc::new(callback))
 }
@@ -343,11 +354,11 @@ impl<H> Clone for Callback<H> {
 }
 impl<'a, C, E, O, F, H> tower::Service<Request<Input<'a, C, E>>> for Callback<H>
 where
-    H: Fn(Request<Input<'a, C, E>>) -> Task<'a, O, F>,
+    H: Fn(Request<Input<'a, C, E>>) -> Task<'a, Response<O>, F>,
 {
-    type Response = O;
+    type Response = Response<O>;
     type Error = F;
-    type Future = Task<'a, O, F>;
+    type Future = Task<'a, Response<O>, F>;
     fn poll_ready(&mut self, _: &mut TaskContext<'_>) -> Poll<Result<(), F>> {
         Poll::Ready(Ok(()))
     }

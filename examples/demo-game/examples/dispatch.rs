@@ -50,9 +50,9 @@ async fn main() -> Result<(), BoxError> {
             ),
         ))
         .await?;
-    assert_eq!(reply.message.key, GetGuildResponse::MESSAGE_ID);
+    assert_eq!(reply.output.message.key, GetGuildResponse::MESSAGE_ID);
     assert_eq!(
-        GetGuildResponse::decode(reply.message.body.as_slice())?.guild_id,
+        GetGuildResponse::decode(reply.output.message.body.as_slice())?.guild_id,
         42
     );
     println!("本地公会分发验证通过；处理链与 RPC 公会入口共用");

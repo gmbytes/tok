@@ -3,6 +3,7 @@
 use crate::{ErrorCode, Result};
 use std::{future::Future, pin::Pin, sync::Arc};
 use tok_core::ServiceRouter;
+use tok_execution::Response;
 use tok_message::rpc::CallContext;
 use tok_message::rpc::{
     player::Client,
@@ -13,10 +14,11 @@ use tok_player::TimerTrigger;
 use tok_player::{LogicalMessage, MessageKind, SessionIdentity, TimerSpec, TimerUpdate};
 
 /// 单次玩家调用的结果，受 session 的调用期限控制。
-pub type Task<'a> = Pin<Box<dyn Future<Output = Result<Reply>> + Send + 'a>>;
+pub type Task<'a> = Pin<Box<dyn Future<Output = Result<Response<Reply>>> + Send + 'a>>;
 
 /// 内部事件的执行效果，只允许更新计时，不包含客户端回应。
-pub type EventTask<'a> = Pin<Box<dyn Future<Output = Result<Option<TimerUpdate>>> + Send + 'a>>;
+pub type EventTask<'a> =
+    Pin<Box<dyn Future<Output = Result<Response<Option<TimerUpdate>>>> + Send + 'a>>;
 
 /// 玩家执行结果，计时更新留在 session 内部，不进入客户端协议正文。
 pub struct Reply {
@@ -142,12 +144,12 @@ impl RpcExecutor {
 
 impl Executor for RpcExecutor {
     fn execute_event(&self, request: tok_execution::Request<EventInput>) -> EventTask<'_> {
-        let execution = request.context;
+        let (execution, input, extensions) = request.into_parts();
         let EventInput {
             identity,
             request_id,
             event,
-        } = request.input;
+        } = input;
         Box::pin(async move {
             let target = self
                 .router
@@ -157,7 +159,7 @@ impl Executor for RpcExecutor {
                 .client
                 .handle_event(
                     &target,
-                    tok_execution::Request::new(
+                    tok_execution::Request::from_parts(
                         execution,
                         (
                             CallContext {
@@ -170,10 +172,12 @@ impl Executor for RpcExecutor {
                             },
                             event,
                         ),
+                        extensions,
                     ),
                 )
                 .await
                 .map_err(|status| self.mapper.map(&status))?;
+            let (response, response_extensions) = response.into_parts();
             let timers = response
                 .timers
                 .map(tok_message::rpc::timer::decode_update)
@@ -183,28 +187,25 @@ impl Executor for RpcExecutor {
                 tracing::error!(code = error.code, "内部事件返回业务错误，不重试");
                 return Err(ErrorCode::Internal.into());
             }
-            Ok(timers)
+            Ok(Response::from_parts(timers, response_extensions))
         })
     }
 
     fn execute_request(&self, request: tok_execution::Request<RequestInput>) -> Task<'_> {
-        self.call(
-            request.context,
-            request.input.identity,
-            request.input.message,
-            None,
-        )
+        let (context, input, extensions) = request.into_parts();
+        self.call(context, extensions, input.identity, input.message, None)
     }
     fn execute_timer(&self, request: tok_execution::Request<TimerInput>) -> Task<'_> {
-        let execution = request.context;
+        let (execution, input, extensions) = request.into_parts();
         let TimerInput {
             identity,
             request_id,
             spec,
             trigger,
-        } = request.input;
+        } = input;
         self.call(
             execution,
+            extensions,
             identity,
             LogicalMessage {
                 kind: MessageKind::Request,
@@ -222,6 +223,7 @@ impl RpcExecutor {
     fn call(
         &self,
         execution: tok_execution::Context,
+        extensions: tok_core::Extensions,
         identity: SessionIdentity,
         request: LogicalMessage,
         timer: Option<TimerTrigger>,
@@ -236,7 +238,7 @@ impl RpcExecutor {
                 .client
                 .call(
                     &target,
-                    tok_execution::Request::new(
+                    tok_execution::Request::from_parts(
                         execution,
                         (
                             CallContext {
@@ -252,10 +254,12 @@ impl RpcExecutor {
                                 body: request.body,
                             },
                         ),
+                        extensions,
                     ),
                 )
                 .await
                 .map_err(|status| self.mapper.map(&status))?;
+            let (response, response_extensions) = response.into_parts();
             let timers = response
                 .timers
                 .map(tok_message::rpc::timer::decode_update)
@@ -265,36 +269,45 @@ impl RpcExecutor {
                 if error.code == 0 {
                     return Err(ErrorCode::Internal.into());
                 }
-                return Ok(Reply {
+                return Ok(Response::from_parts(
+                    Reply {
+                        response: Some(LogicalMessage {
+                            kind: MessageKind::Response,
+                            request_id: response.request_id,
+                            message_id: request.message_id,
+                            error_code: error.code,
+                            body: Vec::new(),
+                            server_seq: None,
+                        }),
+                        timers,
+                    },
+                    response_extensions,
+                ));
+            }
+            if is_timer {
+                return Ok(Response::from_parts(
+                    Reply {
+                        response: None,
+                        timers,
+                    },
+                    response_extensions,
+                ));
+            }
+            let payload = response.payload.ok_or(ErrorCode::Internal)?;
+            Ok(Response::from_parts(
+                Reply {
                     response: Some(LogicalMessage {
                         kind: MessageKind::Response,
                         request_id: response.request_id,
-                        message_id: request.message_id,
-                        error_code: error.code,
-                        body: Vec::new(),
+                        message_id: payload.message_id,
+                        body: payload.body,
+                        error_code: 0,
                         server_seq: None,
                     }),
                     timers,
-                });
-            }
-            if is_timer {
-                return Ok(Reply {
-                    response: None,
-                    timers,
-                });
-            }
-            let payload = response.payload.ok_or(ErrorCode::Internal)?;
-            Ok(Reply {
-                response: Some(LogicalMessage {
-                    kind: MessageKind::Response,
-                    request_id: response.request_id,
-                    message_id: payload.message_id,
-                    body: payload.body,
-                    error_code: 0,
-                    server_seq: None,
-                }),
-                timers,
-            })
+                },
+                response_extensions,
+            ))
         })
     }
 }

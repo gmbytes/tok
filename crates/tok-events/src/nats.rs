@@ -230,7 +230,7 @@ impl Bus {
         &self,
     ) -> impl tower::Service<
         tok_execution::Request<Message>,
-        Response = (),
+        Response = tok_execution::Response<()>,
         Error = Error,
         Future: Send,
     > + Clone
@@ -251,7 +251,9 @@ impl Bus {
                     if trace.traceparent.is_some() {
                         message.trace_context = trace;
                     }
-                    bus.publish(&message).await
+                    bus.publish(&message)
+                        .await
+                        .map(tok_execution::Response::new)
                 }
             },
         ));
@@ -264,13 +266,11 @@ impl Bus {
     pub async fn publish_request<E: crate::Event + prost::Message>(
         &self,
         request: tok_execution::Request<crate::Envelope<E>>,
-    ) -> Result<(), Error> {
+    ) -> Result<tok_execution::Response<()>, Error> {
         use tower::ServiceExt as _;
         request.context.check().map_err(Error::Stopped)?;
-        let message = Message::new(&request.input)?;
-        self.publisher()
-            .oneshot(tok_execution::Request::new(request.context, message))
-            .await
+        let request = request.try_map(|event| Message::new(&event))?;
+        self.publisher().oneshot(request).await
     }
     /// 发布强类型事件；先占用发布容量再编码，成功仅表示客户端接受发布操作。
     pub async fn publish_event<E: crate::Event + prost::Message>(
@@ -483,15 +483,17 @@ impl Subscription {
                         #[expect(clippy::let_underscore_must_use, reason="追踪关联失败不能阻断有效业务事件。")]
                         let _ = span.set_parent(parent);
                     }
-                    let mut context = tok_execution::Context::new(
+                    let context = tok_execution::Context::new(
                         self.service.clone(), format!("event/{}", message.event_type),
                         Duration::from_millis(self.bus.config.handler_timeout_ms), shutdown.child_token(),
                     ).map_err(|_| Error::InvalidInput("事件执行上下文无效"))?.with_span(span.clone());
-                    *context.extensions_mut() = self.extensions.clone();
-                    context.extensions_mut().insert(message.event_id.clone());
-                    context.extensions_mut().insert(message.topic.clone());
-                    context.extensions_mut().insert(Arc::clone(&message));
-                    let request = tok_execution::Request::new(context, message);
+                    let mut request = tok_execution::Request::new(context, message).with_extensions(self.extensions.clone());
+                    let event_id = request.input.event_id.clone();
+                    let topic = request.input.topic.clone();
+                    let message = Arc::clone(&request.input);
+                    request.extensions_mut().insert(event_id);
+                    request.extensions_mut().insert(topic);
+                    request.extensions_mut().insert(message);
                     let result = tokio::select! {
                         biased;
                         () = shutdown.cancelled() => break Ok(()),
@@ -500,7 +502,7 @@ impl Subscription {
                         result = tokio::time::timeout(Duration::from_millis(self.bus.config.handler_timeout_ms), self.handler.handle(request)).instrument(span.clone()) => result,
                     };
                     let outcome = match result {
-                        Ok(Ok(outcome)) => outcome.label(),
+                        Ok(Ok(outcome)) => outcome.output.label(),
                         Ok(Err(error)) => { tracing::error!(parent: &span, %error, "服务器事件处理失败，不重试"); "error" },
                         Err(_) => { tracing::error!(parent: &span, "服务器事件处理超时，结果未知，不重试"); "timeout" },
                     };

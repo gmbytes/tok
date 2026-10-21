@@ -58,7 +58,8 @@ async fn production_rules_are_not_taken_from_client_timer_or_reward_fields() {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_millis() as i64;
-    let TimerUpdate::Patch { upsert, cancel } = decode_update(result.timers.unwrap()).unwrap()
+    let TimerUpdate::Patch { upsert, cancel } =
+        decode_update(result.output.timers.unwrap()).unwrap()
     else {
         panic!("预期生产计时需求")
     };
@@ -83,7 +84,8 @@ async fn production_rules_are_not_taken_from_client_timer_or_reward_fields() {
         )))
         .await
         .unwrap();
-    let TimerUpdate::ReplaceAll(restored) = decode_update(initialized.timers.unwrap()).unwrap()
+    let TimerUpdate::ReplaceAll(restored) =
+        decode_update(initialized.output.timers.unwrap()).unwrap()
     else {
         panic!("初始化应返回全量计时集合");
     };
@@ -127,12 +129,13 @@ async fn production_rules_are_not_taken_from_client_timer_or_reward_fields() {
         .await
         .unwrap();
     assert_eq!(
-        v1::GetPlayerResponse::decode(unchanged.payload.unwrap().body.as_slice())
+        v1::GetPlayerResponse::decode(unchanged.output.payload.unwrap().body.as_slice())
             .unwrap()
             .value,
         0
     );
-    let TimerUpdate::ReplaceAll(pending) = decode_update(unchanged.timers.unwrap()).unwrap() else {
+    let TimerUpdate::ReplaceAll(pending) = decode_update(unchanged.output.timers.unwrap()).unwrap()
+    else {
         panic!("应保留未完成生产")
     };
     assert_eq!(pending[0].due_at_ms, spec.due_at_ms);
@@ -152,7 +155,8 @@ async fn production_rules_are_not_taken_from_client_timer_or_reward_fields() {
         )))
         .await
         .unwrap();
-    let player = v1::GetPlayerResponse::decode(result.payload.unwrap().body.as_slice()).unwrap();
+    let player =
+        v1::GetPlayerResponse::decode(result.output.payload.unwrap().body.as_slice()).unwrap();
     assert_eq!(player.player_id, 42);
     assert_eq!(player.value, 1);
 }
@@ -185,7 +189,8 @@ async fn local_production_error_reaches_the_original_call_without_partial_state_
         )))
         .await
         .unwrap();
-    let TimerUpdate::Patch { upsert, .. } = decode_update(started.timers.unwrap()).unwrap() else {
+    let TimerUpdate::Patch { upsert, .. } = decode_update(started.output.timers.unwrap()).unwrap()
+    else {
         panic!("缺少生产 timer")
     };
     let due = upsert[0].due_at_ms;
@@ -217,12 +222,13 @@ async fn local_production_error_reaches_the_original_call_without_partial_state_
         .await
         .unwrap();
     assert_eq!(
-        v1::GetPlayerResponse::decode(result.payload.unwrap().body.as_slice())
+        v1::GetPlayerResponse::decode(result.output.payload.unwrap().body.as_slice())
             .unwrap()
             .value,
         i64::MAX
     );
-    let TimerUpdate::ReplaceAll(pending) = decode_update(result.timers.unwrap()).unwrap() else {
+    let TimerUpdate::ReplaceAll(pending) = decode_update(result.output.timers.unwrap()).unwrap()
+    else {
         panic!("错误不能清除原生产状态")
     };
     assert_eq!(pending.len(), 1);

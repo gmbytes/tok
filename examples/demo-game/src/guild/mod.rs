@@ -30,12 +30,12 @@ pub fn handlers() -> Result<Registry<u64, (), Error>, tok::message::Error> {
             if guild_id != request.guild_id {
                 return Err(Error::TargetMismatch);
             }
-            Ok(Reply {
+            Ok(tok::execution::Response::new(Reply {
                 message: GetGuildResponse {
                     guild_id: request.guild_id,
                 },
                 output: (),
-            })
+            }))
         },
     )?;
     Ok(registry)

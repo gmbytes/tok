@@ -6,13 +6,13 @@ use std::{
     task::{Context, Poll},
 };
 use tok_core::lock::{Backend, Key};
-use tok_execution::{Request, lock};
+use tok_execution::{Request, Response, lock};
 use tok_proto::internal::v1::{CallResponse, Payload};
 use tonic::Status;
 
 type Input = Request<(CallContext, Payload)>;
 type KeyFn = Box<dyn Fn(&Input) -> Result<Key, Status> + Send + Sync>;
-type SuccessFn = fn(&CallResponse) -> bool;
+type SuccessFn = fn(&Response<CallResponse>) -> bool;
 
 /// 为已校验的业务 RPC 注入显式请求锁策略；克隆共享后端和策略。
 #[derive(Clone)]
@@ -47,8 +47,13 @@ impl Layer {
                 bid: bid.clone(),
             })
         });
-        let success: SuccessFn =
-            |response| response.error.as_ref().is_none_or(|error| error.code == 0);
+        let success: SuccessFn = |response| {
+            response
+                .output
+                .error
+                .as_ref()
+                .is_none_or(|error| error.code == 0)
+        };
         let inner = lock::Layer::new(backend, config, key, success)
             .map_err(|error| Error::Configuration(error.to_string()))?;
         Ok(Self { inner })
@@ -69,10 +74,13 @@ pub struct Service<S> {
 }
 impl<S> tower::Service<Input> for Service<S>
 where
-    S: tower::Service<Input, Response = CallResponse, Error = Status> + Clone + Send + 'static,
+    S: tower::Service<Input, Response = Response<CallResponse>, Error = Status>
+        + Clone
+        + Send
+        + 'static,
     S::Future: Send,
 {
-    type Response = CallResponse;
+    type Response = Response<CallResponse>;
     type Error = Status;
     type Future = CallTask<'static>;
     fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Status>> {

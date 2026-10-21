@@ -88,7 +88,7 @@ core 的 discovery / lock / routing / service 是功能命名空间，常用身�
 
 ## 执行上下文、中间件与状态
 
-Context 的固定部分包含服务/操作身份、追踪、预算、取消和 Extensions。入口关联信息及目标实体由各层的类型化输入或扩展表达；可信入口校验不依赖正文自报的身份。消息正文、业务状态与调用元数据分别表达，不能用一个堆满可选字段的大结构代替类型契约。
+Context 的固定部分包含服务/操作身份、追踪、截止点与取消。Request<T> 在 Context 和输入之外持有输入 Extensions；成功输出 Response<R> 持有结果与独立的输出 Extensions，不含 Context。入口关联信息及目标实体由各层的类型化输入或扩展表达；可信入口校验不依赖正文自报的身份。消息正文、业务状态与调用元数据分别表达，不能用一个堆满可选字段的大结构代替类型契约。
 
 运行能力通过类型化扩展提供：普通服务取得自己的状态与生命周期；gateway 增加网关和 manager 句柄；会话执行再增加对应 session。查询返回只读快照，停止请求与结束等待区分，操作本身重新校验状态。跨进程仅传播允许的元数据，不序列化内存句柄或取消令牌。
 
@@ -178,7 +178,7 @@ tok-grpc 只提供 Client、Listener 和 Server；Server 接受任意类型化 T
 
 ## 执行上下文移除固定来源（2026-10-21）
 
-Context 移除 source 字段、Source 枚举和构造/child 的来源参数。执行核心只管理服务、操作、期限、取消、追踪和 Extensions。RPC、事件与网关在入口提供类型化扩展：复用游戏 CallContext、EventId / Topic / Arc<Message>、TimerTrigger，仅网关新增无正文的 ClientRequest 关联标识。RPC 关联信息与事件元信息可以共存，不再将传输方式、触发原因和客户端入口混成互斥枚举。
+Context 移除 source 字段、Source 枚举和构造/child 的来源参数。执行 Context 只管理服务、操作、期限、取消与追踪；类型化扩展位于 Request / Response。RPC、事件与网关在入口提供类型化扩展：复用游戏 CallContext、EventId / Topic / Arc<Message>、TimerTrigger，仅网关新增无正文的 ClientRequest 关联标识。RPC 关联信息与事件元信息可以共存，不再将传输方式、触发原因和客户端入口混成互斥枚举。
 
 事件 Registry 的本地与远端分发提供相同事件头，派生子上下文覆盖当前事件头，不修改父扩展；本地派生仍清除继承的原始编码。客户端无法发布事件、请求与 timer 分表、会话身份校验、预算和取消约束保持不变；Extensions 元信息不作为认证证明。调用方和指南已迁移，不保留 Source 兼容类型。
 
@@ -246,3 +246,7 @@ gRPC 的连接缓存、监听、metadata 转换保留为边界组件；执行范
 分发表选择多个已注册处理链中的一条，作为 Tower 路由 Service 参与组合，不包装成只增强单个内层 Service 的 Layer。公共策略位于分发表外，路由专用策略位于注册链内；执行范围可保护整条公共策略和路由链，Context 与错误保持各层既有职责。
 
 通用 execution::Registry 由 into_service 显式接收 Request 取键函数；protobuf / message 注册器的正文已含键，可直接实现 Service。路由入口的 poll_ready 不代表某个目标已预留容量，选中路由后的就绪等待在原范围中执行。不为此引入后台队列、自动重试、默认 fallback 或热更新协议。
+
+## 输入与输出封装校正（2026-10-21）
+
+Request 与 Response 分别由 tok-execution 私有 request.rs / response.rs 实现并根导出。输入转换、编解码、路由、客户端与网关队列保留请求扩展；输出转换保留回应扩展。Context::child 只处理执行范围，调用方显式接续适用输入能力；封装类型不返回 ContextError。事件聚合、通知投递和传输终点的规则见运行模型，Rust 指南提供可执行示例。此变更不修改线协议、所有权、会话串行、独立事件或无重试约定。

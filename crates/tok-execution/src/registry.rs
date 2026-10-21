@@ -1,7 +1,7 @@
 //! 根据调用方定义的键选择处理链，不限定消息 ID、输入类型或编码格式。
 //!
 //! Registry 只负责选链和在原 Context 下执行，编解码由协议适配层负责。
-use crate::Request;
+use crate::{Request, Response};
 use std::{collections::BTreeMap, future::Future, sync::Arc};
 use tok_core::BoxFuture;
 use tower::{Layer as _, Service as TowerService, ServiceExt};
@@ -29,7 +29,7 @@ pub enum DispatchError<K, E> {
 }
 
 type Handler<T, R, E> =
-    dyn Fn(Request<T>) -> BoxFuture<'static, Result<R, crate::Error<E>>> + Send + Sync;
+    dyn Fn(Request<T>) -> BoxFuture<'static, Result<Response<R>, crate::Error<E>>> + Send + Sync;
 
 /// 通过 K 选择处理链，T、R、E 分别是输入、结果和业务错误。
 ///
@@ -68,7 +68,7 @@ where
     pub fn register<F, Fut>(&mut self, key: K, handler: F) -> Result<(), Error<K>>
     where
         F: Fn(Request<T>) -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = Result<R, E>> + Send + 'static,
+        Fut: Future<Output = Result<Response<R>, E>> + Send + 'static,
     {
         let handler = Arc::new(handler);
         self.register_service(
@@ -83,7 +83,11 @@ where
     /// 安装 Tower 处理链；就绪等待和执行共用传入 Context 的原期限与取消范围。
     pub fn register_service<S>(&mut self, key: K, service: S) -> Result<(), Error<K>>
     where
-        S: TowerService<Request<T>, Response = R, Error = E> + Clone + Send + Sync + 'static,
+        S: TowerService<Request<T>, Response = Response<R>, Error = E>
+            + Clone
+            + Send
+            + Sync
+            + 'static,
         S::Future: Send + 'static,
     {
         if self.handlers.contains_key(&key) {
@@ -115,7 +119,11 @@ where
     }
 
     /// 按键分发，保留原操作名、追踪、扩展、期限及取消；键与输入独立传递。
-    pub async fn dispatch(&self, key: &K, request: Request<T>) -> Result<R, DispatchError<K, E>> {
+    pub async fn dispatch(
+        &self,
+        key: &K,
+        request: Request<T>,
+    ) -> Result<Response<R>, DispatchError<K, E>> {
         request.context.check().map_err(DispatchError::Stopped)?;
         let handler = self
             .handlers
@@ -153,9 +161,9 @@ where
     E: Send + 'static,
     F: Fn(&Request<T>) -> K + Send + Sync + 'static,
 {
-    type Response = R;
+    type Response = Response<R>;
     type Error = DispatchError<K, E>;
-    type Future = BoxFuture<'static, Result<R, Self::Error>>;
+    type Future = BoxFuture<'static, Result<Response<R>, Self::Error>>;
     fn poll_ready(
         &mut self,
         _: &mut std::task::Context<'_>,

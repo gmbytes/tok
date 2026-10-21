@@ -33,62 +33,60 @@ async fn protobuf_adapter_accepts_string_keys_and_preserves_decode_and_business_
             "result".to_owned(),
             |execution_request: tok_execution::Request<(u32, Value)>| async move {
                 assert_eq!(
-                    execution_request
-                        .context
-                        .extensions()
-                        .get::<String>()
-                        .unwrap(),
+                    execution_request.extensions().get::<String>().unwrap(),
                     "caller-marker"
                 );
                 let (state, value) = execution_request.input;
                 if value.value == 0 {
                     return Err(Denied);
                 }
-                Ok(protobuf::Reply {
+                Ok(tok_execution::Response::new(protobuf::Reply {
                     message: Value {
                         value: state + value.value,
                     },
                     output: "saved".to_owned(),
-                })
+                }))
             },
         )
         .unwrap();
-    let mut ctx = context();
+    let mut ctx = Request::new(context(), ());
     ctx.extensions_mut().insert(String::from("caller-marker"));
     let message = |body| protobuf::Message {
         key: "increment".to_owned(),
         body,
     };
     let reply = registry
-        .dispatch(Request::new(
-            ctx.clone(),
-            (5, message(Value { value: 7 }.encode_to_vec())),
-        ))
+        .dispatch(
+            ctx.clone()
+                .map(|()| (5, message(Value { value: 7 }.encode_to_vec()))),
+        )
         .await
         .unwrap();
-    assert_eq!(reply.message.key, "result");
+    assert_eq!(reply.output.message.key, "result");
     assert_eq!(
-        Value::decode(reply.message.body.as_slice()).unwrap().value,
+        Value::decode(reply.output.message.body.as_slice())
+            .unwrap()
+            .value,
         12
     );
-    assert_eq!(reply.output, "saved");
+    assert_eq!(reply.output.output, "saved");
     assert!(matches!(
         registry
-            .dispatch(Request::new(ctx.clone(), (5, message(vec![]))))
+            .dispatch(ctx.clone().map(|()| (5, message(vec![]))))
             .await,
         Err(DispatchError::Handler(protobuf::Error::Handler(Denied)))
     ));
     assert!(matches!(
         registry
-            .dispatch(Request::new(ctx.clone(), (5, message(vec![0xff]))))
+            .dispatch(ctx.clone().map(|()| (5, message(vec![0xff]))))
             .await,
         Err(DispatchError::Handler(protobuf::Error::Decode(_)))
     ));
     // 编解码也在执行范围内；已取消调用不再解析坏包。
-    ctx.cancellation().cancel();
+    ctx.context.cancellation().cancel();
     assert!(matches!(
         registry
-            .dispatch(Request::new(ctx, (5, message(vec![0xff]))))
+            .dispatch(ctx.map(|()| (5, message(vec![0xff]))))
             .await,
         Err(DispatchError::Stopped(tok_execution::StopReason::Cancelled))
     ));
@@ -103,10 +101,10 @@ async fn codec_does_not_reserve_zero_keys() {
             0,
             |execution_request: tok_execution::Request<((), Value)>| async move {
                 let (_, value) = execution_request.input;
-                Ok(protobuf::Reply {
+                Ok(tok_execution::Response::new(protobuf::Reply {
                     message: value,
                     output: (),
-                })
+                }))
             },
         )
         .unwrap();
@@ -123,7 +121,7 @@ async fn codec_does_not_reserve_zero_keys() {
         ))
         .await
         .unwrap();
-    assert_eq!(reply.message.key, 0);
+    assert_eq!(reply.output.message.key, 0);
 }
 
 #[tokio::test]
@@ -132,20 +130,24 @@ async fn direct_service_preserves_policy_metadata_decode_errors_and_registration
     let mut registry = protobuf::Registry::<u32, (), (), Denied>::new();
     registry
         .register(1, 2, |request: Request<((), Value)>| async move {
-            assert_eq!(request.context.extensions().get::<u64>(), Some(&42));
-            Ok(protobuf::Reply {
+            assert_eq!(request.extensions().get::<u64>(), Some(&42));
+            let mut response = tok_execution::Response::new(protobuf::Reply {
                 message: request.input.1,
                 output: (),
-            })
+            });
+            response
+                .extensions_mut()
+                .insert(String::from("encoded-result"));
+            Ok(response)
         })
         .unwrap();
     let frozen = registry.clone();
     registry
         .register(3, 4, |request: Request<((), Value)>| async move {
-            Ok(protobuf::Reply {
+            Ok(tok_execution::Response::new(protobuf::Reply {
                 message: request.input.1,
                 output: (),
-            })
+            }))
         })
         .unwrap();
     let input = |key, body| Request::new(context(), ((), protobuf::Message { key, body }));
@@ -158,13 +160,14 @@ async fn direct_service_preserves_policy_metadata_decode_errors_and_registration
             .oneshot(input(3, vec![]))
             .await
             .unwrap()
+            .output
             .message
             .key,
         4
     );
     let chain = tower::ServiceBuilder::new()
         .map_request(|mut request: Request<((), protobuf::Message<u32>)>| {
-            request.context.extensions_mut().insert(42u64);
+            request.extensions_mut().insert(42u64);
             request
         })
         .service(frozen);
@@ -173,9 +176,16 @@ async fn direct_service_preserves_policy_metadata_decode_errors_and_registration
         .oneshot(input(1, Value { value: 7 }.encode_to_vec()))
         .await
         .unwrap();
-    assert_eq!(reply.message.key, 2);
     assert_eq!(
-        Value::decode(reply.message.body.as_slice()).unwrap().value,
+        reply.extensions().get::<String>().unwrap(),
+        "encoded-result"
+    );
+    assert!(reply.extensions().get::<u64>().is_none());
+    assert_eq!(reply.output.message.key, 2);
+    assert_eq!(
+        Value::decode(reply.output.message.body.as_slice())
+            .unwrap()
+            .value,
         7
     );
     assert!(matches!(

@@ -8,7 +8,7 @@ use std::{
 };
 use tok_core::Identity;
 use tok_execution::{
-    Context, Request, StopReason,
+    Context, Request, Response, StopReason,
     registry::{DispatchError, Error, Registry},
 };
 use tokio_util::sync::CancellationToken;
@@ -49,35 +49,37 @@ async fn enum_keys_plain_rust_values_and_original_errors_share_the_execution_cha
                 async move {
                     observed.fetch_add(1, Ordering::SeqCst);
                     assert_eq!(request.context.operation(), "local.increment");
-                    assert_eq!(request.context.extensions().get::<u64>(), Some(&42));
+                    assert_eq!(request.extensions().get::<u64>(), Some(&42));
                     if request.input == 0 {
                         return Err(Rejected(0));
                     }
-                    Ok((request.input + 1).to_string())
+                    Ok(Response::new((request.input + 1).to_string()))
                 }
             }),
         )
         .unwrap();
-    let mut ctx = context(Duration::from_secs(1), CancellationToken::new());
+    let mut ctx = Request::new(
+        context(Duration::from_secs(1), CancellationToken::new()),
+        (),
+    );
     ctx.extensions_mut().insert(42u64);
     assert_eq!(
         registry
             .clone()
-            .dispatch(&Action::Increment, Request::new(ctx.clone(), 7))
+            .dispatch(&Action::Increment, ctx.clone().map(|()| 7))
             .await
-            .unwrap(),
+            .unwrap()
+            .output,
         "8"
     );
     assert!(matches!(
         registry
-            .dispatch(&Action::Increment, Request::new(ctx.clone(), 0))
+            .dispatch(&Action::Increment, ctx.clone().map(|()| 0))
             .await,
         Err(DispatchError::Handler(Rejected(0)))
     ));
     assert!(matches!(
-        registry
-            .dispatch(&Action::Missing, Request::new(ctx, 7))
-            .await,
+        registry.dispatch(&Action::Missing, ctx.map(|()| 7)).await,
         Err(DispatchError::Unknown(Action::Missing))
     ));
     assert_eq!(calls.load(Ordering::SeqCst), 2);
@@ -87,10 +89,16 @@ async fn enum_keys_plain_rust_values_and_original_errors_share_the_execution_cha
 async fn key_validity_is_owned_by_the_caller_and_duplicate_registration_preserves_the_chain() {
     let mut numeric = Registry::<u64, u32, u32>::new();
     numeric
-        .register(0, |request| async move { Ok(request.input + 1) })
+        .register(
+            0,
+            |request| async move { Ok(Response::new(request.input + 1)) },
+        )
         .unwrap();
     assert_eq!(
-        numeric.register(0, |request| async move { Ok(request.input + 99) }),
+        numeric.register(
+            0,
+            |request| async move { Ok(Response::new(request.input + 99)) }
+        ),
         Err(Error::DuplicateKey(0))
     );
     let ctx = context(Duration::from_secs(1), CancellationToken::new());
@@ -98,18 +106,22 @@ async fn key_validity_is_owned_by_the_caller_and_duplicate_registration_preserve
         numeric
             .dispatch(&0, Request::new(ctx.clone(), 1))
             .await
-            .unwrap(),
+            .unwrap()
+            .output,
         2
     );
     let mut textual = Registry::<String, u32, u32>::new();
     textual
-        .register(String::new(), |request| async move { Ok(request.input) })
+        .register(String::new(), |request| async move {
+            Ok(Response::new(request.input))
+        })
         .unwrap();
     assert_eq!(
         textual
             .dispatch(&String::new(), Request::new(ctx, 42))
             .await
-            .unwrap(),
+            .unwrap()
+            .output,
         42
     );
 }
@@ -117,9 +129,9 @@ async fn key_validity_is_owned_by_the_caller_and_duplicate_registration_preserve
 #[derive(Clone)]
 struct NeverReady(Arc<AtomicUsize>);
 impl tower::Service<Request<()>> for NeverReady {
-    type Response = ();
+    type Response = Response<()>;
     type Error = Rejected;
-    type Future = std::future::Ready<Result<(), Rejected>>;
+    type Future = std::future::Ready<Result<Response<()>, Rejected>>;
     fn poll_ready(
         &mut self,
         _: &mut std::task::Context<'_>,
@@ -175,24 +187,24 @@ async fn registry_service_composes_common_and_route_layers_without_losing_contex
     let mut registry = Registry::<Action, (Action, u32), u32, Rejected>::new();
     let route = tower::ServiceBuilder::new()
         .map_request(|mut request: Request<(Action, u32)>| {
-            assert_eq!(request.context.extensions().get::<u64>(), Some(&41));
-            request.context.extensions_mut().insert(42u64);
+            assert_eq!(request.extensions().get::<u64>(), Some(&41));
+            request.extensions_mut().insert(42u64);
             request
         })
         .service(tower::service_fn(
             |request: Request<(Action, u32)>| async move {
-                assert_eq!(request.context.extensions().get::<u64>(), Some(&42));
+                assert_eq!(request.extensions().get::<u64>(), Some(&42));
                 assert_eq!(request.context.operation(), "local.increment");
                 if request.input.1 == 0 {
                     return Err(Rejected(0));
                 }
-                Ok(request.input.1 + 1)
+                Ok(Response::new(request.input.1 + 1))
             },
         ));
     registry.register_service(Action::Increment, route).unwrap();
     let service = tower::ServiceBuilder::new()
         .map_request(|mut request: Request<(Action, u32)>| {
-            request.context.extensions_mut().insert(41u64);
+            request.extensions_mut().insert(41u64);
             request
         })
         .service(registry.into_service(|request| request.input.0.clone()));
@@ -202,7 +214,8 @@ async fn registry_service_composes_common_and_route_layers_without_losing_contex
             .clone()
             .oneshot(Request::new(context.clone(), (Action::Increment, 7)))
             .await
-            .unwrap(),
+            .unwrap()
+            .output,
         8
     );
     assert!(matches!(
@@ -269,7 +282,7 @@ async fn slow_key_selection_cannot_dispatch_or_return_a_late_unknown_result() {
         registry
             .register(Action::Increment, move |_| {
                 calls.fetch_add(1, Ordering::SeqCst);
-                async { Ok(()) }
+                async { Ok(Response::new(())) }
             })
             .unwrap();
         let service = registry.into_service(move |_| {

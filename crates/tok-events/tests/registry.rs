@@ -33,19 +33,14 @@ async fn independent_services_subscribe_to_same_type_and_keep_their_own_state() 
         let captured = Arc::clone(&state);
         handlers
             .register::<GuildChanged, _>(move |request| {
-                let message = request
-                    .context
-                    .extensions()
-                    .get::<Arc<Message>>()
-                    .cloned()
-                    .unwrap();
+                let message = request.extensions().get::<Arc<Message>>().cloned().unwrap();
                 let event = &request.input.event.payload;
                 assert_eq!(message.event_id, expected);
                 let state = Arc::clone(&captured);
                 Box::pin(async move {
                     tokio::task::yield_now().await;
                     state.fetch_add(event.amount as usize, Ordering::SeqCst);
-                    Ok(Outcome::Handled)
+                    Ok(tok_execution::Response::new(Outcome::Handled))
                 })
             })
             .unwrap();
@@ -80,11 +75,15 @@ async fn registry_rejects_bad_known_payloads_and_ignores_unsubscribed_types() {
     handlers.enable_protobuf::<GuildChanged>().unwrap();
     assert!(
         handlers
-            .register::<GuildChanged, _>(|_| Box::pin(async { Ok(Outcome::Handled) }))
+            .register::<GuildChanged, _>(|_| Box::pin(async {
+                Ok(tok_execution::Response::new(Outcome::Handled))
+            }))
             .is_err()
     );
     assert!(matches!(
-        handlers.register::<MailSent, _>(|_| Box::pin(async { Ok(Outcome::Handled) })),
+        handlers.register::<MailSent, _>(|_| Box::pin(async {
+            Ok(tok_execution::Response::new(Outcome::Handled))
+        })),
         Err(tok_events::Error::CapacityExceeded)
     ));
     let unknown = Message::new(&Envelope::new(EventId::generate(), MailSent {}).unwrap()).unwrap();
@@ -92,7 +91,8 @@ async fn registry_rejects_bad_known_payloads_and_ignores_unsubscribed_types() {
         handlers
             .handle(support::request(Arc::new(unknown)))
             .await
-            .unwrap(),
+            .unwrap()
+            .output,
         Outcome::Ignored
     );
     let mut known =
@@ -126,23 +126,22 @@ async fn typed_handler_receives_the_original_shared_encoding_without_reencoding(
     let mut registry = Registry::new(1).unwrap();
     registry
         .register::<GuildChanged, _>(move |request| {
-            let message = request
-                .context
-                .extensions()
-                .get::<Arc<Message>>()
-                .cloned()
-                .unwrap();
+            let message = request.extensions().get::<Arc<Message>>().cloned().unwrap();
             let event = &request.input.event.payload;
             assert!(Arc::ptr_eq(&message, &expected));
             assert_eq!(message.body, expected.body);
             assert_eq!(event.amount, 3);
-            Box::pin(async { Ok(Outcome::Handled) })
+            Box::pin(async { Ok(tok_execution::Response::new(Outcome::Handled)) })
         })
         .unwrap();
     registry.enable_protobuf::<GuildChanged>().unwrap();
     assert_eq!(registry.event_types(), vec![GuildChanged::NAME]);
     assert_eq!(
-        registry.handle(support::request(original)).await.unwrap(),
+        registry
+            .handle(support::request(original))
+            .await
+            .unwrap()
+            .output,
         Outcome::Handled
     );
 }
@@ -156,26 +155,22 @@ async fn local_and_remote_execute_same_handlers_and_wire_metadata_does_not_leak_
             Box::pin(async move {
                 assert_eq!(
                     request.context.deadline(),
-                    *request
-                        .context
-                        .extensions()
-                        .get::<std::time::Instant>()
-                        .unwrap()
+                    *request.extensions().get::<std::time::Instant>().unwrap()
                 );
                 assert_eq!(
-                    request.context.extensions().get::<tok_events::EventId>(),
+                    request.extensions().get::<tok_events::EventId>(),
                     Some(&request.input.event.event_id)
                 );
                 assert_eq!(
-                    request.context.extensions().get::<tok_events::Topic>(),
+                    request.extensions().get::<tok_events::Topic>(),
                     Some(&request.input.event.topic)
                 );
-                if let Some(message) = request.context.extensions().get::<Arc<Message>>() {
+                if let Some(message) = request.extensions().get::<Arc<Message>>() {
                     assert_eq!(message.event_id, request.input.event.event_id);
                 }
                 tokio::task::yield_now().await;
                 *request.input.state += request.input.event.payload.amount;
-                Ok(Outcome::Handled)
+                Ok(tok_execution::Response::new(Outcome::Handled))
             })
         })
         .unwrap();
@@ -183,22 +178,19 @@ async fn local_and_remote_execute_same_handlers_and_wire_metadata_does_not_leak_
         .register::<GuildChanged, _>(|request| {
             Box::pin(async move {
                 *request.input.state += 1;
-                Ok(Outcome::Handled)
+                Ok(tok_execution::Response::new(Outcome::Handled))
             })
         })
         .unwrap();
     let envelope = Envelope::new(EventId::generate(), GuildChanged { amount: 3 }).unwrap();
     let message = Arc::new(Message::new(&envelope.clone()).unwrap());
     let mut state = 0;
-    let mut context = support::context();
-    let deadline = context.deadline();
+    let mut context = tok_execution::Request::new(support::context(), ());
+    let deadline = context.context.deadline();
     context.extensions_mut().insert(deadline);
     assert!(matches!(
         registry
-            .receive(
-                &mut state,
-                tok_execution::Request::new(context.clone(), Arc::clone(&message))
-            )
+            .receive(&mut state, context.clone().map(|()| Arc::clone(&message)))
             .await,
         Err(tok_events::DispatchError::Unknown)
     ));
@@ -212,12 +204,10 @@ async fn local_and_remote_execute_same_handlers_and_wire_metadata_does_not_leak_
         .insert(tok_events::Topic::named("parent").unwrap());
     assert_eq!(
         registry
-            .dispatch(
-                &mut state,
-                tok_execution::Request::new(context.clone(), &envelope)
-            )
+            .dispatch(&mut state, context.clone().map(|()| &envelope))
             .await
             .unwrap()
+            .output
             .len(),
         2
     );
@@ -239,9 +229,10 @@ async fn local_and_remote_execute_same_handlers_and_wire_metadata_does_not_leak_
     );
     assert_eq!(
         registry
-            .receive(&mut state, tok_execution::Request::new(context, message))
+            .receive(&mut state, context.map(|()| message))
             .await
             .unwrap()
+            .output
             .len(),
         2
     );
@@ -254,7 +245,7 @@ async fn multiple_remote_handlers_run_in_order_and_stop_at_original_business_err
         .register::<GuildChanged, _>(|request| {
             Box::pin(async move {
                 request.input.state.push(request.input.event.payload.amount);
-                Ok(())
+                Ok(tok_execution::Response::new(()))
             })
         })
         .unwrap();
@@ -288,7 +279,9 @@ async fn subscriber_requires_its_own_identity_and_exposes_only_explicit_remote_c
     use tok_events::Subscriber;
     let mut registry = Registry::new(1).unwrap();
     registry
-        .register::<GuildChanged, _>(|_| Box::pin(async { Ok(Outcome::Handled) }))
+        .register::<GuildChanged, _>(|_| {
+            Box::pin(async { Ok(tok_execution::Response::new(Outcome::Handled)) })
+        })
         .unwrap();
     assert!(registry.event_types().is_empty());
     registry.enable_protobuf::<GuildChanged>().unwrap();
@@ -343,7 +336,7 @@ async fn local_and_remote_paths_expose_the_same_topic_without_inheriting_parent_
             Box::pin(async move {
                 tokio::task::yield_now().await;
                 request.input.state.push(request.input.event.topic.clone());
-                Ok(Outcome::Handled)
+                Ok(tok_execution::Response::new(Outcome::Handled))
             })
         })
         .unwrap();
@@ -375,10 +368,10 @@ async fn local_and_remote_paths_expose_the_same_topic_without_inheriting_parent_
         },
     )
     .unwrap();
-    let mut context = support::context();
+    let mut context = tok_execution::Request::new(support::context(), ());
     context.extensions_mut().insert(message);
     handlers
-        .dispatch(&mut seen, tok_execution::Request::new(context, &child))
+        .dispatch(&mut seen, context.map(|()| &child))
         .await
         .unwrap();
     assert_eq!(

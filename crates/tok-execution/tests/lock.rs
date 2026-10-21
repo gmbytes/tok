@@ -137,14 +137,14 @@ async fn typed_input_and_response_preserve_context_and_key_errors_skip_backend()
     .unwrap();
     let service = layer.layer(tower::service_fn(|request: Request<Input>| async move {
         assert_eq!(request.context.operation(), "inventory/update");
-        assert_eq!(request.context.extensions().get::<u64>(), Some(&42));
+        assert_eq!(request.extensions().get::<u64>(), Some(&42));
         Ok::<_, DomainError>(Reply {
             accepted: true,
             value: request.input.entity + 1,
         })
     }));
     let mut input = request(7, Duration::from_secs(30));
-    input.context.extensions_mut().insert(42u64);
+    input.extensions_mut().insert(42u64);
     assert_eq!(service.clone().oneshot(input).await.unwrap().value, 8);
     assert_eq!(
         *observed.keys.lock().unwrap(),

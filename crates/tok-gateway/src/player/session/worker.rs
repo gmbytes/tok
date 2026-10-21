@@ -10,7 +10,7 @@ use std::{
     sync::{Arc, atomic::Ordering},
     time::Duration,
 };
-use tok_execution::Request;
+use tok_execution::{Request, Response};
 use tok_player::{LogicalMessage, MessageKind, ownership::Store as OwnershipStore};
 use tokio::sync::{mpsc, oneshot};
 use tower::{Layer as _, ServiceExt};
@@ -26,12 +26,12 @@ pub(super) enum Job {
 }
 pub(super) struct EventJob {
     pub(super) event: Arc<tok_events::Message>,
-    pub(super) context: tok_execution::Context,
+    pub(super) scope: Request<()>,
 }
 pub(super) struct RequestJob {
     pub(super) request: Request<LogicalMessage>,
     // Some 将回应交给等待方；None 通过会话通信通道发布给游戏客户端。
-    pub(super) response_sender: Option<oneshot::Sender<LogicalMessage>>,
+    pub(super) response_sender: Option<oneshot::Sender<Response<LogicalMessage>>>,
 }
 struct SessionGuard {
     state: Arc<SessionState>,
@@ -108,12 +108,12 @@ pub(super) fn task(
                                 if !renew_ownership(&session_state, ownership_store.as_ref(), timeout, ttl).await { break; }
                                 let Some(next) = event_request.checked_add(1) else { session_state.cancel.cancel(); break; };
                                 event_request = next;
-                                let span = tracing::info_span!(parent: job.context.span(), "player_event", player_id = %session_state.ownership.identity.player_id, event_id = %job.event.event_id, event_type = %job.event.event_type);
-                                let result = tokio::time::timeout(timeout, execute_event(&session_state,executor.as_ref(),event_request,job.context,job.event,span)).await;
+                                let span = tracing::info_span!(parent: job.scope.context.span(), "player_event", player_id = %session_state.ownership.identity.player_id, event_id = %job.event.event_id, event_type = %job.event.event_type);
+                                let result = tokio::time::timeout(timeout, execute_event(&session_state,executor.as_ref(),event_request,job.scope,job.event,span)).await;
                                 let success = match result {
                                     Ok(Ok(timers_update)) => {
                                         let mut success = true;
-                                        if let Some(update) = timers_update && let Err(error) = timers.apply(update) {
+                                        if let Some(update) = timers_update.output && let Err(error) = timers.apply(update) {
                                             tracing::error!(code = ?error.code, "事件计时更新无效，关闭会话");
                                             session_state.cancel.cancel(); success = false;
                                         }
@@ -136,6 +136,7 @@ pub(super) fn task(
                                 let result = tokio::time::timeout(timeout, execute_timer(&session_state,executor.as_ref(),timer_request,spec,trigger,span)).await;
                                 let success = match result {
                                     Ok(Ok(reply)) => {
+                                        let reply = reply.output;
                                         let mut success = reply.response.as_ref().is_none_or(|response| response.error_code == 0);
                                         if !success { tracing::error!(player_id = %session_state.ownership.identity.player_id, "玩家 timer 返回业务错误，未自动重试"); }
                                         if let Some(update) = reply.timers && let Err(error) = timers.apply(update) {
@@ -153,40 +154,46 @@ pub(super) fn task(
                                 continue;
                             }
                         };
-                        let Request { context, input: mut request } = job.request;
+                        let (context, mut request, extensions) = job.request.into_parts();
+                        let scope = Request::from_parts(context, (), extensions);
                         let response = if session_state.cancel.is_cancelled() {
-                            channel::error_response(&request, ErrorCode::SessionClosed)
+                            Response::new(channel::error_response(&request, ErrorCode::SessionClosed))
                         } else if request.request_id <= last_request {
-                            channel::error_response(&request, ErrorCode::InvalidRequest)
+                            Response::new(channel::error_response(&request, ErrorCode::InvalidRequest))
                         } else {
                             last_request = request.request_id;
                             if !renew_ownership(&session_state, ownership_store.as_ref(), timeout, ttl).await {
-                                channel::error_response(&request, ErrorCode::SessionClosed)
+                                Response::new(channel::error_response(&request, ErrorCode::SessionClosed))
                             } else {
-                                let span = tracing::info_span!(parent: context.span(), "client_request", player_id = %session_state.ownership.identity.player_id, request_id = request.request_id, message_id = request.message_id);
-                                let result = tokio::time::timeout(timeout, execute_request(&session_state,executor.as_ref(),context.clone(),request.clone(),span)).await;
+                                let span = tracing::info_span!(parent: scope.context.span(), "client_request", player_id = %session_state.ownership.identity.player_id, request_id = request.request_id, message_id = request.message_id);
+                                let result = tokio::time::timeout(timeout, execute_request(&session_state,executor.as_ref(),&scope,request.clone(),span)).await;
                                 match result {
-                                    Ok(Ok(Reply { response: Some(mut response), timers: timer_update })) if response.kind == MessageKind::Response => {
+                                    Ok(Ok(reply)) => {
+                                        let (reply, extensions) = reply.into_parts();
+                                        match reply {
+                                        Reply { response: Some(mut response), timers: timer_update } if response.kind == MessageKind::Response => {
                                         if let Some(update) = timer_update && let Err(error) = timers.apply(update) {
                                             tracing::error!(player_id = %session_state.ownership.identity.player_id, code = ?error.code, "计时更新无效，关闭会话");
                                             session_state.cancel.cancel();
-                                            channel::error_response(&request, ErrorCode::Internal)
+                                            Response::new(channel::error_response(&request, ErrorCode::Internal))
                                         } else {
-                                            response.request_id = request.request_id; response.server_seq = None; response
+                                            response.request_id = request.request_id; response.server_seq = None; Response::from_parts(response, extensions)
                                         }
                                     }
-                                    Ok(Ok(_)) => channel::error_response(&request, ErrorCode::Internal),
-                                    Ok(Err(error)) => channel::error_response(&request, error.code),
+                                        _ => Response::new(channel::error_response(&request, ErrorCode::Internal)),
+                                        }
+                                    },
+                                    Ok(Err(error)) => Response::new(channel::error_response(&request, error.code)),
                                     Err(_) => {
                                         tracing::error!(player_id = %session_state.ownership.identity.player_id, request_id = request.request_id, "玩家调用超时，未自动重试");
-                                        channel::error_response(&request, ErrorCode::Timeout)
+                                        Response::new(channel::error_response(&request, ErrorCode::Timeout))
                                     }
                                 }
                             }
                         };
                         // 尽早释放请求正文，慢下行不会持有两份业务缓冲。
                         request.body.clear();
-                        metrics::counter!("tok_session_requests_total", "result" => if response.error_code == 0 { "ok" } else { "error" }).increment(1);
+                        metrics::counter!("tok_session_requests_total", "result" => if response.output.error_code == 0 { "ok" } else { "error" }).increment(1);
                         if let Some(response_sender) = job.response_sender {
                             #[expect(
                                 clippy::let_underscore_must_use,
@@ -199,7 +206,7 @@ pub(super) fn task(
                                 reason = "publish_response 在发布失败时已关闭会话，不重复处理或重执业务。"
                             )]
                             let _ = SessionHandle(Arc::clone(&session_state))
-                                .publish_response(response, request.message_id, &context).await;
+                                .publish_response(response.output, request.message_id, &scope).await;
                         }
                     }
                 }
@@ -214,10 +221,10 @@ pub(super) fn task(
                         clippy::let_underscore_must_use,
                         reason = "退出时仅尽力通知尚存的回应等待方，接收方允许先取消。"
                     )]
-                    let _ = response_sender.send(channel::error_response(
+                    let _ = response_sender.send(Response::new(channel::error_response(
                         &job.request.input,
                         ErrorCode::SessionClosed,
-                    ));
+                    )));
                 }
             }
             if !matches!(
@@ -280,15 +287,17 @@ pub(super) fn execution_error(
 async fn execute_request(
     state: &Arc<SessionState>,
     executor: &dyn Executor,
-    context: tok_execution::Context,
+    scope: &Request<()>,
     message: LogicalMessage,
     span: tracing::Span,
-) -> Result<Reply> {
-    let mut context = context
+) -> Result<Response<Reply>> {
+    let context = scope
+        .context
         .child(format!("player/request/{}", message.message_id))
-        .map_err(|_| ErrorCode::Internal)?
-        .with_span(span);
-    context
+        .map_err(|_| ErrorCode::Internal)?;
+    let mut request = Request::from_parts(context, (), scope.extensions().clone());
+    request.context = request.context.with_span(span);
+    request
         .extensions_mut()
         .insert(crate::player::ClientRequest {
             request_id: message.request_id,
@@ -298,13 +307,10 @@ async fn execute_request(
         .layer(tower::service_fn(|request| {
             executor.execute_request(request)
         }))
-        .oneshot(Request::new(
-            context,
-            crate::player::RequestInput {
-                identity: state.ownership.identity.clone(),
-                message,
-            },
-        ))
+        .oneshot(request.map(|()| crate::player::RequestInput {
+            identity: state.ownership.identity.clone(),
+            message,
+        }))
         .await
         .map_err(execution_error)
 }
@@ -312,24 +318,21 @@ async fn execute_event(
     state: &Arc<SessionState>,
     executor: &dyn Executor,
     request_id: u64,
-    context: tok_execution::Context,
+    mut request: Request<()>,
     event: Arc<tok_events::Message>,
     span: tracing::Span,
-) -> Result<Option<tok_player::TimerUpdate>> {
-    let mut context = context.with_span(span);
-    context.extensions_mut().insert(event.event_id.clone());
-    context.extensions_mut().insert(event.topic.clone());
-    context.extensions_mut().insert(Arc::clone(&event));
+) -> Result<Response<Option<tok_player::TimerUpdate>>> {
+    request.context = request.context.with_span(span);
+    request.extensions_mut().insert(event.event_id.clone());
+    request.extensions_mut().insert(event.topic.clone());
+    request.extensions_mut().insert(Arc::clone(&event));
     tok_execution::Layer
         .layer(tower::service_fn(|request| executor.execute_event(request)))
-        .oneshot(Request::new(
-            context,
-            crate::player::EventInput {
-                identity: state.ownership.identity.clone(),
-                request_id,
-                event,
-            },
-        ))
+        .oneshot(request.map(|()| crate::player::EventInput {
+            identity: state.ownership.identity.clone(),
+            request_id,
+            event,
+        }))
         .await
         .map_err(execution_error)
 }
@@ -340,22 +343,19 @@ async fn execute_timer(
     spec: tok_player::TimerSpec,
     trigger: tok_player::TimerTrigger,
     span: tracing::Span,
-) -> Result<Reply> {
-    let mut context = SessionHandle(Arc::clone(state))
-        .execution_context(format!("player/timer/{}", spec.message_id))?
-        .with_span(span);
-    context.extensions_mut().insert(trigger.clone());
+) -> Result<Response<Reply>> {
+    let mut request = SessionHandle(Arc::clone(state))
+        .execution_scope(format!("player/timer/{}", spec.message_id))?;
+    request.context = request.context.with_span(span);
+    request.extensions_mut().insert(trigger.clone());
     tok_execution::Layer
         .layer(tower::service_fn(|request| executor.execute_timer(request)))
-        .oneshot(Request::new(
-            context,
-            crate::player::TimerInput {
-                identity: state.ownership.identity.clone(),
-                request_id,
-                spec,
-                trigger,
-            },
-        ))
+        .oneshot(request.map(|()| crate::player::TimerInput {
+            identity: state.ownership.identity.clone(),
+            request_id,
+            spec,
+            trigger,
+        }))
         .await
         .map_err(execution_error)
 }

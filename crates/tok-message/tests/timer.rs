@@ -66,10 +66,10 @@ async fn internal_trigger_is_propagated_and_cannot_be_selected_by_client_message
     let mut registry = HandlerRegistry::new();
     registry
         .register_with_timers(1, 2, |execution_request: tok_execution::Request<(tok_message::rpc::CallContext, Data)>| async move { let (_context, request) = execution_request.input;
-            Ok(HandlerReply {
+            Ok(tok_execution::Response::new(HandlerReply {
                 message: request,
                 timers: Some(TimerUpdate::ReplaceAll(vec![spec()])),
-            })
+            }))
         })
         .unwrap();
     let seen = Arc::clone(&calls);
@@ -89,10 +89,10 @@ async fn internal_trigger_is_propagated_and_cannot_be_selected_by_client_message
                     assert_eq!(trigger.fired_at_ms, 1500);
                     assert_eq!(request.value, 7);
                     seen.fetch_add(1, Ordering::SeqCst);
-                    Ok(Some(TimerUpdate::Patch {
+                    Ok(tok_execution::Response::new(Some(TimerUpdate::Patch {
                         upsert: vec![],
                         cancel: vec!["income".into()],
-                    }))
+                    })))
                 }
             },
         )
@@ -106,7 +106,7 @@ async fn internal_trigger_is_propagated_and_cannot_be_selected_by_client_message
                     Data
                 )>| async move {
                     let (_ctx, _) = execution_request.input;
-                    Ok(None)
+                    Ok(tok_execution::Response::new(None))
                 }
             )
             .is_err()
@@ -161,13 +161,13 @@ async fn internal_trigger_is_propagated_and_cannot_be_selected_by_client_message
         .await
         .unwrap();
     assert_eq!(
-        Data::decode(reply.payload.unwrap().body.as_slice())
+        Data::decode(reply.output.payload.unwrap().body.as_slice())
             .unwrap()
             .value,
         7
     );
     assert_eq!(
-        decode_update(reply.timers.unwrap()).unwrap(),
+        decode_update(reply.output.timers.unwrap()).unwrap(),
         TimerUpdate::ReplaceAll(vec![spec()])
     );
     let body = Payload {
@@ -198,9 +198,9 @@ async fn internal_trigger_is_propagated_and_cannot_be_selected_by_client_message
         )
         .await
         .unwrap();
-    assert!(reply.payload.is_none());
+    assert!(reply.output.payload.is_none());
     assert_eq!(
-        decode_update(reply.timers.unwrap()).unwrap(),
+        decode_update(reply.output.timers.unwrap()).unwrap(),
         TimerUpdate::Patch {
             upsert: vec![],
             cancel: vec!["income".into()]

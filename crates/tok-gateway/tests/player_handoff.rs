@@ -122,7 +122,7 @@ impl Executor for Execution {
         } = input.input;
         Box::pin(async move {
             self.events.lock().unwrap().push(request_id);
-            Ok(None)
+            Ok(tok_execution::Response::new(None))
         })
     }
 
@@ -153,7 +153,7 @@ impl Executor for Execution {
                     interval_ms: None,
                 }])
             });
-            Ok(Reply {
+            Ok(tok_execution::Response::new(Reply {
                 response: Some(LogicalMessage {
                     kind: MessageKind::Response,
                     message_id: request.message_id,
@@ -163,7 +163,7 @@ impl Executor for Execution {
                     body: request.body,
                 }),
                 timers,
-            })
+            }))
         })
     }
     fn execute_timer(
@@ -178,10 +178,10 @@ impl Executor for Execution {
         } = input.input;
         Box::pin(async move {
             self.ticks.fetch_add(1, Ordering::SeqCst);
-            Ok(Reply {
+            Ok(tok_execution::Response::new(Reply {
                 response: None,
                 timers: None,
-            })
+            }))
         })
     }
 }
@@ -487,6 +487,7 @@ async fn handoff_replays_original_response_preserves_identity_and_runs_timer_onc
             ))
             .await
             .unwrap()
+            .output
             .admitted,
         1
     );
@@ -526,6 +527,7 @@ async fn handoff_replays_original_response_preserves_identity_and_runs_timer_onc
             ))
             .await
             .unwrap()
+            .output
             .admitted,
         1
     );

@@ -98,7 +98,7 @@ impl Executor for TestExecutor {
                     },
                 ))
                 .await?;
-            Ok(reply.timers)
+            Ok(tok_execution::Response::new(reply.output.timers))
         })
     }
 
@@ -132,19 +132,21 @@ impl Executor for TestExecutor {
             if request.body == b"block" {
                 self.0.permits.acquire().await.unwrap().forget();
             }
-            Ok(LogicalMessage {
-                kind: MessageKind::Response,
-                message_id: 10,
-                request_id: request.request_id,
-                error_code: 0,
-                server_seq: None,
-                body: if request.message_id == 3 {
-                    vec![7; 1024]
-                } else {
-                    identity.player_id.into_bytes()
-                },
-            }
-            .into())
+            Ok(tok_execution::Response::new(
+                LogicalMessage {
+                    kind: MessageKind::Response,
+                    message_id: 10,
+                    request_id: request.request_id,
+                    error_code: 0,
+                    server_seq: None,
+                    body: if request.message_id == 3 {
+                        vec![7; 1024]
+                    } else {
+                        identity.player_id.into_bytes()
+                    },
+                }
+                .into(),
+            ))
         })
     }
 }
@@ -392,7 +394,7 @@ async fn known_exhausted_lease_budget_rejects_work_after_process_pause() {
         })
         .unwrap()
         .await;
-    assert_eq!(response.error_code, ErrorCode::SessionClosed as u32);
+    assert_eq!(response.output.error_code, ErrorCode::SessionClosed as u32);
     assert_eq!(fixture.tracker.calls.load(Ordering::SeqCst), 0);
     assert!(session.cancellation().is_cancelled());
     fixture.finish().await;
@@ -793,7 +795,7 @@ async fn cumulative_ack_releases_cache_and_never_executes_player() {
         })
         .unwrap()
         .await;
-    assert!(internal.server_seq.is_none());
+    assert!(internal.output.server_seq.is_none());
     assert_eq!(session.replay_after(2).unwrap().unwrap().through_seq, 2);
     assert_eq!(fixture.tracker.calls.load(Ordering::SeqCst), 3);
     client
@@ -1593,7 +1595,7 @@ fn game_subscriber(sessions: SessionManager) -> tok_events::Registry {
                     ))
                     .await
                     .map_err(|_| tok_events::Error::Unavailable("游戏事件准入失败"))?;
-                Ok(report.into())
+                Ok(report.map(Into::into))
             })
         })
         .unwrap();
@@ -1656,6 +1658,7 @@ async fn events_share_request_fifo_have_independent_sequence_and_respect_queue_c
             ))
             .await
             .unwrap()
+            .output
             .admitted,
         1
     );
@@ -1668,6 +1671,7 @@ async fn events_share_request_fifo_have_independent_sequence_and_respect_queue_c
             ))
             .await
             .unwrap()
+            .output
             .rejected,
         1
     );
@@ -1717,8 +1721,8 @@ async fn broadcast_filters_topics_and_offline_sessions_without_executing_player(
         ))
         .await
         .unwrap();
-    assert_eq!(report.admitted, 1);
-    assert_eq!(report.skipped, 0);
+    assert_eq!(report.output.admitted, 1);
+    assert_eq!(report.output.skipped, 0);
     assert!(
         matches!(one.read().await,Content::Notify(notify) if notify.server_seq==1 && notify.body==b"notice")
     );
@@ -1733,6 +1737,7 @@ async fn broadcast_filters_topics_and_offline_sessions_without_executing_player(
             ))
             .await
             .unwrap()
+            .output
             .admitted,
         0
     );
@@ -1747,6 +1752,7 @@ async fn broadcast_filters_topics_and_offline_sessions_without_executing_player(
             .deliver(tok_execution::Request::new(delivery_context(), all.clone()))
             .await
             .unwrap()
+            .output
             .admitted,
         2
     );
@@ -1762,6 +1768,7 @@ async fn broadcast_filters_topics_and_offline_sessions_without_executing_player(
             .deliver(tok_execution::Request::new(delivery_context(), all.clone()))
             .await
             .unwrap()
+            .output
             .admitted,
         0
     );
@@ -1778,6 +1785,7 @@ async fn broadcast_filters_topics_and_offline_sessions_without_executing_player(
             ))
             .await
             .unwrap()
+            .output
             .skipped,
         1
     );
@@ -1821,8 +1829,8 @@ async fn large_topic_delivery_yields_and_rechecks_membership_after_resuming() {
         handle.leave_topic("large").await.unwrap();
     }
     let report = pending.await.unwrap();
-    assert_eq!(report.admitted, 64);
-    assert_eq!(report.skipped, 1);
+    assert_eq!(report.output.admitted, 64);
+    assert_eq!(report.output.skipped, 1);
     assert_eq!(fixture.tracker.calls.load(Ordering::SeqCst), 0);
     fixture.finish().await;
 }
@@ -1859,6 +1867,7 @@ async fn topic_index_survives_resume_and_cleans_up_replaced_and_closed_sessions(
             ))
             .await
             .unwrap()
+            .output
             .admitted,
         1
     );
@@ -1874,6 +1883,7 @@ async fn topic_index_survives_resume_and_cleans_up_replaced_and_closed_sessions(
             ))
             .await
             .unwrap()
+            .output
             .admitted,
         0
     );
@@ -1890,6 +1900,7 @@ async fn topic_index_survives_resume_and_cleans_up_replaced_and_closed_sessions(
             ))
             .await
             .unwrap()
+            .output
             .admitted,
         1
     );
@@ -1904,6 +1915,7 @@ async fn topic_index_survives_resume_and_cleans_up_replaced_and_closed_sessions(
             ))
             .await
             .unwrap()
+            .output
             .admitted,
         0
     );
@@ -2032,7 +2044,8 @@ async fn built_in_event_handlers_and_custom_components_compose_independently() {
         forwarding
             .handle(event_request(Arc::clone(&message)))
             .await
-            .unwrap(),
+            .unwrap()
+            .output,
         Outcome::Handled
     );
     // 请求作为 FIFO 屏障，确保之前入队的事件已经执行；事件本身不生成客户端回应。
@@ -2044,7 +2057,8 @@ async fn built_in_event_handlers_and_custom_components_compose_independently() {
         notifying
             .handle(event_request(Arc::clone(&message)))
             .await
-            .unwrap(),
+            .unwrap()
+            .output,
         Outcome::Handled
     );
     assert!(
@@ -2061,7 +2075,8 @@ async fn built_in_event_handlers_and_custom_components_compose_independently() {
         forwarding
             .dispatch(&mut (), event_request(&local))
             .await
-            .unwrap(),
+            .unwrap()
+            .output,
         vec![Outcome::Handled]
     );
     client.request(3, 1, b"local-barrier").await;
@@ -2075,12 +2090,12 @@ async fn built_in_event_handlers_and_custom_components_compose_independently() {
     custom
         .register::<GameEvent, _>(move |_request| {
             captured.fetch_add(1, Ordering::SeqCst);
-            Box::pin(async { Ok(Outcome::Handled) })
+            Box::pin(async { Ok(tok_execution::Response::new(Outcome::Handled)) })
         })
         .unwrap();
     custom.enable_protobuf::<GameEvent>().unwrap();
     assert_eq!(
-        custom.handle(event_request(message)).await.unwrap(),
+        custom.handle(event_request(message)).await.unwrap().output,
         Outcome::Handled
     );
     let custom = Subscriber::new(

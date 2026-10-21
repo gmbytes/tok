@@ -89,7 +89,6 @@ where
     let mut handlers = tok_events::Registry::new(1)?;
     handlers.register::<E, _>(move |request| {
         let message = request
-            .context
             .extensions()
             .get::<Arc<Message>>()
             .cloned()
@@ -98,17 +97,16 @@ where
         let target = select(request.input.event);
         let sessions = sessions.clone();
         Box::pin(async move {
+            let target = target?;
+            let message = message?;
             let report = sessions
-                .deliver(tok_execution::Request::new(
-                    request.context,
-                    Delivery {
-                        target: target?,
-                        action: Action::Forward(message?),
-                    },
-                ))
+                .deliver(request.map(|_| Delivery {
+                    target,
+                    action: Action::Forward(message),
+                }))
                 .await
                 .map_err(|_| Error::Unavailable("玩家事件准入失败"))?;
-            Ok(report.into())
+            Ok(report.map(Into::into))
         })
     })?;
     handlers.enable_protobuf::<E>()?;
@@ -138,16 +136,13 @@ where
         Box::pin(async move {
             let (target, body) = notification?;
             let report = sessions
-                .deliver(tok_execution::Request::new(
-                    request.context,
-                    Delivery {
-                        target,
-                        action: Action::Notify { message_id, body },
-                    },
-                ))
+                .deliver(request.map(|_| Delivery {
+                    target,
+                    action: Action::Notify { message_id, body },
+                }))
                 .await
                 .map_err(|_| Error::Unavailable("通知准入失败"))?;
-            Ok(report.into())
+            Ok(report.map(Into::into))
         })
     })?;
     handlers.enable_protobuf::<E>()?;

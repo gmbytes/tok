@@ -22,7 +22,7 @@ impl Client {
         &self,
         target: &ServiceDescriptor,
         request: tok_execution::Request<(CallContext, Payload)>,
-    ) -> Result<CallResponse, Status> {
+    ) -> Result<tok_execution::Response<CallResponse>, Status> {
         if request.input.0.timer.is_some() {
             return Err(Status::invalid_argument("计时触发只能调用 player 入口"));
         }
@@ -74,7 +74,7 @@ where
 {
     fn call(&self, request: tok_execution::Request<(CallContext, Payload)>) -> super::CallTask<'_> {
         Box::pin(async move {
-            let (call, payload) = request.input;
+            let (context, (call, payload), mut extensions) = request.into_parts();
             if call.timer.is_some() {
                 return Err(Status::invalid_argument("普通业务入口不能接受计时触发"));
             }
@@ -82,19 +82,14 @@ where
                 return Err(Status::invalid_argument("业务请求消息 ID 必须非零"));
             }
             let state = (self.context)(&call)?;
-            let mut context = request.context;
             let id = call.request_id;
-            context.extensions_mut().insert(call);
-            drop(
-                context
-                    .extensions_mut()
-                    .remove::<tok_player::TimerTrigger>(),
-            );
+            extensions.insert(call);
+            drop(extensions.remove::<tok_player::TimerTrigger>());
             let reply = self
                 .registry
                 .as_ref()
                 .clone()
-                .oneshot(tok_execution::Request::new(
+                .oneshot(tok_execution::Request::from_parts(
                     context,
                     (
                         state,
@@ -103,13 +98,14 @@ where
                             body: payload.body,
                         },
                     ),
+                    extensions,
                 ))
                 .await
                 .map_err(|error| super::handler::dispatch_status(error, &self.error))?;
-            if reply.message.key == 0 {
+            if reply.output.message.key == 0 {
                 return Err(Status::failed_precondition("业务回应消息 ID 必须非零"));
             }
-            Ok(CallResponse {
+            Ok(reply.map(|reply| CallResponse {
                 request_id: id,
                 payload: Some(Payload {
                     message_id: reply.message.key,
@@ -117,7 +113,7 @@ where
                 }),
                 error: None,
                 timers: None,
-            })
+            }))
         })
     }
 }

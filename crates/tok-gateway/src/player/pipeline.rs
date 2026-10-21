@@ -2,10 +2,10 @@
 use super::{EventInput, EventTask, Executor, Reply, RequestInput, Task, TimerInput};
 use crate::{GatewayError, Result};
 use std::sync::Arc;
-use tok_execution::Request;
+use tok_execution::{Request, Response};
 use tok_player::{LogicalMessage, TimerUpdate};
 use tower::{Layer, Service, ServiceExt, util::BoxCloneSyncService};
-type Chain<I, O> = BoxCloneSyncService<Request<I>, O, GatewayError>;
+type Chain<I, O> = BoxCloneSyncService<Request<I>, Response<O>, GatewayError>;
 
 /// 一个服务组装的玩家处理链集合；克隆共享用户 Layer 自身声明的并发状态。
 /// 不取代 FIFO、认证、所有权及下行编号，不将事件转换为客户端回应。
@@ -24,10 +24,10 @@ impl Pipeline {
         let event = Arc::clone(&executor);
         Self {
             admission: Chain::new(tower::service_fn(
-                |request: Request<LogicalMessage>| async move { Ok(request) },
+                |request: Request<LogicalMessage>| async move { Ok(Response::new(request)) },
             )),
             downlink: Chain::new(tower::service_fn(
-                |request: Request<LogicalMessage>| async move { Ok(request.input) },
+                |request: Request<LogicalMessage>| async move { Ok(Response::new(request.input)) },
             )),
             request: Chain::new(tower::service_fn(move |input| {
                 let executor = Arc::clone(&request);
@@ -49,7 +49,7 @@ impl Pipeline {
         L: Layer<Chain<LogicalMessage, Request<LogicalMessage>>>,
         L::Service: Service<
                 Request<LogicalMessage>,
-                Response = Request<LogicalMessage>,
+                Response = Response<Request<LogicalMessage>>,
                 Error = GatewayError,
             > + Clone
             + Send
@@ -64,7 +64,7 @@ impl Pipeline {
     pub fn with_request_layer<L>(mut self, layer: L) -> Self
     where
         L: Layer<Chain<RequestInput, Reply>>,
-        L::Service: Service<Request<RequestInput>, Response = Reply, Error = GatewayError>
+        L::Service: Service<Request<RequestInput>, Response = Response<Reply>, Error = GatewayError>
             + Clone
             + Send
             + Sync
@@ -78,8 +78,11 @@ impl Pipeline {
     pub fn with_event_layer<L>(mut self, layer: L) -> Self
     where
         L: Layer<Chain<EventInput, Option<TimerUpdate>>>,
-        L::Service: Service<Request<EventInput>, Response = Option<TimerUpdate>, Error = GatewayError>
-            + Clone
+        L::Service: Service<
+                Request<EventInput>,
+                Response = Response<Option<TimerUpdate>>,
+                Error = GatewayError,
+            > + Clone
             + Send
             + Sync
             + 'static,
@@ -92,7 +95,7 @@ impl Pipeline {
     pub fn with_timer_layer<L>(mut self, layer: L) -> Self
     where
         L: Layer<Chain<TimerInput, Reply>>,
-        L::Service: Service<Request<TimerInput>, Response = Reply, Error = GatewayError>
+        L::Service: Service<Request<TimerInput>, Response = Response<Reply>, Error = GatewayError>
             + Clone
             + Send
             + Sync
@@ -106,8 +109,11 @@ impl Pipeline {
     pub fn with_downlink_layer<L>(mut self, layer: L) -> Self
     where
         L: Layer<Chain<LogicalMessage, LogicalMessage>>,
-        L::Service: Service<Request<LogicalMessage>, Response = LogicalMessage, Error = GatewayError>
-            + Clone
+        L::Service: Service<
+                Request<LogicalMessage>,
+                Response = Response<LogicalMessage>,
+                Error = GatewayError,
+            > + Clone
             + Send
             + Sync
             + 'static,
@@ -119,13 +125,13 @@ impl Pipeline {
     pub(super) async fn admit(
         &self,
         request: Request<LogicalMessage>,
-    ) -> Result<Request<LogicalMessage>> {
+    ) -> Result<Response<Request<LogicalMessage>>> {
         self.admission.clone().oneshot(request).await
     }
     pub(in crate::player) async fn downlink(
         &self,
         request: Request<LogicalMessage>,
-    ) -> Result<LogicalMessage> {
+    ) -> Result<Response<LogicalMessage>> {
         self.downlink.clone().oneshot(request).await
     }
 }

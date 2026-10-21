@@ -89,7 +89,7 @@ async fn main() -> Result<(), BoxError> {
                 let mut handlers: Registry<Vec<u64>> = Registry::new(1)?;
                 handlers.register_service::<Audit, _>(count.layer(sync_handler(|request: Request<events::Input<'_, Vec<u64>, Audit>>| {
                     request.input.state.push(request.input.event.payload.guild_id);
-                    Ok::<_, events::Error>(Outcome::Handled)
+                    Ok::<_, events::Error>(tok::execution::Response::new(Outcome::Handled))
                 })))?;
                 Ok(Box::pin(async move {
                     let mut state = Vec::new();
@@ -133,10 +133,10 @@ async fn main() -> Result<(), BoxError> {
                                         )
                                         .await
                                         .map_err(|_| Status::unavailable("审计服务已停止"))?;
-                                    Ok(HandlerReply {
+                                    Ok(tok::execution::Response::new(HandlerReply {
                                         message: GetGuildResponse { guild_id },
                                         timers: None,
-                                    })
+                                    }))
                                 }
                             },
                         )),
@@ -202,10 +202,11 @@ async fn main() -> Result<(), BoxError> {
                 )
                 .await
                 .map_err(std::io::Error::other)?;
-            if response.error.is_some() {
+            if response.output.error.is_some() {
                 return Err(std::io::Error::other("RPC 业务执行失败"));
             }
             let payload = response
+                .output
                 .payload
                 .ok_or_else(|| std::io::Error::other("RPC 缺少回应正文"))?;
             let guild =

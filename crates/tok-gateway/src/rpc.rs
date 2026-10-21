@@ -83,14 +83,17 @@ impl GatewayRpcService {
             Some(HandoffAction::Cancel) => "gateway/cancel_handoff",
             Some(HandoffAction::Complete) => "gateway/complete_handoff",
         };
-        let context = server.context(request.metadata(), operation)?;
+        let metadata = request.metadata().clone();
         let mut input = request.into_inner();
+        let request = server.request(&metadata, operation, ())?;
         if action.is_none() {
-            input.budget_ms = input.budget_ms.min(context.remaining().as_millis() as u64);
+            input.budget_ms = input
+                .budget_ms
+                .min(request.context.remaining().as_millis() as u64);
         }
         server
             .execute(
-                tok_execution::Request::new(context, input),
+                request.map(|()| input),
                 tower::service_fn(
                     move |request: tok_execution::Request<proto::HandoffRequest>| {
                         let manager = manager.clone();
@@ -99,13 +102,14 @@ impl GatewayRpcService {
                                 None => manager.prepare_handoff(request).await,
                                 Some(action) => manager.finish_handoff(request.input, action).await,
                             }
+                            .map(tok_execution::Response::new)
                             .map_err(handoff_status)
                         }
                     },
                 ),
             )
             .await
-            .map(Response::new)
+            .map(|response| Response::new(response.output))
     }
     fn player_manager(&self, service_name: &str) -> std::result::Result<SessionManager, Status> {
         self.player_managers

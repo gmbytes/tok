@@ -54,7 +54,7 @@ impl Executor for TestExecutor {
             if request.message_id == 2 {
                 self.permits.acquire().await.unwrap().forget();
             }
-            Ok(Reply {
+            Ok(tok_execution::Response::new(Reply {
                 response: Some(LogicalMessage {
                     kind: MessageKind::Response,
                     message_id: request.message_id + 100,
@@ -64,7 +64,7 @@ impl Executor for TestExecutor {
                     body: vec![],
                 }),
                 timers: self.updates.lock().unwrap().remove(&request.message_id),
-            })
+            }))
         })
     }
     fn execute_timer(&self, input: tok_execution::Request<crate::player::TimerInput>) -> Task<'_> {
@@ -87,10 +87,10 @@ impl Executor for TestExecutor {
             {
                 return Err(ErrorCode::Unavailable.into());
             }
-            Ok(Reply {
+            Ok(tok_execution::Response::new(Reply {
                 response: None,
                 timers: self.timer_update.lock().unwrap().take(),
-            })
+            }))
         })
     }
 }
@@ -206,7 +206,7 @@ impl Fixture {
             .unwrap()
     }
     async fn install(&mut self) {
-        assert_eq!(self.request(1, 1).await.error_code, 0);
+        assert_eq!(self.request(1, 1).await.output.error_code, 0);
         assert!(matches!(self.events.recv().await, Some(Event::Request(1))));
     }
     async fn trigger(&mut self) -> TimerTrigger {
@@ -258,8 +258,8 @@ async fn timers_share_fifo_and_do_not_consume_client_request_ids() {
     settle().await;
     assert!(f.events.try_recv().is_err());
     f.executor.permits.add_permits(1);
-    assert_eq!(blocked.await.error_code, 0);
-    assert_eq!(queued.await.error_code, 0);
+    assert_eq!(blocked.await.output.error_code, 0);
+    assert_eq!(queued.await.output.error_code, 0);
     assert!(matches!(f.events.recv().await, Some(Event::Request(3))));
     let trigger = f.trigger().await;
     assert_eq!(trigger.scheduled_at_ms, f.due);
@@ -267,7 +267,7 @@ async fn timers_share_fifo_and_do_not_consume_client_request_ids() {
     settle().await;
     assert!(f.events.try_recv().is_err());
     assert!(f.channel.try_recv().is_err());
-    assert_eq!(f.request(4, 4).await.error_code, 0);
+    assert_eq!(f.request(4, 4).await.output.error_code, 0);
     f.close().await;
 }
 
@@ -287,7 +287,7 @@ async fn response_update_invalidates_timer_already_queued_during_rpc() {
     tokio::time::advance(Duration::from_millis(1500)).await;
     settle().await;
     f.executor.permits.add_permits(1);
-    assert_eq!(blocked.await.error_code, 0);
+    assert_eq!(blocked.await.output.error_code, 0);
     tokio::time::advance(Duration::from_secs(2)).await;
     settle().await;
     assert!(f.events.try_recv().is_err());
@@ -348,7 +348,10 @@ async fn invalid_timer_metadata_closes_session_before_new_work() {
             interval_ms: None,
         }]),
     );
-    assert_eq!(f.request(2, 3).await.error_code, ErrorCode::Internal as u32);
+    assert_eq!(
+        f.request(2, 3).await.output.error_code,
+        ErrorCode::Internal as u32
+    );
     assert!(f.handle.cancellation().is_cancelled());
     assert!(
         f.handle

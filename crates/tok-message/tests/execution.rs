@@ -50,7 +50,7 @@ impl<T, S: Service<Request<T>>> Service<Request<T>> for Audited<S> {
     }
     fn call(&mut self, request: Request<T>) -> Self::Future {
         assert_eq!(request.context.service().service_name, "test");
-        assert_eq!(request.context.extensions().get::<u32>(), Some(&42));
+        assert_eq!(request.extensions().get::<u32>(), Some(&42));
         self.calls.fetch_add(1, Ordering::SeqCst);
         self.inner.call(request)
     }
@@ -66,7 +66,7 @@ fn call() -> CallContext {
     }
 }
 fn context() -> Context {
-    let mut context = Context::new(
+    Context::new(
         Identity {
             node_id: "node".into(),
             service_name: "test".into(),
@@ -75,9 +75,7 @@ fn context() -> Context {
         Duration::from_secs(5),
         CancellationToken::new(),
     )
-    .unwrap();
-    context.extensions_mut().insert(42u32);
-    context
+    .unwrap()
 }
 #[tokio::test]
 async fn one_layer_and_one_event_registration_serve_rpc_timer_local_and_encoded_events() {
@@ -92,10 +90,10 @@ async fn one_layer_and_one_event_registration_serve_rpc_timer_local_and_encoded_
             audit.layer(tower::service_fn(
                 |request: Request<(CallContext, Value)>| async move {
                     assert_eq!(request.context.operation(), "rpc/1");
-                    Ok(HandlerReply {
+                    Ok(tok_execution::Response::new(HandlerReply {
                         message: request.input.1,
                         timers: None,
-                    })
+                    }))
                 },
             )),
         )
@@ -108,12 +106,11 @@ async fn one_layer_and_one_event_registration_serve_rpc_timer_local_and_encoded_
                     assert_eq!(request.context.operation(), "timer/1");
                     assert!(
                         request
-                            .context
                             .extensions()
                             .get::<tok_player::TimerTrigger>()
                             .is_some()
                     );
-                    Ok(None)
+                    Ok(tok_execution::Response::new(None))
                 },
             )),
         )
@@ -127,7 +124,7 @@ async fn one_layer_and_one_event_registration_serve_rpc_timer_local_and_encoded_
                     assert_eq!(request.context.operation(), "event/test.value");
                     assert_eq!(request.input.event.event_id.as_str(), "same-event");
                     assert_eq!(request.input.event.payload.value, 7);
-                    Ok(None)
+                    Ok(tok_execution::Response::new(None))
                 })
             },
         )))
@@ -138,10 +135,10 @@ async fn one_layer_and_one_event_registration_serve_rpc_timer_local_and_encoded_
         body: Value { value: 7 }.encode_to_vec(),
     };
     let response = registry
-        .call(Request::new(context(), (call(), payload.clone())))
+        .call(request((call(), payload.clone())))
         .await
         .unwrap();
-    assert_eq!(response.payload.unwrap().message_id, 2);
+    assert_eq!(response.output.payload.unwrap().message_id, 2);
     let timer = tok_player::TimerTrigger {
         timer_id: "tick".into(),
         scheduled_at_ms: 1,
@@ -149,24 +146,18 @@ async fn one_layer_and_one_event_registration_serve_rpc_timer_local_and_encoded_
     };
     let mut timer_call = call();
     timer_call.timer = Some(timer.clone());
-    let response = registry
-        .call(Request::new(context(), (timer_call, payload)))
-        .await
-        .unwrap();
-    assert!(response.payload.is_none());
+    let response = registry.call(request((timer_call, payload))).await.unwrap();
+    assert!(response.output.payload.is_none());
     let envelope = Envelope::new(EventId::new("same-event").unwrap(), Value { value: 7 }).unwrap();
     let result = registry
         .events()
-        .dispatch(&mut call(), Request::new(context(), &envelope))
+        .dispatch(&mut call(), request(&envelope))
         .await
         .unwrap();
-    assert_eq!(result.len(), 1);
+    assert_eq!(result.output.len(), 1);
     let event = Arc::new(tok_events::Message::new(&envelope).unwrap());
-    let response = registry
-        .event(Request::new(context(), (call(), event)))
-        .await
-        .unwrap();
-    assert!(response.timers.is_none());
+    let response = registry.event(request((call(), event))).await.unwrap();
+    assert!(response.output.timers.is_none());
     assert_eq!(calls.load(Ordering::SeqCst), 4);
 }
 fn wire_request(timeout: Option<&str>) -> tonic::Request<proto::CallRequest> {
@@ -210,7 +201,7 @@ async fn rpc_budget_and_malformed_timeout_are_enforced_before_accepting_results(
                 async move {
                     seen.fetch_add(1, Ordering::SeqCst);
                     tokio::time::sleep(Duration::from_millis(100)).await;
-                    Ok(value)
+                    Ok(tok_execution::Response::new(value))
                 }
             },
         )
@@ -291,7 +282,7 @@ async fn deferred_rpc_is_initialized_once_by_its_own_factory_and_stops_with_serv
                     Value,
                 )>| async move {
                     let (_, v) = execution_request.input;
-                    Ok(v)
+                    Ok(tok_execution::Response::new(v))
                 },
             )?;
             let handler: Arc<dyn Handler> = Arc::new(registry);
@@ -356,4 +347,10 @@ fn initialization_binding_is_not_retained_in_its_own_execution_extensions() {
         weak.upgrade().is_none(),
         "初始化绑定不能通过自身扩展形成引用环"
     );
+}
+
+fn request<T>(input: T) -> Request<T> {
+    let mut request = Request::new(context(), input);
+    request.extensions_mut().insert(42u32);
+    request
 }

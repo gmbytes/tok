@@ -33,15 +33,12 @@ pub(crate) async fn call<F, Fut>(
     target: &ServiceDescriptor,
     request: tok_execution::Request<(CallContext, Payload)>,
     send: F,
-) -> Result<CallResponse, Status>
+) -> Result<tok_execution::Response<CallResponse>, Status>
 where
     F: FnOnce(Channel, Request<CallRequest>) -> Fut,
     Fut: Future<Output = Result<Response<CallResponse>, Status>>,
 {
-    let tok_execution::Request {
-        context: execution,
-        input: (mut context, payload),
-    } = request;
+    let (execution, (mut context, payload), extensions) = request.into_parts();
     validate_target(target, &context)?;
     let request_id = context.request_id;
     let timer = context.timer.take().map(|timer| proto::TimerTrigger {
@@ -59,11 +56,11 @@ where
         .execute(
             target,
             request_id,
-            tok_execution::Request::new(execution.with_span(span), request),
+            tok_execution::Request::from_parts(execution.with_span(span), request, extensions),
             send,
         )
         .await?;
-    if response.request_id != request_id {
+    if response.output.request_id != request_id {
         return Err(Status::data_loss("RPC 回应序号不匹配"));
     }
     Ok(response)

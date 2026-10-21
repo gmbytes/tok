@@ -34,7 +34,7 @@ fn handler(
     fail: bool,
 ) -> impl tower::Service<
     tok_execution::Request<(CallContext, Payload)>,
-    Response = CallResponse,
+    Response = tok_execution::Response<CallResponse>,
     Error = Status,
     Future: Send,
 > + Clone
@@ -48,7 +48,7 @@ fn handler(
             if fail {
                 Err(Status::permission_denied("业务拒绝"))
             } else {
-                Ok(CallResponse::default())
+                Ok(tok_execution::Response::new(CallResponse::default()))
             }
         }
     })
@@ -333,7 +333,7 @@ async fn business_rpc_on_two_nodes_shares_locks_after_target_validation() {
                     tokio::time::sleep(Duration::from_millis(30)).await;
                     *active.lock().unwrap().get_mut(&bid).unwrap() -= 1;
                     total.fetch_sub(1, Ordering::SeqCst);
-                    Ok(CallResponse::default())
+                    Ok(tok_execution::Response::new(CallResponse::default()))
                 }
             },
         );
@@ -438,7 +438,7 @@ async fn business_rpc_on_two_nodes_shares_locks_after_target_validation() {
         ),
     );
     for result in [a, b, c, d] {
-        assert_eq!(result.unwrap().request_id, 1);
+        assert_eq!(result.unwrap().output.request_id, 1);
     }
     assert_eq!(calls.load(Ordering::SeqCst), 4);
     assert!(peak.load(Ordering::SeqCst) > 1, "不同 bid 应可并行");
@@ -452,27 +452,27 @@ async fn business_rpc_on_two_nodes_shares_locks_after_target_validation() {
 async fn encoded_business_failure_is_preserved_when_release_fails() {
     let released = Arc::new(AtomicUsize::new(0));
     let service = tower::service_fn(|_| async {
-        Ok(CallResponse {
+        Ok(tok_execution::Response::new(CallResponse {
             error: Some(tok_proto::internal::v1::RpcError {
                 code: 7,
                 message: "业务拒绝".into(),
             }),
             ..CallResponse::default()
-        })
+        }))
     });
     let response = layer(backend(Duration::ZERO, Duration::ZERO, true, &released))
         .layer(service)
         .oneshot(request())
         .await
         .unwrap();
-    assert_eq!(response.error.unwrap().code, 7);
+    assert_eq!(response.output.error.unwrap().code, 7);
     assert_eq!(released.load(Ordering::SeqCst), 1);
 }
 
 #[derive(Clone)]
 struct NeverReady;
 impl tower::Service<tok_execution::Request<(CallContext, Payload)>> for NeverReady {
-    type Response = CallResponse;
+    type Response = tok_execution::Response<CallResponse>;
     type Error = Status;
     type Future = tok_message::rpc::CallTask<'static>;
     fn poll_ready(
@@ -551,7 +551,7 @@ async fn late_ready_futures_cannot_bypass_acquire_or_execution_deadlines() {
     .unwrap();
     let service = tower::service_fn(|_| async {
         std::thread::sleep(Duration::from_millis(20));
-        Ok(CallResponse::default())
+        Ok(tok_execution::Response::new(CallResponse::default()))
     });
     assert_eq!(
         layer

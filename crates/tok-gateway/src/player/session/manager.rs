@@ -215,18 +215,19 @@ impl SessionManager {
         Arc::make_mut(&mut self.inner).extension = extension;
         Ok(self)
     }
-    pub(super) fn extension_context(&self, operation: &str) -> Result<tok_execution::Context> {
-        let mut context = tok_execution::Context::new(
+    pub(super) fn extension_scope(&self, operation: &str) -> Result<tok_execution::Request<()>> {
+        let context = tok_execution::Context::new(
             self.inner.gateway.identity().clone(),
             operation,
             Duration::from_millis(self.inner.config.rpc_timeout_ms),
             self.inner.shutdown.child_token(),
         )
         .map_err(|_| ErrorCode::Internal)?;
-        context.extensions_mut().extend(&self.inner.extensions);
-        context.extensions_mut().insert(self.inner.gateway.clone());
-        context.extensions_mut().insert(self.clone());
-        Ok(context)
+        let mut scope = tok_execution::Request::new(context, ());
+        scope.extensions_mut().extend(&self.inner.extensions);
+        scope.extensions_mut().insert(self.inner.gateway.clone());
+        scope.extensions_mut().insert(self.clone());
+        Ok(scope)
     }
     pub(in crate::player) fn with_pipeline(mut self, pipeline: crate::player::Pipeline) -> Self {
         Arc::make_mut(&mut self.inner).pipeline = Arc::new(pipeline);
@@ -589,10 +590,10 @@ impl SessionManager {
                 return Err(ErrorCode::Internal.into());
             }
         };
-        let extensions = match self.inner.extension.initialize(tok_execution::Request::new(
-            self.extension_context("player/session/initialize")?,
-            ownership.identity.clone(),
-        )) {
+        let extensions = match self.inner.extension.initialize(
+            self.extension_scope("player/session/initialize")?
+                .map(|()| ownership.identity.clone()),
+        ) {
             Ok(extensions) => extensions,
             Err(error) => {
                 #[expect(
@@ -678,10 +679,11 @@ impl SessionManager {
         let handle = SessionHandle(Arc::clone(&session_state));
         if let Some(policy) = &self.inner.topic_policy {
             let result = tokio::time::timeout(timeout, async {
-                let topics = policy(tok_execution::Request::new(
-                    handle.context("player/session/topics".into())?,
-                    handle.identity().clone(),
-                ))?;
+                let topics = policy(
+                    handle
+                        .request_scope("player/session/topics".into())?
+                        .map(|()| handle.identity().clone()),
+                )?;
                 if topics.len() > self.inner.config.max_topics {
                     return Err(ErrorCode::CapacityExceeded.into());
                 }

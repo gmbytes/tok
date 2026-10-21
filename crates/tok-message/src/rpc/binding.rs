@@ -56,14 +56,8 @@ impl Binding {
             .installed
             .get()
             .ok_or_else(|| Status::unavailable("RPC 服务尚未初始化"))?;
-        request
-            .context
-            .extensions_mut()
-            .extend(&installed.extensions);
-        request
-            .context
-            .extensions_mut()
-            .insert(installed.service.clone());
+        request.extensions_mut().extend(&installed.extensions);
+        request.extensions_mut().insert(installed.service.clone());
         Ok(installed)
     }
 }
@@ -71,10 +65,8 @@ impl Handler for Binding {
     fn call(&self, mut request: Request<(CallContext, Payload)>) -> CallTask<'_> {
         Box::pin(async move {
             let installed = self.prepare(&mut request)?;
-            request
-                .context
-                .extensions_mut()
-                .insert(request.input.0.clone());
+            let call = request.input.0.clone();
+            request.extensions_mut().insert(call);
             let stop = installed.service.cancellation();
             let cancellation = request.context.cancellation();
             tokio::select! { biased;
@@ -89,10 +81,8 @@ impl Handler for Binding {
     ) -> EventTask<'_> {
         Box::pin(async move {
             let installed = self.prepare(&mut request)?;
-            request
-                .context
-                .extensions_mut()
-                .insert(request.input.0.clone());
+            let call = request.input.0.clone();
+            request.extensions_mut().insert(call);
             let stop = installed.service.cancellation();
             let cancellation = request.context.cancellation();
             tokio::select! { biased;

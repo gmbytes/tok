@@ -165,21 +165,14 @@ async fn one_layer_handles_rpc_client_event_and_timer_with_typed_results_and_bor
     let timer = budget.layer(audit.layer(service_fn(|request: Request<()>| {
         ready(Ok::<_, Rejected>(
             request
-                .context
                 .extensions()
                 .get::<Tick>()
                 .map(|trigger| trigger.fired_at_ms),
         ))
     })));
-    let mut timer_context = parent.child("timer").unwrap();
+    let mut timer_context = Request::new(parent.child("timer").unwrap(), ());
     timer_context.extensions_mut().insert(trigger);
-    assert_eq!(
-        timer
-            .oneshot(Request::new(timer_context, ()))
-            .await
-            .unwrap(),
-        Some(2)
-    );
+    assert_eq!(timer.oneshot(timer_context).await.unwrap(), Some(2));
     assert_eq!(state.value, 7);
     assert_eq!(
         *log.lock().unwrap(),

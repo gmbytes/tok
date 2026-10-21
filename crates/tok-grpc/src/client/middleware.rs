@@ -95,10 +95,7 @@ where
     S: TowerService<Request<Outgoing<T>>, Error = Status>,
 {
     fn new(client: &Client, service: S, request: Request<Call<T>>) -> Self {
-        let Request {
-            mut context,
-            input: mut call,
-        } = request;
+        let (mut context, mut call, extensions) = request.into_parts();
         context = context.with_budget_limit(client.timeout());
         let metrics = Metrics {
             target: call.target.clone(),
@@ -121,7 +118,10 @@ where
             let outgoing = Outgoing::new(call.target, call.request_id, channel, call.request);
             let work = tokio::time::timeout_at(
                 deadline,
-                Dispatch::new(service, Request::new(context.clone(), outgoing)),
+                Dispatch::new(
+                    service,
+                    Request::from_parts(context.clone(), outgoing, extensions),
+                ),
             )
             .instrument(context.span().clone());
             Ok((deadline, work))

@@ -144,18 +144,19 @@ impl Client {
     /// 目标已解析，Channel 复用、追踪注入及整体期限由本客户端负责；中间件接收
     /// `Request<Outgoing>`，可读取原上下文、目标和关联序号并修改请求。路由选点在调用前完成。
     /// 不要求输入或 Service 为 static，可使用借用；中间件自行决定是否引入队列或重试。
-    /// 返回类型化回应正文，与 execute 一致，不主动添加重试。
+    /// 返回 `Response<Res>` 并保留本地输出扩展；转换时只消费原生 tonic 回应正文。
+    /// 原生 metadata 需要由发送 Service 显式解释，不自动转为本地扩展，不主动添加重试。
     pub async fn execute_service<Req, Res, S>(
         &self,
         target: &ServiceDescriptor,
         request_id: u64,
         request: tok_execution::Request<Request<Req>>,
         service: S,
-    ) -> Result<Res, Status>
+    ) -> Result<tok_execution::Response<Res>, Status>
     where
         S: tower::Service<
                 tok_execution::Request<Outgoing<Req>>,
-                Response = Response<Res>,
+                Response = tok_execution::Response<Response<Res>>,
                 Error = Status,
             >,
     {
@@ -167,20 +168,21 @@ impl Client {
                 request,
             }))
             .await
-            .map(Response::into_inner)
+            .map(|response| response.map(Response::into_inner))
     }
 
     /// 执行任意生成协议的单次调用，传播追踪、设置有限期限并记录指标；不自动重试。
     ///
     /// 请求使用执行 Request 承接上游 Context；Client 配置与 grpc-timeout 只能收紧原期限。
     /// 准备与发送计入原预算，取消停止本地等待；不承诺远端回滚。
+    /// 发送回调使用原生 tonic 类型，成功后封装为扩展为空的本地 Response。
     pub async fn execute<Req, Res, F, Fut>(
         &self,
         target: &ServiceDescriptor,
         request_id: u64,
         request: tok_execution::Request<Request<Req>>,
         send: F,
-    ) -> Result<Res, Status>
+    ) -> Result<tok_execution::Response<Res>, Status>
     where
         F: FnOnce(Channel, Request<Req>) -> Fut,
         Fut: Future<Output = Result<Response<Res>, Status>>,

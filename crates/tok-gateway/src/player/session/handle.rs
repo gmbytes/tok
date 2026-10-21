@@ -7,12 +7,13 @@ use super::{
 };
 use crate::{ErrorCode, Result};
 use std::{future::Future, pin::Pin, sync::Arc};
+use tok_execution::{Request, Response};
 use tok_player::{LogicalMessage, MessageKind, SessionIdentity};
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
-/// 单次排队请求的回应，不创建额外业务任务；队列关闭时返回失败回应。
-pub type PendingResponse = Pin<Box<dyn Future<Output = LogicalMessage> + Send>>;
+/// 单次排队请求的回应及本地输出扩展，不创建额外任务；队列关闭时返回失败正文。
+pub type PendingResponse = Pin<Box<dyn Future<Output = Response<LogicalMessage>> + Send>>;
 
 /// 一个玩家当前逻辑会话的有界提交入口，可用于后续转发事件。
 #[derive(Clone)]
@@ -44,16 +45,14 @@ impl BoundSession {
             .channel
             .admit_request(&self.binding, request.request_id, || Ok(()))?;
         let original = (request.kind, request.request_id, request.message_id);
-        let mut context = self.session.context_with_cancellation(
+        let mut scope = self.session.scope_with_cancellation(
             format!("player/admission/{}", request.message_id),
             self.binding.cancellation.child_token(),
         )?;
-        context
-            .extensions_mut()
-            .insert(crate::player::ClientRequest {
-                request_id: request.request_id,
-                message_id: request.message_id,
-            });
+        scope.extensions_mut().insert(crate::player::ClientRequest {
+            request_id: request.request_id,
+            message_id: request.message_id,
+        });
         let pipeline = Arc::clone(&self.session.0.pipeline);
         use tower::{Layer as _, ServiceExt};
         let mut request = tok_execution::Layer
@@ -61,9 +60,10 @@ impl BoundSession {
                 let pipeline = Arc::clone(&pipeline);
                 async move { pipeline.admit(request).await }
             }))
-            .oneshot(tok_execution::Request::new(context, request))
+            .oneshot(scope.map(|()| request))
             .await
-            .map_err(super::worker::execution_error)?;
+            .map_err(super::worker::execution_error)?
+            .into_inner();
         if (
             request.input.kind,
             request.input.request_id,
@@ -105,7 +105,7 @@ impl BoundSession {
         {
             self.close_session();
         }
-        result
+        result.map(Response::into_inner)
     }
 }
 
@@ -181,7 +181,7 @@ impl SessionHandle {
         &self,
         event: Arc<tok_events::Message>,
         topic: Option<&str>,
-        source: Option<&tok_execution::Context>,
+        source: Option<&Request<()>>,
     ) -> Result<()> {
         event
             .validate(self.0.channel.max_event_bytes())
@@ -193,7 +193,7 @@ impl SessionHandle {
             self.0
                 .job_sender
                 .try_send(Job::Event(super::worker::EventJob {
-                    context: self.delivery_context(
+                    scope: self.delivery_scope(
                         source,
                         format!("player/event/{}", event.event_type),
                         true,
@@ -211,8 +211,8 @@ impl SessionHandle {
         message_id: u32,
         body: &[u8],
         topic: Option<&str>,
-        source: &tok_execution::Context,
-    ) -> Result<()> {
+        source: &Request<()>,
+    ) -> Result<Response<()>> {
         if self.0.cancel.is_cancelled() {
             return Err(ErrorCode::SessionClosed.into());
         }
@@ -246,13 +246,11 @@ impl SessionHandle {
         }
     }
     pub(super) fn changed(&self, change: super::extension::Change) {
-        let Ok(context) = self.context("player/session/change".into()) else {
+        let Ok(context) = self.request_scope("player/session/change".into()) else {
             return;
         };
         if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            self.0
-                .extension
-                .on_change(tok_execution::Request::new(context, change))
+            self.0.extension.on_change(context.map(|()| change))
         }))
         .is_err()
         {
@@ -265,23 +263,23 @@ impl SessionHandle {
     pub fn extensions(&self) -> &tok_core::Extensions {
         &self.0.extensions
     }
-    pub(super) fn context(&self, operation: String) -> Result<tok_execution::Context> {
-        self.context_with_cancellation(operation, self.0.cancel.child_token())
+    pub(super) fn request_scope(&self, operation: String) -> Result<Request<()>> {
+        self.scope_with_cancellation(operation, self.0.cancel.child_token())
     }
     // 停止新业务后仍按原预算收束在途执行；会话取消信号通过 SessionHandle 单独提供。
-    pub(super) fn execution_context(&self, operation: String) -> Result<tok_execution::Context> {
+    pub(super) fn execution_scope(&self, operation: String) -> Result<Request<()>> {
         if self.0.cancel.is_cancelled() {
             return Err(ErrorCode::SessionClosed.into());
         }
-        self.context_with_cancellation(operation, CancellationToken::new())
+        self.scope_with_cancellation(operation, CancellationToken::new())
     }
-    fn context_with_cancellation(
+    fn scope_with_cancellation(
         &self,
         operation: String,
         cancellation: CancellationToken,
-    ) -> Result<tok_execution::Context> {
+    ) -> Result<Request<()>> {
         let owner = &self.0.ownership.owner;
-        let mut context = tok_execution::Context::new(
+        let context = tok_execution::Context::new(
             tok_core::service::Identity {
                 node_id: owner.node_id.clone(),
                 service_name: owner.service_name.clone(),
@@ -291,42 +289,44 @@ impl SessionHandle {
             cancellation,
         )
         .map_err(|_| ErrorCode::Internal)?;
+        let mut scope = Request::new(context, ());
         let manager = self
             .0
             .manager
             .upgrade()
             .map(|inner| super::manager::SessionManager { inner });
         if let Some(manager) = &manager {
-            context.extensions_mut().extend(&manager.extensions());
+            scope.extensions_mut().extend(&manager.extensions());
         }
-        context.extensions_mut().extend(&self.0.extensions);
+        scope.extensions_mut().extend(&self.0.extensions);
         if let Some(manager) = manager {
-            context.extensions_mut().insert(manager.gateway());
-            context.extensions_mut().insert(manager);
+            scope.extensions_mut().insert(manager.gateway());
+            scope.extensions_mut().insert(manager);
         }
-        context.extensions_mut().insert(self.clone());
-        Ok(context)
+        scope.extensions_mut().insert(self.clone());
+        Ok(scope)
     }
     // 成功入队的事件属于独立 session 工作；同步通知仍受投递调用期限与取消约束。
-    pub(super) fn delivery_context(
+    pub(super) fn delivery_scope(
         &self,
-        source: Option<&tok_execution::Context>,
+        source: Option<&Request<()>>,
         operation: String,
         independent: bool,
-    ) -> Result<tok_execution::Context> {
-        let mut context = self.context(operation)?;
+    ) -> Result<Request<()>> {
+        let mut scope = self.request_scope(operation)?;
         if let Some(source) = source {
-            let destination = context.extensions().clone();
-            context.extensions_mut().extend(source.extensions());
-            context.extensions_mut().extend(&destination);
-            context = context.with_span(source.span().clone());
+            let destination = scope.extensions().clone();
+            scope.extensions_mut().extend(source.extensions());
+            scope.extensions_mut().extend(&destination);
+            scope.context = scope.context.with_span(source.context.span().clone());
             if !independent {
-                context = context
-                    .with_deadline_limit(source.deadline())
-                    .with_cancellation(source.cancellation().child_token());
+                scope.context = scope
+                    .context
+                    .with_deadline_limit(source.context.deadline())
+                    .with_cancellation(source.context.cancellation().child_token());
             }
         }
-        Ok(context)
+        Ok(scope)
     }
     /// 查询会话阶段、连接、主题及 FIFO 容量，不替代后续准入检查。
     pub fn snapshot(&self) -> Result<super::Snapshot> {
@@ -392,13 +392,13 @@ impl SessionHandle {
         &self,
         response: LogicalMessage,
         request_message_id: u32,
-        source: &tok_execution::Context,
+        source: &Request<()>,
     ) -> Result<()> {
         if self.0.cancel.is_cancelled() {
             return Err(ErrorCode::SessionClosed.into());
         }
         // 业务结束后的回应发布使用独立有限范围，超时错误仍可下发；继承该请求的本地标记。
-        let publication = self.delivery_context(Some(source), "player/response".into(), true)?;
+        let publication = self.delivery_scope(Some(source), "player/response".into(), true)?;
         if let Err(error) = self
             .process_downlink(response, request_message_id, None, None, Some(&publication))
             .await
@@ -412,22 +412,18 @@ impl SessionHandle {
     fn enqueue(
         &self,
         request: LogicalMessage,
-        response_sender: Option<oneshot::Sender<LogicalMessage>>,
+        response_sender: Option<oneshot::Sender<Response<LogicalMessage>>>,
     ) -> Result<()> {
         self.0.channel.admit_internal(|| {
-            let context =
-                self.execution_context(format!("player/request/{}", request.message_id))?;
-            self.enqueue_request(
-                tok_execution::Request::new(context, request),
-                response_sender,
-            )
+            let context = self.execution_scope(format!("player/request/{}", request.message_id))?;
+            self.enqueue_request(context.map(|()| request), response_sender)
         })
     }
 
     fn enqueue_request(
         &self,
         request: tok_execution::Request<LogicalMessage>,
-        response_sender: Option<oneshot::Sender<LogicalMessage>>,
+        response_sender: Option<oneshot::Sender<Response<LogicalMessage>>>,
     ) -> Result<()> {
         if self.0.cancel.is_cancelled() {
             return Err(ErrorCode::SessionClosed.into());
@@ -455,12 +451,14 @@ impl SessionHandle {
     }
     /// 非阻塞提交并取得独立回应 future，满队列立即失败，不自动重试。
     ///
-    /// 回应只交给调用方，不自动发给游戏客户端，不分配下行序号或写入缓存。
+    /// 回应及执行链输出扩展只交给调用方，不自动发给游戏客户端，不分配下行序号或写入缓存。
     pub fn try_request(&self, request: LogicalMessage) -> Result<PendingResponse> {
         let fallback = channel::error_response(&request, ErrorCode::SessionClosed);
         let (sender, receiver) = oneshot::channel();
         self.enqueue(request, Some(sender))?;
-        Ok(Box::pin(async move { receiver.await.unwrap_or(fallback) }))
+        Ok(Box::pin(async move {
+            receiver.await.unwrap_or_else(|_| Response::new(fallback))
+        }))
     }
     async fn process_downlink(
         &self,
@@ -468,8 +466,8 @@ impl SessionHandle {
         request_message_id: u32,
         binding: Option<channel::Binding>,
         event_target: Option<EventTarget>,
-        source: Option<&tok_execution::Context>,
-    ) -> Result<()> {
+        source: Option<&Request<()>>,
+    ) -> Result<Response<()>> {
         self.0
             .channel
             .check_publication(binding.as_ref(), message.kind)?;
@@ -478,15 +476,17 @@ impl SessionHandle {
             || self.0.cancel.child_token(),
             |binding| binding.cancellation.child_token(),
         );
-        let context = self
-            .delivery_context(
-                source,
-                format!("player/downlink/{}", message.message_id),
-                false,
-            )?
-            .with_cancellation(
-                source.map_or(cancellation, |parent| parent.cancellation().child_token()),
-            );
+        let mut context = self.delivery_scope(
+            source,
+            format!("player/downlink/{}", message.message_id),
+            false,
+        )?;
+        context.context =
+            context
+                .context
+                .with_cancellation(source.map_or(cancellation, |parent| {
+                    parent.context.cancellation().child_token()
+                }));
         let session = self.clone();
         use tower::{Layer as _, ServiceExt};
         let service = tower::service_fn(move |request: tok_execution::Request<LogicalMessage>| {
@@ -496,14 +496,15 @@ impl SessionHandle {
             async move {
                 // 异步串行门锁只保护新下行处理；通道锁不跨 await，ACK 和补发可继续推进。
                 let _gate = session.0.downlink_gate.lock().await;
-                let message = session.0.pipeline.downlink(request).await?;
+                let (message, extensions) =
+                    session.0.pipeline.downlink(request).await?.into_parts();
                 if (message.kind, message.request_id) != original
                     || message.server_seq.is_some()
                     || (message.kind == MessageKind::Notify && message.message_id == 0)
                 {
                     return Err(ErrorCode::InvalidRequest.into());
                 }
-                if let Some(target) = event_target {
+                let result = if let Some(target) = event_target {
                     session
                         .0
                         .channel
@@ -518,24 +519,27 @@ impl SessionHandle {
                         .0
                         .channel
                         .publish_from(binding.as_ref(), message, request_message_id)
-                }
+                };
+                result.map(|()| Response::from_parts((), extensions))
             }
         });
         tok_execution::Layer
             .layer(service)
-            .oneshot(tok_execution::Request::new(context, message))
+            .oneshot(context.map(|()| message))
             .await
             .map_err(super::worker::execution_error)
     }
-    /// 在已有调用范围内发布新通知，保留自定义扩展并安装目标 session 能力。
+    /// 在已有调用范围内发布新通知，保留输入扩展并安装目标 session 能力，返回下行输出扩展。
     pub async fn notify_request(
         &self,
         request: tok_execution::Request<LogicalMessage>,
-    ) -> Result<()> {
+    ) -> Result<Response<()>> {
         if request.input.kind != MessageKind::Notify || request.input.message_id == 0 {
             return Err(ErrorCode::InvalidRequest.into());
         }
-        self.process_downlink(request.input, 0, None, None, Some(&request.context))
+        let (context, message, extensions) = request.into_parts();
+        let scope = Request::from_parts(context, (), extensions);
+        self.process_downlink(message, 0, None, None, Some(&scope))
             .await
     }
     /// 建立独立有限范围主动通知，不调用 player；已有调用应使用 notify_request 保留其范围。

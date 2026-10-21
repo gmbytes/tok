@@ -215,6 +215,7 @@ pub async fn rpc_smoke(directory: &dyn ServiceDirectory) -> Result<(), Error> {
             )?,
         )
         .await?;
+    let response = response.output;
     let payload = response
         .payload
         .ok_or_else(|| std::io::Error::other("player 回应缺少 payload"))?;
@@ -247,6 +248,7 @@ pub async fn rpc_smoke(directory: &dyn ServiceDirectory) -> Result<(), Error> {
             )?,
         )
         .await?;
+    let response = response.output;
     let payload = response
         .payload
         .ok_or_else(|| std::io::Error::other("guild 回应缺少 payload"))?;

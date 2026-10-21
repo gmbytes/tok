@@ -652,3 +652,11 @@ Listener::from_server 支持 Tonic Server<L>，内部保存 Routes 和类型擦�
 protobuf 表克隆改为共享路由快照，注册时写时复制，服务调用不复制整张表；旧克隆不因后续注册变化，实际策略状态仍由 Layer 共享。普通业务 RPC 适配和本地公会示例已切换到 Service 入口；显式 dispatch 保留，编码适配复用 Service 路径。未新增 Registry Layer、路由 fallback、后台队列或自动重试。
 
 本轮 Windows 验收：工作区串行 311 项测试通过、32 项外部专项按默认规则跳过，包含 19 项指南示例。新增 5 项回归覆盖公共与路由 Layer 的 Context 传递、原错误与未知键、非 Clone 取键函数共享、停止前不取键、就绪等待和非协作式取键的期限，以及 protobuf / message 直接 Service 与注册快照隔离。全目标编译与 Clippy、workspace rustdoc、dispatch / rpc / client 三个 smoke、格式、220 个文本文件 UTF-8/LF、119 处相对文档路径及空白检查通过。未运行真实 Redis/NATS、Linux 或 release 构建；本轮随本次提交交付。
+
+## Request / Response 与扩展分离（2026-10-21）
+
+将输入 Extensions 从执行 Context 移至 Request，新增 Response 及独立输出扩展；私有 request.rs / response.rs 分别实现并根导出。封装类型不依赖 ContextError；执行范围由 Context 派生，适配器显式接续输入能力。框架注册器、RPC/事件适配与网关 Pipeline 同步迁移；泛型执行保护、锁中间件与同步回调适配保持透明，不强制包装基础设施结果。
+
+请求和结果转换分别保留对应扩展，事件聚合按注册顺序合并输出扩展，同类型后者覆盖。PendingResponse、notify_request 和 deliver 提供本地输出元信息；跨进程、客户端编码与 replay 不隐式传输 Extensions。既有预算、取消关系、独立事件、所有权、FIFO 与无自动重试语义保持回归。
+
+Windows 工作区串行 317 项通过（含 20 项 rustdoc 指南示例），32 项外部专项默认跳过；隔离真实 NATS 额外 16 项专项通过。Clippy、无警告 API 文档、六个 smoke、格式/空白、222 个 UTF-8/LF 文本文件及 119 处相对文档路径检查通过。未运行真实 Redis、Linux 或 release 构建。

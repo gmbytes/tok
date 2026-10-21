@@ -198,7 +198,7 @@ mod tests {
                     9,
                     b"stale",
                     Some("guild:7"),
-                    &handle.context("test-notify".into()).unwrap()
+                    &handle.request_scope("test-notify".into()).unwrap()
                 )
                 .await
                 .is_err()

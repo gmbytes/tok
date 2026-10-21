@@ -22,7 +22,7 @@ pub(super) fn dispatcher() -> Result<Registry<PlayerState, (), Status>, tok::eve
             let stored = request.input.state;
             let event = &request.input.event.payload;
             if stored.production_due != Some(event.scheduled_at_ms) {
-                return Ok(());
+                return Ok(tok::execution::Response::new(()));
             }
             // 先完成可失败的计算，再更新状态；本地分发器自身不提供回滚。
             let value = stored
@@ -31,7 +31,7 @@ pub(super) fn dispatcher() -> Result<Registry<PlayerState, (), Status>, tok::eve
                 .ok_or_else(|| Status::out_of_range("示例计时数值溢出"))?;
             stored.value = value;
             stored.production_due = None;
-            Ok(())
+            Ok(tok::execution::Response::new(()))
         },
     ))?;
     Ok(dispatcher)

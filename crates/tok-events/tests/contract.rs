@@ -84,7 +84,7 @@ async fn local_dispatch_does_not_apply_remote_delivery_policy() {
         .register::<Reward, _>(|request| {
             Box::pin(async move {
                 *request.input.state += request.input.event.payload.0;
-                Ok(())
+                Ok(tok_execution::Response::new(()))
             })
         })
         .unwrap();

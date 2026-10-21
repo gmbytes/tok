@@ -33,7 +33,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             tokio::task::yield_now().await;
             *request.input.state += request.input.event.payload.amount;
             assert_eq!(request.context.operation(), "event/demo.added.v1");
-            Ok(Outcome::Handled)
+            Ok(tok::execution::Response::new(Outcome::Handled))
         })
     })?;
     events.enable_protobuf::<Added>()?;
