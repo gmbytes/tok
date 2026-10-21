@@ -436,7 +436,7 @@ let rpc = message::rpc::Service::new("local", "custom", Arc::new(adapter))?;
 业务中间件通过 register_service 安装，本地与 RPC 调用共用该链。普通业务 RPC 适配要求 u32 消息 ID，拒绝零请求消息 ID 和零回应消息 ID；message::Registry 在注册时校验请求/回应 ID 非零，RPC HandlerRegistry 复用该表，通用分发表和 protobuf 适配本身不施加该规则。
 示例公会的 guild::handlers 返回 message::Registry 及消息注册错误，业务错误保留其自身类型；RPC 组装只负责提取目标、映射错误并安装请求锁。运行 `just dispatch-smoke` 验证直接本地调用，`just rpc-smoke client-smoke` 验证同一业务链在真实 RPC/TCP 中的使用。
 
-当前 message::rpc::HandlerRegistry 的普通请求表已委托执行库分发；timer、事件及其玩家附加结果仍由游戏协议层组合。通知归属和通用请求锁迁移属于后续批次，本批不宣称已完成。
+当前 message::rpc::HandlerRegistry 的普通请求表已委托执行库分发；timer、事件及其玩家附加结果仍由游戏协议层组合。通知归属仍待校正；通用请求锁已迁入 execution::lock，RPC 仅保留协议策略与映射。
 
 ## 内部 RPC 与共享端点
 
@@ -578,6 +578,41 @@ service_name = "audit"
 Redis 后端使用有限 TTL 和唯一持有者标识，Lua 比较身份后释放；旧租约不能删除新锁。
 后端不续租，取消后不在 Drop 中异步释放，依靠 TTL 兜底。
 
+[`execution::lock::Layer`] 是通用请求锁处理链，显式接收从 Request 提取 Key 的函数，以及判断 Ok 回应是否表示业务成功的函数。输入、回应和错误均由调用方定义，不读取 CallContext、不构造 Status，也不判断 protobuf 字段。当前输入、回应和内层错误要求自有 Send + static 类型。
+
+```rust
+use std::{sync::Arc, time::Duration};
+use tok::{
+    core::{Identity, lock::Key},
+    execution::{Context, Request, lock},
+    infra::locks::Memory,
+    application::CancellationToken,
+};
+use tower::{Layer as _, ServiceExt};
+
+# #[tokio::main]
+# async fn main() -> Result<(), Box<dyn std::error::Error>> {
+let layer = lock::Layer::new(
+    Arc::new(Memory::new(32)?), lock::Config::default(),
+    |request: &Request<u64>| Ok::<_, std::io::Error>(Key {
+        namespace: "inventory".into(), bid: request.input.to_string(),
+    }),
+    |_: &u64| true, // 此处理链的 Ok 回应都表示成功。
+)?;
+let service = layer.layer(tower::service_fn(|request: Request<u64>| async move {
+    Ok::<_, std::io::Error>(request.input + 1)
+}));
+let context = Context::new(
+    Identity { node_id: "local".into(), service_name: "inventory".into() },
+    "inventory/update", Duration::from_secs(2), CancellationToken::new(),
+)?;
+assert_eq!(service.oneshot(Request::new(context, 41)).await?, 42);
+# Ok(())
+# }
+```
+
+通用 Config 只定义时间预算，命名空间来自取键函数。`lock::Error<E>` 区分取键、后端获取、整体获取超时、剩余租期不足、业务执行超时、原始业务错误、释放失败与原上下文停止。获取、执行和释放共用原 Context 的期限、取消和追踪；内层 Service 的 readiness 也计入持锁执行预算。释放失败时保留原始 Err，以及结果判断函数判为失败的 Ok 回应，只覆盖业务成功。
+
 [`message::rpc::lock::Layer`] 通过 [`message::rpc::TowerHandler`] 在普通业务 RPC 的上下文校验之后包住 handler。
 按逻辑服务名与上下文 bid 加锁，空 bid 拒绝执行，不同服务隔离；节点名不进入锁键。
 由 Rust 组装代码按服务显式安装，不需要 `ServiceConfig` 开关：
@@ -593,7 +628,7 @@ let service = tower::service_fn(move |request| {
     let registry = Arc::clone(&registry);
     async move { registry.call(request).await }
 });
-let layer = lock::Layer::new(backend, lock::Config::new("guild"))?;
+let layer = lock::Layer::new(backend, "guild", tok::execution::lock::Config::default())?;
 let rpc = Service::new("node-a", "guild", Arc::new(TowerHandler(layer.layer(service))))?
     .into_business();
 # drop(rpc);
@@ -606,7 +641,7 @@ let rpc = Service::new("node-a", "guild", Arc::new(TowerHandler(layer.layer(serv
 示例 `demo_game::application` 默认给 guild 安装 Memory 锁；多进程共享业务使用
 `demo_game::application_with_locks` 显式注入共享后端。player 仍由 session 串行执行，网关交接接口不安装此 Layer。
 
-[`message::rpc::lock::Config`] 默认竞争等待 100ms、整体获取期限 500ms、租期 3s、业务执行期限 1s、释放期限 100ms。
+[`execution::lock::Config`] 默认竞争等待 100ms、整体获取期限 500ms、租期 3s、业务执行期限 1s、释放期限 100ms。
 从获取开始按单调时钟扣除耗时，剩余租期必须容纳完整执行预算和释放余量，否则拒绝执行。
 内部 Service 的 readiness 等待也计入执行预算；需要整体并发限制时在锁 Layer 外侧组装共享限流器。
 `Memory::new(capacity)` 分别限制活动键和并发获取数量，Redis 的 `max_pending` 限制本地并发获取，超限快速拒绝。

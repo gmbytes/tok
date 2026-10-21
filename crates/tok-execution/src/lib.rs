@@ -2,11 +2,13 @@
 //!
 //! 主要入口为 Context、Request、Layer 和同步 handler 适配；不管理服务启动或后台任务。
 //! registry 提供以自定义键选择处理链的功能命名空间，不限定编码或传输。
+//! lock 提供显式取键和结果判断的通用请求锁中间件，不依赖业务上下文或传输类型。
 //! 服务构建、生命周期和任务监督由独立的 tok-lifecycle 提供。
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
 mod context;
 mod execution;
 mod handler;
+pub mod lock;
 /// 按自定义键选择处理链，不限定输入、结果或编码格式。
 pub mod registry;
 mod request;

@@ -69,6 +69,6 @@ pub fn locked_handler(
         let adapter = Arc::clone(&adapter);
         async move { adapter.call(request).await }
     });
-    let layer = lock::Layer::new(backend, lock::Config::new(namespace))?;
+    let layer = lock::Layer::new(backend, namespace, tok::execution::lock::Config::default())?;
     Ok(Arc::new(TowerHandler(layer.layer(service))))
 }

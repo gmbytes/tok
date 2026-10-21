@@ -143,7 +143,7 @@ Client::with_endpoint_factory 接收从 ServiceDescriptor 创建 Tonic Endpoint 
 
 公会示例用自身错误与 u64 目标，本地及 RPC 共用相同处理链；just dispatch-smoke 演示本地直接调用。当前存储的处理链与输入要求自有 Send + static 类型，共享业务状态可以 Arc 传入；借用执行继续使用直接 Tower 或事件接口。
 
-后续第二批：校正玩家请求、timer、事件组合及结果转换，迁移通知构造。第三批：以显式业务取键泛化请求锁，迁入 tok-execution::lock，清理重导出和组装。两批尚未完成；现有玩家入口隔离、事件仅服务端驱动、原预算与无自动重试约束保留。
+后续第二批：校正玩家请求、timer、事件组合及结果转换，迁移通知构造。第三批已以显式业务取键泛化请求锁，迁入 tok-execution::lock，RPC 只保留协议适配；第二批玩家组合与通知归属仍未完成。现有玩家入口隔离、事件仅服务端驱动、原预算与无自动重试约束保留。
 
 本次 Windows 验收：工作区 271 项测试通过、31 项外部专项按约定跳过，包含 15 项指南示例及生命周期编译失败文档测试。全目标编译与 Clippy、workspace rustdoc、dispatch / rpc / client / application smoke、格式、208 个文本文件 UTF-8/LF 与 82 处文档相对路径检查通过。元数据与完整正常依赖树确认无独立 tok-dispatch，tok-execution 不依赖 prost、Tonic、生成协议、玩家或生命周期。未运行真实 Redis/NATS、Linux 或 release 构建；随本次提交交付。
 
@@ -173,7 +173,7 @@ tok-game-rpc 已调整为 tok-message，通用正文适配独立为 tok-protobuf
 
 tok-message 根 Registry 提供不依赖 Tonic 的非零编号注册、本地分发与原始业务错误；玩家身份、事件/timer RPC 组合、线协议结果与 Status 映射集中于 message::rpc。公会示例和本地/RPC 共用处理链采用根 Registry。通用 protobuf 表继续允许字符串及零键，RPC 不自动添加锁或重试，事件与 timer 仍只能由可信服务器触发。
 
-本轮只校正库与命名空间边界，不宣称通用请求锁泛化、玩家结果模型及通知构造后续批次已经完成。请求锁目前保留在 message::rpc::lock，仍按现有 TTL 和执行预算约束运行。
+本轮只校正库与命名空间边界，不宣称通用请求锁泛化、玩家结果模型及通知构造后续批次已经完成。请求锁执行已迁入 execution::lock，message::rpc::lock 只保留协议策略与映射，仍按有限 TTL 和执行预算约束运行。
 
 本轮 Windows 验收：工作区 274 项测试通过、31 项外部专项按约定跳过，包含 15 项指南示例；零消息编号的 RPC 拒绝另补定向回归。全目标编译与 Clippy、workspace rustdoc、dispatch / rpc / client / application / lifecycle / execution 六项 smoke、格式、214 个文本文件 UTF-8/LF 和 82 处相对文档路径检查通过。正常依赖确认 tok-protobuf 不依赖 Tonic、生成协议或玩家，tok-grpc 不依赖消息、事件或玩家层。未运行真实 Redis/NATS、Linux 或 release 构建；随本次提交交付。
 
@@ -181,6 +181,14 @@ tok-message 根 Registry 提供不依赖 Tonic 的非零编号注册、本地分
 
 已移除 tok-player 根 Error / Result 和重复的 ownership::Owner。ownership::{Error, Result} 与 credentials::{Error, Result} 分别表达领域故障；持有者直接使用 core::Identity。Memory 与 Redis 构造配置失败统一为 InvalidConfig，内存所有权容量不足独立为 CapacityExceeded，网关映射为已有容量错误码；凭证故障保留不含敏感值的静态原因。
 
-普通登录、快速重登、转移与释放对最新登录标记的要求已写入 trait 和指南；本地验签不授予所有权。模块与主要类型根导出布局保留，LogicalMessage / TimerSpec 注释、调用方、后端、自定义 Store 示例和指南同步修正。后续玩家结果模型、通知归属及请求锁泛化仍按原计划推进。
+普通登录、快速重登、转移与释放对最新登录标记的要求已写入 trait 和指南；本地验签不授予所有权。模块与主要类型根导出布局保留，LogicalMessage / TimerSpec 注释、调用方、后端、自定义 Store 示例和指南同步修正。请求锁泛化已完成，后续玩家结果模型及通知归属仍按原计划推进。
 
 本轮 Windows 验收：工作区 279 项测试通过、31 项外部专项按约定跳过，包含 16 项指南示例；最终内存所有权定向回归通过。全目标 Clippy、workspace rustdoc、client / execution smoke、格式、213 个文本文件 UTF-8/LF、82 处相对文档路径及空白检查通过。新增回归覆盖构造配置分类、最新登录标记回收、凭证故障的安全诊断和所有权容量不足的 TCP 登录错误映射。未运行真实 Redis/NATS、Linux 或 release 构建；随本次提交交付。
+
+## 通用请求锁迁移（2026-10-21）
+
+请求锁执行已从 message::rpc::lock 提取为 execution::lock::{Config, Layer, Service, Error}。通用中间件显式接收取键与结果成功判断函数，输入、回应和业务错误保持泛型；不依赖 CallContext、生成协议、Tonic 或玩家。Config 只包含时间预算，以 Default 构造，不再携带 namespace。
+
+RPC 的 lock::Layer::new(backend, namespace, config) 只校验固定服务与 bid、判断 CallResponse 业务结果并映射 Status。公会组装及原 RPC 回归继续使用该薄适配；指南新增无网络的类型化请求锁示例。通知构造和玩家结果模型校正仍未完成，不计入本轮范围。
+
+本轮 Windows 验收：工作区 285 项测试通过、31 项外部专项按约定跳过，包含 17 项指南示例；迁移后 10 项 RPC 请求锁回归再次通过。新增 5 项纯类型化请求锁测试覆盖动态取键、上下文与业务错误保留、获取阶段原预算/取消、释放失败策略及非协作式释放迟到结果。全目标 Clippy、workspace rustdoc、rpc / client smoke、格式、215 个文本文件 UTF-8/LF、82 处相对文档路径及空白检查通过。正常依赖核对确认 tok-execution 未引入 Tonic、protobuf、玩家或事件；未运行真实 Redis/NATS、Linux 或 release 构建，随本次提交交付。

@@ -8,10 +8,11 @@ use std::{
 };
 use tok_core::BoxFuture;
 use tok_core::lock::{Backend as LockBackend, Key as LockKey, Lease as LockLease};
+use tok_execution::lock::Config;
 use tok_grpc::{Client, Listener};
 use tok_message::rpc::CallContext;
 use tok_message::rpc::{
-    lock::{Config, Layer},
+    lock::Layer,
     tower::{self, Layer as _, ServiceExt},
 };
 use tok_proto::internal::v1::{CallResponse, Payload};
@@ -70,7 +71,7 @@ fn request() -> tok_execution::Request<(CallContext, Payload)> {
 }
 
 fn layer(backend: Arc<dyn LockBackend>) -> Layer {
-    Layer::new(backend, Config::new("guild")).unwrap()
+    Layer::new(backend, "guild", Config::default()).unwrap()
 }
 struct Backend {
     acquire_delay: Duration,
@@ -173,10 +174,13 @@ async fn release_failure_or_timeout_keeps_business_error_and_fails_success() {
 async fn acquire_latency_is_subtracted_and_insufficient_budget_skips_handler() {
     let calls = Arc::new(AtomicUsize::new(0));
     let released = Arc::new(AtomicUsize::new(0));
-    let mut config = Config::new("guild");
-    config.acquire_timeout = Duration::from_secs(3);
+    let config = Config {
+        acquire_timeout: Duration::from_secs(3),
+        ..Default::default()
+    };
     let layer = Layer::new(
         backend(Duration::from_secs(2), Duration::ZERO, false, &released),
+        "guild",
         config,
     )
     .unwrap();
@@ -270,15 +274,17 @@ async fn outer_cancellation_leaves_lock_until_ttl_and_capacity_errors_are_distin
 #[test]
 fn invalid_budgets_are_rejected_before_backend_access() {
     let backend: Arc<dyn LockBackend> = Arc::new(tok_infra::locks::Memory::new(1).unwrap());
-    let mut config = Config::new("guild");
+    let mut config = Config::default();
     config.ttl = config.execution_timeout;
-    assert!(Layer::new(Arc::clone(&backend), config).is_err());
-    assert!(Layer::new(Arc::clone(&backend), Config::new(" ")).is_err());
-    let mut tiny = Config::new("guild");
-    tiny.ttl = Duration::from_micros(500);
-    tiny.execution_timeout = Duration::from_micros(100);
-    tiny.release_timeout = Duration::from_micros(100);
-    assert!(Layer::new(backend, tiny).is_err());
+    assert!(Layer::new(Arc::clone(&backend), "guild", config).is_err());
+    assert!(Layer::new(Arc::clone(&backend), " ", Config::default()).is_err());
+    let tiny = Config {
+        ttl: Duration::from_micros(500),
+        execution_timeout: Duration::from_micros(100),
+        release_timeout: Duration::from_micros(100),
+        ..Default::default()
+    };
+    assert!(Layer::new(backend, "guild", tiny).is_err());
 }
 
 #[tokio::test]
@@ -487,10 +493,17 @@ impl LockBackend for LateBackend {
 async fn late_ready_futures_cannot_bypass_acquire_or_execution_deadlines() {
     let released = Arc::new(AtomicUsize::new(0));
     let calls = Arc::new(AtomicUsize::new(0));
-    let mut config = Config::new("guild");
-    config.wait = Duration::ZERO;
-    config.acquire_timeout = Duration::from_millis(5);
-    let layer = Layer::new(Arc::new(LateBackend(Arc::clone(&released))), config).unwrap();
+    let config = Config {
+        wait: Duration::ZERO,
+        acquire_timeout: Duration::from_millis(5),
+        ..Default::default()
+    };
+    let layer = Layer::new(
+        Arc::new(LateBackend(Arc::clone(&released))),
+        "guild",
+        config,
+    )
+    .unwrap();
     let result = layer
         .layer(handler(Arc::clone(&calls), Duration::ZERO, false))
         .oneshot(request())
@@ -499,10 +512,13 @@ async fn late_ready_futures_cannot_bypass_acquire_or_execution_deadlines() {
     assert_eq!(calls.load(Ordering::SeqCst), 0);
     assert_eq!(released.load(Ordering::SeqCst), 1);
 
-    let mut config = Config::new("guild");
-    config.execution_timeout = Duration::from_millis(5);
+    let config = Config {
+        execution_timeout: Duration::from_millis(5),
+        ..Default::default()
+    };
     let layer = Layer::new(
         backend(Duration::ZERO, Duration::ZERO, false, &released),
+        "guild",
         config,
     )
     .unwrap();

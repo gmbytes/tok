@@ -190,7 +190,7 @@ tok-execution::registry::Registry<K, T, R, E> 根据泛型键选择并执行处�
 
 protobuf 正文编解码位于 tok-protobuf，基于同一个通用分发表实现。它的消息键仍是泛型；具体游戏线协议选择 u32 并在边界施加非零约束。普通业务 RPC 适配负责 CallContext 与业务状态转换、构造协议回应及错误到 Status 的映射，本地与 RPC 可共用同一业务注册器。
 
-玩家请求、timer 与服务器事件组合的后续校正仍单独推进。事件继续使用 tok-events，统一的是 Request / Tower 协议，不强行合并所有分发表；通用请求锁的取键泛化和通知归属迁移也尚未完成。不提供独立的 tok-dispatch crate 或门面别名。
+玩家请求、timer 与服务器事件组合的后续校正仍单独推进。事件继续使用 tok-events，统一的是 Request / Tower 协议，不强行合并所有分发表；通用请求锁的取键泛化已完成，通知归属迁移仍待推进。不提供独立的 tok-dispatch crate 或门面别名。
 
 ## 按功能域拆分基础错误（2026-10-21）
 
@@ -217,3 +217,9 @@ tok-message::rpc 承载 CallContext、玩家与普通业务客户端、Service�
 tok-player 的会话、逻辑消息和计时类型继续根导出；ownership 与 credentials 是独立功能命名空间，各自定义 Error / Result，不提供玩家根错误。所有权持有者复用 tok-core::Identity，Record 只组合会话身份和持有者，不重复定义部署服务身份。
 
 所有权错误区分比较冲突、容量不足、后端不可用、输入、配置与不支持的操作；凭证错误只描述签发参数、配置与本地组件故障，非法或过期凭证返回 None。诊断不能包含连接凭据、密钥或 token。网关将所有权容量不足映射为已有 CapacityExceeded 客户端错误码，不改变线协议编号。
+
+## 通用请求锁中间件（2026-10-21）
+
+tok-core::lock 定义后端与租约契约，tok-infra::locks 提供 Memory / Redis 实现，tok-execution::lock 提供与业务输入、回应和传输无关的 Tower Layer。取键函数接收 Request 的借用，返回完整 Key 或原始业务错误；结果判断函数说明 Ok 回应是否表示业务成功。业务结果与错误保持原类型，释放失败只覆盖业务成功。
+
+tok-message::rpc::lock 是薄协议适配，校验固定逻辑服务与 CallContext.bid，提供回应判定并将通用错误映射为 Status；不再实现获取、持锁、超时和释放循环。通用 Config 不含 RPC 命名空间，只提供时间预算。当前适配要求自有 Send + static 输入、回应和业务错误，不创建后台任务；现有借用执行能力不受影响。不新增 tok-middleware 或 tok-common。

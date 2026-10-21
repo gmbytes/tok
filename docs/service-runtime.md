@@ -339,10 +339,18 @@ tok-game-rpc 已调整为 tok-message，通用正文适配独立为 tok-protobuf
 
 tok-message 根 Registry 提供不依赖 Tonic 的非零编号注册、本地分发与原始业务错误；玩家身份、事件/timer RPC 组合、线协议结果与 Status 映射集中于 message::rpc。公会示例和本地/RPC 共用处理链采用根 Registry。通用 protobuf 表继续允许字符串及零键，RPC 不自动添加锁或重试，事件与 timer 仍只能由可信服务器触发。
 
-本轮只校正库与命名空间边界，不宣称通用请求锁泛化、玩家结果模型及通知构造后续批次已经完成。请求锁目前保留在 message::rpc::lock，仍按现有 TTL 和执行预算约束运行。
+本轮只校正库与命名空间边界，不宣称通用请求锁泛化、玩家结果模型及通知构造后续批次已经完成。请求锁执行已迁入 execution::lock，message::rpc::lock 只保留协议策略与映射，仍按有限 TTL 和执行预算约束运行。
 
 ## 玩家所有权与凭证契约校正（2026-10-21）
 
 所有权 Store 使用 core::Identity 表达持有网关，以 ownership::Error / Result 返回领域故障。普通 acquire 原子更新租约、epoch 和最新登录标记；acquire_for_relogin 还须在同一操作中比较凭证携带的原 session_id。transfer 保留逻辑会话及最新登录标记，renew / release 不清除标记；后端回收标记后只能拒绝相应快速重登并要求普通鉴权，不能将不存在视为通过。
 
 ResumeTokenCodec 使用 credentials::Error / Result，verify 的 None 表示非法或过期，Err 表示本地组件故障；校验仍完全本地，不访问所有权后端。所有权与凭证错误不互相包含。LogicalMessage 的错误码可来自框架或游戏，未发布下行也没有 server_seq；客户端不能直接声明 TimerSpec。
+
+## 请求锁处理链泛化（2026-10-21）
+
+execution::lock::Layer 显式注入 Backend、Config、取键函数和结果判断函数。K: Fn(&Request<T>) -> Result<Key, E>，P: Fn(&R) -> bool；响应 R 与业务错误 E 不依赖 RPC。配置失败使用 core::lock::Error，调用失败使用 execution::lock::Error<E>，取键、获取、执行、释放和原上下文停止分别表达。
+
+获取延迟从有限 TTL 保守扣除，内层就绪等待与执行共用持锁执行预算，接受获取、执行和释放结果前检查实际耗时，防止单次 poll 阻塞后的迟到成功绕过期限。原 Context 的取消、预算及追踪覆盖取键、获取、执行和释放；整体预算耗尽或外部丢弃 future 时不保证完成显式释放，有限 TTL 兜底。正常返回与内部执行超时后尝试有界条件释放，不续租、不重试、不回滚副作用。
+
+释放失败时，原始业务 Err 或 P 判为失败的 Ok 回应保留，成功回应转换为释放错误；RPC 适配以非零 RpcError 判断业务失败，并映射为既有 Status。不将玩家、协议认证或业务错误字段固定到通用层。

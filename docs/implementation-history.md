@@ -611,3 +611,11 @@ tok-game-rpc 调整为 tok-message，通用正文适配独立为 tok-protobuf，
 所有权配置失败统一使用 InvalidConfig，内存活动租约及登录标记容量不足使用 CapacityExceeded；网关登录映射为已有容量错误码。凭证本地失败保留安全的静态原因，非法或过期凭证仍为 None，不增加网络验签。补充普通登录、快速重登及交接的最新登录标记原子约束，修正错误码、未发布下行序号、消息正文及服务器计时需求注释，指南增加本地凭证与所有权示例。
 
 本轮 Windows 验收：工作区 279 项测试通过、31 项外部专项按约定跳过，包含 16 项指南示例；最终内存所有权定向回归通过。全目标 Clippy、workspace rustdoc、client / execution smoke、格式、213 个文本文件 UTF-8/LF、82 处相对文档路径及空白检查通过。新增回归覆盖构造配置分类、最新登录标记回收、凭证故障的安全诊断和所有权容量不足的 TCP 登录错误映射。未运行真实 Redis/NATS、Linux 或 release 构建；随本次提交交付。
+
+## 请求锁中间件泛化（2026-10-21）
+
+新增 tok-execution::lock::{Config, Layer, Service, Error}，通过显式 Request 取键函数与回应成功判断策略泛化请求锁。输入、回应和原始业务错误不依赖 CallContext、生成协议或 Tonic，时间配置不再包含命名空间；复用共同执行层覆盖原期限、取消与追踪。保留有限 TTL、获取延迟扣减、就绪等待计入执行、有界条件释放、释放失败保留业务失败及无自动重试约束，增加非协作式释放的迟到结果检查。
+
+message::rpc::lock 保留薄适配，负责固定逻辑服务与 bid 校验、CallResponse 成功判断及 Status 映射，获取/执行/释放逻辑不再重复实现。RPC 构造改为 Layer::new(backend, namespace, execution::lock::Config)，公会示例与指南同步；不提供旧 Config 路径或带命名空间构造别名，不新增 tok-middleware / tok-common。玩家结果模型及通知归属仍留待后续校正。
+
+本轮 Windows 验收：工作区 285 项测试通过、31 项外部专项按约定跳过，包含 17 项指南示例；迁移后 10 项 RPC 请求锁回归再次通过。新增 5 项纯类型化请求锁测试覆盖动态取键、上下文与业务错误保留、获取阶段原预算/取消、释放失败策略及非协作式释放迟到结果。全目标 Clippy、workspace rustdoc、rpc / client smoke、格式、215 个文本文件 UTF-8/LF、82 处相对文档路径及空白检查通过。正常依赖核对确认 tok-execution 未引入 Tonic、protobuf、玩家或事件；未运行真实 Redis/NATS、Linux 或 release 构建，随本次提交交付。
