@@ -407,3 +407,88 @@ fn rpc_factory_rejects_endpointless_service_without_retaining_registration() {
     )
     .unwrap();
 }
+
+#[tokio::test]
+async fn application_accepts_listener_layers_without_generic_registration() {
+    let reservation = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = reservation.local_addr().unwrap();
+    drop(reservation);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let observed = Arc::clone(&calls);
+    let layer = tower::util::MapRequestLayer::new(
+        move |request: tok::grpc::tonic::codegen::http::Request<tok::grpc::tonic::body::Body>| {
+            observed.fetch_add(1, Ordering::SeqCst);
+            request
+        },
+    );
+    let endpoint =
+        Listener::from_server(tok::grpc::tonic::transport::Server::builder().layer(layer))
+            .add_service(
+                "player",
+                RpcService::new("local", "player", Arc::new(HandlerRegistry::new()))
+                    .unwrap()
+                    .into_player(),
+            )
+            .unwrap()
+            .add_service(
+                "guild",
+                RpcService::new("local", "guild", Arc::new(HandlerRegistry::new()))
+                    .unwrap()
+                    .into_business(),
+            )
+            .unwrap();
+    let mut app = Application::new(config(address)).unwrap();
+    let starts = Arc::new(AtomicUsize::new(0));
+    for name in ["player", "guild"] {
+        app.register_factory(
+            name,
+            Factory {
+                fail: false,
+                starts: Arc::clone(&starts),
+            },
+        )
+        .unwrap();
+    }
+    app.register_rpc_endpoint("internal", endpoint).unwrap();
+    let directory = app.directory();
+    app.run_until(async {
+        let target = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let Some(target) = directory.snapshot("guild").unwrap().into_iter().next() {
+                    break target;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let client = tok::message::rpc::business::Client::new(Arc::new(
+            tok::grpc::Client::new(Duration::from_secs(1), 1).unwrap(),
+        ));
+        let error = client
+            .call(
+                &target,
+                tok::message::rpc::CallContext {
+                    node_id: "local".into(),
+                    service_name: "guild".into(),
+                    bid: Some("7".into()),
+                    request_id: 1,
+                    session: None,
+                    timer: None,
+                },
+                tok::message::rpc::protocol::internal::v1::Payload {
+                    message_id: 1,
+                    body: vec![],
+                },
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), tok::grpc::tonic::Code::Unimplemented);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        Ok(())
+    })
+    .await
+    .unwrap();
+    assert_eq!(starts.load(Ordering::SeqCst), 2);
+    assert!(directory.snapshot("guild").unwrap().is_empty());
+}

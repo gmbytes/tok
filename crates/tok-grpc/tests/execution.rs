@@ -234,3 +234,203 @@ async fn custom_endpoint_factory_uses_cache_and_can_be_replaced() {
     assert_eq!(error.code(), Code::FailedPrecondition);
     assert!(error.message().contains("测试拒绝连接配置"));
 }
+
+async fn borrowed_sender(
+    call: tok_grpc::Outgoing<&mut String>,
+) -> Result<tonic::Response<usize>, tonic::Status> {
+    let (_, request) = call.into_parts()?;
+    assert_eq!(request.metadata().get("x-policy").unwrap(), "checked");
+    let value = request.into_inner();
+    tokio::task::yield_now().await;
+    value.push_str(" sender");
+    Ok(tonic::Response::new(value.len()))
+}
+
+#[tokio::test]
+async fn outgoing_tower_chain_receives_target_and_can_mutate_borrowed_input() {
+    use tok_grpc::Outgoing;
+    let client = Client::new(Duration::from_secs(1), 1).unwrap();
+    let mut value = String::from("source");
+    let service = tower::ServiceBuilder::new()
+        .map_request(|mut call: Outgoing<&mut String>| {
+            assert_eq!(call.target().service_name, "custom");
+            assert_eq!(call.request_id(), 17);
+            assert!(call.request.metadata().contains_key("grpc-timeout"));
+            call.request
+                .metadata_mut()
+                .insert("x-policy", "checked".parse().unwrap());
+            call.request.get_mut().push_str(" middleware");
+            call
+        })
+        .service(tower::service_fn(borrowed_sender));
+    let result = client
+        .execute_service(
+            &target(),
+            17,
+            tonic::Request::new(&mut value),
+            tracing::Span::none(),
+            service,
+        )
+        .await
+        .unwrap();
+    assert_eq!(value, "source middleware sender");
+    assert_eq!(result, value.len());
+}
+
+struct ReadinessProbe {
+    mode: u8,
+    calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+impl tower::Service<tok_grpc::Outgoing<()>> for ReadinessProbe {
+    type Response = tonic::Response<()>;
+    type Error = tonic::Status;
+    type Future = std::future::Ready<Result<Self::Response, Self::Error>>;
+    fn poll_ready(
+        &mut self,
+        _: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), Self::Error>> {
+        match self.mode {
+            0 => std::task::Poll::Pending,
+            1 => std::task::Poll::Ready(Err(tonic::Status::permission_denied("策略拒绝"))),
+            _ => {
+                std::thread::sleep(Duration::from_millis(60));
+                std::task::Poll::Ready(Ok(()))
+            }
+        }
+    }
+    fn call(&mut self, _: tok_grpc::Outgoing<()>) -> Self::Future {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        std::future::ready(Ok(tonic::Response::new(())))
+    }
+}
+
+#[tokio::test]
+async fn outgoing_readiness_is_bounded_and_late_ready_or_rejection_never_dispatches() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    let client = Client::new(Duration::from_secs(1), 1).unwrap();
+    for mode in 0..3 {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut request = tonic::Request::new(());
+        request.set_timeout(Duration::from_millis(20));
+        let error = client
+            .execute_service(
+                &target(),
+                1,
+                request,
+                tracing::Span::none(),
+                ReadinessProbe {
+                    mode,
+                    calls: Arc::clone(&calls),
+                },
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.code(),
+            if mode == 1 {
+                Code::PermissionDenied
+            } else {
+                Code::DeadlineExceeded
+            }
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+}
+
+#[tokio::test]
+async fn outgoing_sender_shortens_remote_budget_after_middleware_wait_and_keeps_shorter_metadata() {
+    let client = Client::new(Duration::from_secs(1), 1).unwrap();
+    let service = tower::service_fn(|call: tok_grpc::Outgoing<()>| async move {
+        let before = server(CancellationToken::new())
+            .context(call.request.metadata(), "before")
+            .unwrap()
+            .remaining();
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        let (_, request) = call.into_parts()?;
+        let after = server(CancellationToken::new())
+            .context(request.metadata(), "after")
+            .unwrap()
+            .remaining();
+        assert!(after + Duration::from_millis(20) < before);
+        Ok::<_, tonic::Status>(tonic::Response::new(after))
+    });
+    let mut request = tonic::Request::new(());
+    request.set_timeout(Duration::from_millis(200));
+    assert!(
+        client
+            .execute_service(&target(), 1, request, tracing::Span::none(), service)
+            .await
+            .unwrap()
+            < Duration::from_millis(180)
+    );
+    // 中间件主动缩短的远端期限不被发送器放大。
+    let service = tower::service_fn(|mut call: tok_grpc::Outgoing<()>| async move {
+        call.request.set_timeout(Duration::from_millis(5));
+        let (_, request) = call.into_parts()?;
+        let remaining = server(CancellationToken::new())
+            .context(request.metadata(), "shorter")
+            .unwrap()
+            .remaining();
+        assert!(remaining <= Duration::from_millis(5));
+        Ok::<_, tonic::Status>(tonic::Response::new(()))
+    });
+    client
+        .execute_service(
+            &target(),
+            2,
+            tonic::Request::new(()),
+            tracing::Span::none(),
+            service,
+        )
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn outgoing_work_timeout_is_not_retried_and_invalid_budget_skips_readiness() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    let client = Client::new(Duration::from_millis(20), 1).unwrap();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let observed = Arc::clone(&calls);
+    let service = tower::service_fn(move |_: tok_grpc::Outgoing<()>| {
+        observed.fetch_add(1, Ordering::SeqCst);
+        std::future::pending::<Result<tonic::Response<()>, tonic::Status>>()
+    });
+    let error = client
+        .execute_service(
+            &target(),
+            1,
+            tonic::Request::new(()),
+            tracing::Span::none(),
+            service,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), Code::DeadlineExceeded);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    let mut request = tonic::Request::new(());
+    request
+        .metadata_mut()
+        .insert("grpc-timeout", "invalid".parse().unwrap());
+    let error = client
+        .execute_service(
+            &target(),
+            2,
+            request,
+            tracing::Span::none(),
+            ReadinessProbe {
+                mode: 2,
+                calls: Arc::clone(&calls),
+            },
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), Code::InvalidArgument);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+}

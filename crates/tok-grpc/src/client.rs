@@ -1,3 +1,4 @@
+use crate::Outgoing;
 use std::future::Future;
 use std::{collections::BTreeMap, sync::Mutex, time::Duration};
 use tok_core::ServiceDescriptor;
@@ -5,6 +6,7 @@ use tonic::{
     Request, Response, Status,
     transport::{Channel, Endpoint},
 };
+use tower::{Service, ServiceExt};
 use tracing::Instrument;
 
 type EndpointFactory = dyn Fn(&ServiceDescriptor) -> Result<Endpoint, crate::Error> + Send + Sync;
@@ -107,10 +109,66 @@ impl Client {
         self.timeout
     }
 
+    /// 执行已组装 Tower 中间件的出站调用；就绪等待和调用共用原有限期限。
+    ///
+    /// 目标已解析，Channel 复用、追踪注入及整体期限由本客户端负责；中间件接收
+    /// Outgoing，可读取目标身份、关联序号并修改请求。路由选点应在进入本方法前完成。
+    /// 不要求输入或 Service 为 static，可使用借用；中间件自行决定是否引入队列或重试。
+    /// 返回类型化回应正文，与 execute 一致，不主动添加重试。
+    pub async fn execute_service<Req, Res, S>(
+        &self,
+        target: &ServiceDescriptor,
+        request_id: u64,
+        request: Request<Req>,
+        span: tracing::Span,
+        service: S,
+    ) -> Result<Res, Status>
+    where
+        S: Service<Outgoing<Req>, Response = Response<Res>, Error = Status>,
+    {
+        let mut service = service;
+        self.execute_with(
+            target,
+            request_id,
+            request,
+            span,
+            move |channel, request, deadline| async move {
+                let service = service.ready().await?;
+                let call = Outgoing::new(target.clone(), request_id, channel, request, deadline);
+                // 非协作式 poll_ready 可能迟到，不能在已过期后继续发送。
+                call.check()?;
+                service.call(call).await
+            },
+        )
+        .await
+    }
+
     /// 执行任意生成协议的单次调用，传播追踪、设置有限期限并记录指标；不自动重试。
     ///
     /// 请求中的 grpc-timeout 只能缩短默认期限；准备与发送均计入预算，超期结果不会作为成功返回。
     pub async fn execute<Req, Res, F, Fut>(
+        &self,
+        target: &ServiceDescriptor,
+        request_id: u64,
+        request: Request<Req>,
+        span: tracing::Span,
+        send: F,
+    ) -> Result<Res, Status>
+    where
+        F: FnOnce(Channel, Request<Req>) -> Fut,
+        Fut: Future<Output = Result<Response<Res>, Status>>,
+    {
+        self.execute_with(
+            target,
+            request_id,
+            request,
+            span,
+            move |channel, request, _| send(channel, request),
+        )
+        .await
+    }
+
+    async fn execute_with<Req, Res, F, Fut>(
         &self,
         target: &ServiceDescriptor,
         request_id: u64,
@@ -119,7 +177,7 @@ impl Client {
         send: F,
     ) -> Result<Res, Status>
     where
-        F: FnOnce(Channel, Request<Req>) -> Fut,
+        F: FnOnce(Channel, Request<Req>, tokio::time::Instant) -> Fut,
         Fut: Future<Output = Result<Response<Res>, Status>>,
     {
         let started = std::time::Instant::now();
@@ -133,7 +191,7 @@ impl Client {
                 return Err(Status::deadline_exceeded("内部 RPC 超时，未自动重试"));
             }
             request.set_timeout(remaining);
-            let call = send(channel, request).instrument(span);
+            let call = send(channel, request, deadline).instrument(span);
             if tokio::time::Instant::now() >= deadline {
                 return Err(Status::deadline_exceeded("内部 RPC 超时，未自动重试"));
             }

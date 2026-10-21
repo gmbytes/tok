@@ -408,3 +408,113 @@ async fn custom_client_uri_and_server_transport_timeout_are_applied() {
         .unwrap()
         .unwrap();
 }
+
+#[tokio::test]
+async fn listener_tower_layers_cover_shared_routes_and_preserve_readiness() {
+    use tonic::codegen::http;
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let seen = Arc::clone(&calls);
+    let layers = tower::ServiceBuilder::new()
+        .map_request(move |request: http::Request<tonic::body::Body>| {
+            seen.fetch_add(1, Ordering::SeqCst);
+            request
+        })
+        .map_response(|mut response: http::Response<tonic::body::Body>| {
+            response
+                .headers_mut()
+                .insert("x-listener-layer", "applied".parse().unwrap());
+            response
+        });
+    let endpoint = Listener::from_server(tonic::transport::Server::builder().layer(layers))
+        .add_service(
+            "guild",
+            RpcService::new("local", "guild", Arc::new(handler()))
+                .unwrap()
+                .into_business(),
+        )
+        .unwrap()
+        .add_service(
+            "player",
+            RpcService::new("local", "player", Arc::new(handler()))
+                .unwrap()
+                .into_player(),
+        )
+        .unwrap();
+    let ready = endpoint.readiness();
+    let shutdown = CancellationToken::new();
+    let task = tokio::spawn(endpoint.serve(listener, shutdown.clone()).unwrap());
+    let client = Client::new(Duration::from_secs(2), 1).unwrap();
+    let guild = target(address, "guild");
+    let request = || {
+        tonic::Request::new(CallRequest {
+            context: Some(tok_proto::internal::v1::CallContext {
+                node_id: "local".into(),
+                service_name: "guild".into(),
+                bid: Some("7".into()),
+                request_id: 99,
+                session: None,
+            }),
+            timer: None,
+            payload: Some(payload(41)),
+        })
+    };
+    let sender = || {
+        tower::service_fn(|call: tok_grpc::Outgoing<CallRequest>| async move {
+            let (channel, request) = call.into_parts()?;
+            let response =
+                tok_proto::internal::v1::business_rpc_client::BusinessRpcClient::new(channel)
+                    .call(request)
+                    .await?;
+            assert_eq!(
+                response.metadata().get("x-listener-layer").unwrap(),
+                "applied"
+            );
+            Ok(response)
+        })
+    };
+    assert_eq!(
+        client
+            .execute_service(&guild, 99, request(), tracing::Span::none(), sender())
+            .await
+            .unwrap_err()
+            .code(),
+        Code::Unavailable
+    );
+    assert!(ready.set("guild", true));
+    assert!(ready.set("player", true));
+    let response = client
+        .execute_service(&guild, 99, request(), tracing::Span::none(), sender())
+        .await
+        .unwrap();
+    assert_eq!(
+        Data::decode(response.payload.unwrap().body.as_slice())
+            .unwrap()
+            .value,
+        42
+    );
+    let player = target(address, "player");
+    let player_client = tok_message::rpc::player::Client::new(Arc::new(client));
+    assert_eq!(
+        player_client
+            .call(&player, context(&player), payload(41))
+            .await
+            .unwrap()
+            .request_id,
+        99
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 3);
+    ready.clear();
+    assert_eq!(
+        player_client
+            .call(&player, context(&player), payload(41))
+            .await
+            .unwrap_err()
+            .code(),
+        Code::Unavailable
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 4);
+    shutdown.cancel();
+    task.await.unwrap().unwrap();
+}

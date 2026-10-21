@@ -619,3 +619,11 @@ tok-game-rpc 调整为 tok-message，通用正文适配独立为 tok-protobuf，
 message::rpc::lock 保留薄适配，负责固定逻辑服务与 bid 校验、CallResponse 成功判断及 Status 映射，获取/执行/释放逻辑不再重复实现。RPC 构造改为 Layer::new(backend, namespace, execution::lock::Config)，公会示例与指南同步；不提供旧 Config 路径或带命名空间构造别名，不新增 tok-middleware / tok-common。玩家结果模型及通知归属仍留待后续校正。
 
 本轮 Windows 验收：工作区 285 项测试通过、31 项外部专项按约定跳过，包含 17 项指南示例；迁移后 10 项 RPC 请求锁回归再次通过。新增 5 项纯类型化请求锁测试覆盖动态取键、上下文与业务错误保留、获取阶段原预算/取消、释放失败策略及非协作式释放迟到结果。全目标 Clippy、workspace rustdoc、rpc / client smoke、格式、215 个文本文件 UTF-8/LF、82 处相对文档路径及空白检查通过。正常依赖核对确认 tok-execution 未引入 Tonic、protobuf、玩家或事件；未运行真实 Redis/NATS、Linux 或 release 构建，随本次提交交付。
+
+## gRPC 出站链与监听级 Tower 扩展（2026-10-21）
+
+新增 Client::execute_service 与 Outgoing，用户为自定义协议显式组装标准 Tower Service。Outgoing 提供目标、关联序号、原绝对截止点和可修改请求，发送器通过 into_parts 检查并扣减剩余远端期限；保留更短 metadata 预算。就绪等待与中间件执行受原本地期限约束，非协作式就绪迟到后不再分发。原 execute 保留 FnOnce 回调，两种入口共用连接、追踪、指标与预算实现；不主动重试，不将路由或策略默认安装到内置协议客户端。
+
+Listener::from_server 支持 Tonic Server<L>，内部保存 Routes 和类型擦除的监听工厂；监听级 Layer 包住完整路由，对外 Listener 与 Application 注册保持非泛型。共享服务绑定、readiness、传输配置和生命周期监督保持原约束，用户仍可为单服务单独安装业务 Layer。指南补充出站链发送器和监听级并发限制示例。
+
+本轮 Windows 验收：工作区 292 项测试通过、31 项外部专项按约定跳过，包含 18 项指南示例。新增回归覆盖出站 metadata/借用输入、就绪等待和迟到就绪、发送前预算扣减、原错误与无主动重试、共享路由监听 Layer、就绪切换及 Application 非泛型注册；追踪回归同时覆盖便捷回调和 Tower 网络路径。全目标编译与 Clippy、workspace rustdoc、rpc / client / application smoke、格式、216 个文本文件 UTF-8/LF、82 处相对文档路径及空白检查通过。未运行真实 Redis/NATS、Linux 或 release 构建；随本次提交交付。

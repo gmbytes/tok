@@ -124,7 +124,35 @@ async fn trace_context_is_propagated_across_the_network_call() {
                     body: vec![],
                 },
             )
-            .instrument(root)
+            .instrument(root.clone())
+            .await
+            .unwrap();
+        *observed.lock().unwrap() = None;
+        let request = tonic::Request::new(tok_proto::internal::v1::CallRequest {
+            context: Some(tok_proto::internal::v1::CallContext {
+                node_id: "local".into(),
+                service_name: "guild".into(),
+                bid: Some("7".into()),
+                request_id: 2,
+                session: None,
+            }),
+            timer: None,
+            payload: Some(Payload {
+                message_id: 1,
+                body: vec![],
+            }),
+        });
+        let sender = tower::service_fn(
+            |call: tok_grpc::Outgoing<tok_proto::internal::v1::CallRequest>| async move {
+                assert!(call.request.metadata().contains_key("traceparent"));
+                let (channel, request) = call.into_parts()?;
+                tok_proto::internal::v1::business_rpc_client::BusinessRpcClient::new(channel)
+                    .call(request)
+                    .await
+            },
+        );
+        clients
+            .execute_service(&target, 2, request, root, sender)
             .await
             .unwrap();
     }

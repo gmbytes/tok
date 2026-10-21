@@ -15,12 +15,17 @@ use tonic::{
     body::Body,
     codegen::http::{Request, Response},
     server::NamedService,
-    service::interceptor::InterceptedService,
-    transport::{Server, server::Router},
+    service::{Routes, interceptor::InterceptedService},
+    transport::Server,
 };
-use tower::Service;
+use tower::{Layer, Service};
 
 use crate::Error;
+
+type Serve = Box<
+    dyn FnOnce(Routes, TcpListener, CancellationToken) -> BoxFuture<'static, Result<(), Error>>
+        + Send,
+>;
 
 /// 各业务服务的就绪开关。未就绪的调用返回 Unavailable。
 #[derive(Clone, Default)]
@@ -50,8 +55,8 @@ impl Readiness {
 /// 同一 protobuf 服务只能绑定一次，避免 tonic 路由相互覆盖。
 /// 不同 protobuf 服务可以共享一个端点，支持用户自己生成的服务与 Tower 包装。
 pub struct Listener {
-    server: Server,
-    router: Option<Router>,
+    routes: Routes,
+    serve: Serve,
     bindings: BTreeMap<String, &'static str>,
     readiness: Readiness,
 }
@@ -71,12 +76,32 @@ impl Listener {
     /// 使用已配置的 Tonic Server 创建尚未绑定业务的端点，保留 TLS 与 HTTP/2 等传输参数。
     ///
     /// TLS 需在应用依赖中启用 Tonic 对应的 TLS feature。
-    /// 本入口接受未添加 Tower Layer 的 Server；业务中间件可在 add_service 时包装具体服务。
+    /// 接受含 Tower Layer 的 Server；监听级中间件包住整个路由，业务中间件也可单独包装服务。
+    /// 内部擦除监听工厂类型，Listener 与 Application 的注册接口不因 Layer 类型改变。
     /// 服务绑定、就绪控制和监听 Future 的监督约定与 new 相同。
-    pub fn from_server(server: Server) -> Self {
+    pub fn from_server<L, B>(mut server: Server<L>) -> Self
+    where
+        L: Layer<Routes> + Clone + Send + 'static,
+        L::Service: Service<Request<Body>, Response = Response<B>> + Clone + Send + 'static,
+        <L::Service as Service<Request<Body>>>::Future: Send,
+        <L::Service as Service<Request<Body>>>::Error: Into<tonic::codegen::StdError> + Send,
+        B: tonic::codegen::Body<Data = tonic::codegen::Bytes> + Send + 'static,
+        B::Error: Into<tonic::codegen::StdError>,
+    {
         Self {
-            server,
-            router: None,
+            routes: Routes::default(),
+            serve: Box::new(move |routes, listener, shutdown| {
+                let router = server.add_routes(routes);
+                Box::pin(async move {
+                    router
+                        .serve_with_incoming_shutdown(
+                            TcpListenerStream::new(listener),
+                            shutdown.cancelled_owned(),
+                        )
+                        .await?;
+                    Ok(())
+                })
+            }),
             bindings: BTreeMap::new(),
             readiness: Readiness::default(),
         }
@@ -125,10 +150,7 @@ impl Listener {
             }
             Ok(request)
         });
-        self.router = Some(match self.router {
-            Some(router) => router.add_service(service),
-            None => self.server.add_service(service),
-        });
+        self.routes = self.routes.add_service(service);
         Ok(self)
     }
 
@@ -159,17 +181,9 @@ impl Listener {
         listener: TcpListener,
         shutdown: CancellationToken,
     ) -> Result<BoxFuture<'static, Result<(), Error>>, Error> {
-        let router = self
-            .router
-            .ok_or_else(|| Error::Configuration("RPC 端点至少需要绑定一个服务".into()))?;
-        Ok(Box::pin(async move {
-            router
-                .serve_with_incoming_shutdown(
-                    TcpListenerStream::new(listener),
-                    shutdown.cancelled_owned(),
-                )
-                .await?;
-            Ok(())
-        }))
+        if self.bindings.is_empty() {
+            return Err(Error::Configuration("RPC 端点至少需要绑定一个服务".into()));
+        }
+        Ok((self.serve)(self.routes, listener, shutdown))
     }
 }

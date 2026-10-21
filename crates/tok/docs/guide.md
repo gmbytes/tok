@@ -517,6 +517,42 @@ Application::register_rpc_factory 按配置的 factory（默认服务名）建�
 Client 的默认期限须大于零且不超过一天。execute 保留更短的请求 grpc-timeout，准备与发送共用本地截止点，超期结果不会成功返回；这不会中断阻塞代码或回滚远端副作用。
 Channel 为延迟连接，实际发送时才建立网络连接。
 
+### 客户端出站处理链
+
+[`grpc::Client::execute_service`] 接收 `Service<Outgoing<Req>, Response = tonic::Response<Res>, Error = Status>`，允许每个协议显式组装出站 Tower 链。目标在调用前选定，连接复用由 Client 管理；[`grpc::Outgoing`] 提供只读目标、关联序号、绝对截止点和可修改的类型化请求。不要求输入、Service 或其 Future 为 static，可以处理借用；实际 Buffer 等中间件可以有自己的附加限制。
+
+以下示例展示内部业务协议发送器的组装，调用时需要目标服务运行；函数体由 rustdoc 编译检查。
+
+```rust
+use std::{sync::Arc, time::Duration};
+use tok::{core::ServiceDescriptor, grpc::{self, tonic}, message::rpc::protocol::internal::v1 as proto};
+use grpc::tower::{self, ServiceBuilder};
+
+# async fn example(target: &ServiceDescriptor, request: proto::CallRequest) -> Result<(), Box<dyn std::error::Error>> {
+let client = Arc::new(grpc::Client::new(Duration::from_secs(2), 128)?);
+let sender = tower::service_fn(|call: grpc::Outgoing<proto::CallRequest>| async move {
+    // 在真实发送前重新扣减中间件等待消耗的预算，过期时不会发出调用。
+    let (channel, request) = call.into_parts()?;
+    proto::business_rpc_client::BusinessRpcClient::new(channel).call(request).await
+});
+let chain = ServiceBuilder::new()
+    .map_request(|mut call: grpc::Outgoing<proto::CallRequest>| {
+        call.request.metadata_mut().insert("x-example-policy", tonic::metadata::MetadataValue::from_static("checked"));
+        call
+    })
+    .service(sender);
+let response = client.execute_service(
+    target, 1, tonic::Request::new(request), tracing::Span::current(), chain,
+).await?;
+# drop(response);
+# Ok(())
+# }
+```
+
+Service 就绪等待与整个中间件调用共用本地绝对期限；更短的传入 grpc-timeout 保留。发送器使用 Outgoing::into_parts 缩短远端期限，避免发送等待前的旧预算；本地超期结果仍被拒绝。execute 保留原 FnOnce 发送回调，已有协议客户端不自动安装用户出站链；用户为自己的协议通过 execute_service 显式组装。框架不主动添加重试，也不自动决定熔断或限流策略；中间件自行重试时须承担幂等与剩余预算约束。
+
+### 传输与监听级中间件
+
 客户端通过 [`grpc::Client::with_endpoint_factory`] 定制 Tonic Endpoint，服务端通过 [`grpc::Listener::from_server`] 接收配置好的 Tonic Server：
 
 ```rust
@@ -531,7 +567,8 @@ let client = grpc::Client::new(Duration::from_secs(3), 128)?
             .http2_adaptive_window(true))
     });
 let server = transport::Server::builder()
-    .http2_adaptive_window(Some(true));
+    .http2_adaptive_window(Some(true))
+    .layer(grpc::tower::limit::ConcurrencyLimitLayer::new(128));
 let endpoint = grpc::Listener::from_server(server);
 // 接着使用 endpoint.add_service(...) 绑定服务，并驱动监听 Future。
 # drop((client, endpoint));
@@ -541,7 +578,7 @@ let endpoint = grpc::Listener::from_server(server);
 
 默认构造仍采用明文连接；启用 TLS 时，应用依赖可为 `tonic` 开启 `tls-ring` 或 `tls-aws-lc` feature，客户端工厂构造 HTTPS URI 并配置 ClientTlsConfig，服务端配置 ServerTlsConfig 后传给 from_server。框架不复制 Tonic 的证书或 HTTP/2 配置，也不将密钥放进服务发现。
 工厂在缓存锁外按需执行，并发缓存未命中时可能多次调用，应当快速返回且无副作用。同一节点和地址共享 Channel，必须具有一致的 URI/TLS 等连接策略，不能随业务服务名变化；替换工厂会清空本实例缓存，在途克隆继续使用原连接。自定义连接参数由工厂负责，execute 的整体预算始终生效。
-from_server 接受未添加 Tower Layer 的 Tonic Server，业务中间件仍可在 add_service 时包装各个服务；就绪控制和业务绑定校验继续由 grpc::Listener 管理。
+from_server 接受包含 Tower Layer 的 Tonic Server，监听级 Layer 包住完整路由；业务中间件仍可在 add_service 时包装各个服务。Listener 维持非泛型，可直接交给 Application::register_rpc_endpoint；就绪控制和业务绑定校验继续由 grpc::Listener 管理。
 
 [`grpc::Server`] 是逻辑服务的调用执行入口；[`grpc::Listener`] 负责网络监听和 protobuf 服务绑定。
 [`grpc::Readiness::set`] 返回是否命中已绑定的服务名，直接指定服务时应检查结果；Application 遍历多个端点时允许未命中。

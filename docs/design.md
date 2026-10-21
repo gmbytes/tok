@@ -223,3 +223,9 @@ tok-player 的会话、逻辑消息和计时类型继续根导出；ownership �
 tok-core::lock 定义后端与租约契约，tok-infra::locks 提供 Memory / Redis 实现，tok-execution::lock 提供与业务输入、回应和传输无关的 Tower Layer。取键函数接收 Request 的借用，返回完整 Key 或原始业务错误；结果判断函数说明 Ok 回应是否表示业务成功。业务结果与错误保持原类型，释放失败只覆盖业务成功。
 
 tok-message::rpc::lock 是薄协议适配，校验固定逻辑服务与 CallContext.bid，提供回应判定并将通用错误映射为 Status；不再实现获取、持锁、超时和释放循环。通用 Config 不含 RPC 命名空间，只提供时间预算。当前适配要求自有 Send + static 输入、回应和业务错误，不创建后台任务；现有借用执行能力不受影响。不新增 tok-middleware 或 tok-common。
+
+## gRPC 处理链扩展（2026-10-21）
+
+gRPC 的连接缓存、监听、metadata 转换保留为边界组件，不强制全部变成 Layer。服务端 Server::execute 接收类型化 Tower Service 并复用共同执行层；客户端 Client::execute_service 接收 Service<Outgoing<Req>>，协议发送器和用户 Layer 显式组合。已有 execute 的 FnOnce 回调继续提供便捷调用，内置协议适配器不会自动获得用户出站策略。
+
+Outgoing 提供调用前选定的目标、关联序号、原截止点及类型化 tonic::Request，不承担业务路由。发送器通过 into_parts 在等待后缩短远端期限；客户端管理共享 Channel、追踪注入、整体期限与指标，包含 Service 就绪等待，不主动重试。Listener::from_server 接收带 Layer 的 Tonic Server，内部保存 Routes 与类型擦除的监听工厂；Listener 和 Application 注册保持非泛型，服务绑定和就绪规则不变。

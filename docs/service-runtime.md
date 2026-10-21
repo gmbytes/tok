@@ -305,7 +305,7 @@ Readiness::set 返回是否匹配已绑定服务，允许 Application 向多个�
 
 Client::with_endpoint_factory 接收从 ServiceDescriptor 创建 Tonic Endpoint 的同步工厂；默认保持明文 URI 和默认连接期限。自定义工厂可设置 HTTPS/TLS、连接期限和 HTTP/2 参数，execute 的整体预算仍生效。工厂在缓存锁外执行，并发未命中允许重复构造；重新获取锁后优先复用已发布 Channel。节点和地址是连接共享边界，同一边界必须使用一致的 URI 和传输策略；替换工厂清空本实例缓存，不影响已有克隆。
 
-服务端 Listener::from_server 接收配置好的 Tonic Server，首次路由绑定保留其 TLS/HTTP2 等参数；new/default 仍使用默认 Server。接口接受未添加 Tower Layer 的 Server，业务中间件可包装具体服务。服务绑定、就绪开关、监听 Future 与 Application::register_rpc_endpoint 的监督流程不变。TLS 由应用启用 Tonic 的 TLS feature 并提供证书，不新增框架证书模型、服务发现密钥或配置文件开关。
+服务端 Listener::from_server 接收配置好的 Tonic Server，首次路由绑定保留其 TLS/HTTP2 等参数；new/default 仍使用默认 Server。接口接受包含 Tower Layer 的 Server，监听级中间件覆盖完整路由，业务中间件也可包装具体服务。服务绑定、就绪开关、监听 Future 与 Application::register_rpc_endpoint 的监督流程不变。TLS 由应用启用 Tonic 的 TLS feature 并提供证书，不新增框架证书模型、服务发现密钥或配置文件开关。
 
 本轮 Windows 验收：RPC 两库与门面共 78 项测试通过（含 13 项指南示例）；全目标编译与 Clippy、workspace rustdoc、rpc-smoke / client-smoke、格式、202 个文本文件 UTF-8/LF 和空白检查通过。回归覆盖自定义 URI 实际使用、传入 Server 超时生效、缓存复用/撤销、替换工厂清理及工厂错误反馈。未做真实 TLS 握手、外部 Redis/NATS、Linux 或 release 验证；随本次提交交付。
 
@@ -354,3 +354,11 @@ execution::lock::Layer 显式注入 Backend、Config、取键函数和结果判�
 获取延迟从有限 TTL 保守扣除，内层就绪等待与执行共用持锁执行预算，接受获取、执行和释放结果前检查实际耗时，防止单次 poll 阻塞后的迟到成功绕过期限。原 Context 的取消、预算及追踪覆盖取键、获取、执行和释放；整体预算耗尽或外部丢弃 future 时不保证完成显式释放，有限 TTL 兜底。正常返回与内部执行超时后尝试有界条件释放，不续租、不重试、不回滚副作用。
 
 释放失败时，原始业务 Err 或 P 判为失败的 Ok 回应保留，成功回应转换为释放错误；RPC 适配以非零 RpcError 判断业务失败，并映射为既有 Status。不将玩家、协议认证或业务错误字段固定到通用层。
+
+## gRPC 客户端与监听处理链（2026-10-21）
+
+Client::execute_service 对每次出站调用注入已选定的目标、关联序号和连接，通过标准 Tower Service 组合协议发送器。请求和结果类型泛型，不依赖玩家或固定生成协议，支持借用且不要求 Service 克隆；连接仍按节点和地址共享。原 execute 与新入口复用一套预算、追踪和指标实现，不主动重试。
+
+准备连接、Service 就绪等待和中间件执行计入原绝对期限；非协作式 poll_ready 迟到后不继续调用发送器。Outgoing::into_parts 在实际发送前检查截止点并按剩余时间缩短 grpc-timeout，中间件指定的更短期限也保留；延迟或排队策略不能通过重新构造预算延长本地调用，超时不回滚副作用。
+
+Listener::from_server 接收 Tonic Server<L>，监听级 Layer 覆盖共享端点的整个 Routes；单服务仍可独立安装 Tower 链。内部仅擦除监听工厂，保留 Tonic 的类型边界，支持不同 HTTP 回应 Body；对外 Listener 和 Application::register_rpc_endpoint 继续为非泛型接口。就绪控制、重复绑定校验及退出监督保持原语义，HTTP 级策略与解码后的业务 Layer 分别组合。
