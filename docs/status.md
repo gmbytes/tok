@@ -155,7 +155,7 @@ Client::with_endpoint_factory 接收从 ServiceDescriptor 创建 Tonic Endpoint 
 
 core 根 Error / Result 已移除，参数、配置及可选能力校验由实际所属组件表达。所有权故障归 player::ownership::Error::Unavailable；Redis 发现与锁校验使用各自领域错误，整体应用配置映射为 config::Error::Invalid。最终归属与验收见下文。
 
-registry 注册错误定名为 Error<K>，运行失败定名为 DispatchError<K, E>；后者覆盖未知键、执行停止与业务处理错误，避免 HandleError 误指只有处理者内部失败。protobuf 适配与示例同步新路径，不保留 RegistrationError 旧类型。
+registry 注册错误定名为 Error<K>，运行失败定名为 DispatchError<K, E>；后者覆盖未知键与业务处理错误，执行停止统一由 execution::Error::Stopped 表达，避免 HandleError 误指只有处理者内部失败。protobuf 适配与示例同步新路径，不保留 RegistrationError 旧类型。
 
 本轮 Windows 验收：工作区 272 项测试通过，31 项外部专项按约定跳过；全目标编译与 Clippy、workspace rustdoc、dispatch / rpc / client / application smoke、格式、207 个文本文件 UTF-8/LF 和 82 处相对文档路径检查通过。回归覆盖发现错误跨路由传播并保留 source、默认订阅错误的领域归属，以及现有锁状态映射和应用退出清理。未运行真实 Redis/NATS、Linux 或 release 构建；随本次提交交付。
 
@@ -266,3 +266,27 @@ execution / protobuf / message 注册器、事件处理、RPC 协议适配与网
 gRPC Server::request 负责安装本地输入扩展，Server::context 只解析范围。Client::execute / execute_service 返回 Response<R>；内层发送 Service 使用 Response<tonic::Response<R>>，便利方法转换正文仍保留本地输出扩展。原生 FnOnce 发送回调继续使用 tonic 类型。gRPC / NATS 不序列化 Extensions，网络接收端重新安装自己的能力。指南、真实调用与示例同步迁移。
 
 本轮 Windows 验收：工作区串行 317 项通过、32 项外部专项默认跳过，其中包含 20 项指南示例；隔离真实 NATS 的 14 项事件测试及 2 项多网关专项通过。新增回归覆盖借用输入转换、显式范围派生与输入隔离、输出转换及原始错误、protobuf 输出扩展、事件聚合顺序，以及网关独立回应与通知输出元信息。Clippy、无警告 workspace rustdoc、execution / events / dispatch / rpc / client / application 六个 smoke、格式与空白检查通过；222 个文本文件 UTF-8/LF 和 119 处相对文档路径检查通过。未运行真实 Redis、Linux 或 release 构建。
+
+## Registry trait 与 Extensions 写时复制（2026-10-21）
+
+execution::Registry 已从具体结构改为带关联类型的注册/派发 trait，默认实现更名 Table；registry::Handler 提供受原预算、取消及追踪保护的擦除处理链，registry::Service 支持泛型实现和 Arc<dyn Registry>。protobuf / message 注册器、普通业务 RPC 与玩家 HandlerRegistry 已支持注入自有或共享注册器。protobuf / message 注册错误保留具体实现类型；玩家 RPC 组装边界沿用 Configuration 文本映射。自定义注册器的克隆与更新可见性由其实现决定，默认 Table 仍保留注册快照；timer / 服务器事件的入口隔离保持不变。
+
+Extensions 改为可选 Arc 表和写时复制：空集合无表分配，克隆 O(1)，实际修改共享表时只复制条目与值的 Arc；容器隔离和共享值语义不变。无效删除、空集合合并不复制表，向空集合合并直接共享源表。新增回归覆盖共享/分离行为、自定义注册错误、动态替换/拦截、trait 对象、派发期限与取消，以及完整编解码和游戏 RPC 适配。
+
+本轮 Windows 验收：工作区串行 323 项通过、32 项外部专项默认跳过，其中包含 21 项指南示例；Clippy、无警告 workspace rustdoc、本地分发 / RPC / 客户端 TCP 三个 smoke、格式和空白检查通过。223 个文本文件 UTF-8/LF 和 119 处相对文档路径检查通过。未运行真实 Redis/NATS、Linux 或 release 构建。
+
+
+### 执行错误契约校正（2026-10-21）
+
+execution::Error<E> 与 Request / Response 一起从根公开，统一表达 Stopped 与 Inner(E)；E 保留具体处理错误。
+Registry 关联类型使用 HandlerError、DispatchError 与 RegistrationError；dispatch 和路由 Service 均返回
+execution::Error<G::DispatchError>。默认 Table 的 DispatchError 仅包含 Unknown / Handler，不重复存放执行停止。
+protobuf / message 适配保持这一层结构；自定义 RPC 注册器显式提供 DispatchError 到 Status 的映射，
+默认构造保留默认映射。Error::map_inner 转换具体错误，Error::flatten 接续重复执行保护，
+停止原因、错误来源与请求/响应扩展保持不变。原生 Tower Layer 仍可适配任意内层错误，
+不要求第三方 Service 或后端采用共同返回类型。
+
+
+本轮 Windows 验收：全工作区串行测试 326 项通过、32 项外部专项按默认规则跳过，其中包括 21 项指南示例。
+全目标 Clippy、无警告 workspace rustdoc、本地分发 / RPC / 客户端 TCP 三个 smoke、格式与空白检查通过；
+223 个文本文件 UTF-8/LF、119 处相对文档路径检查通过。未运行真实 Redis/NATS、Linux 或 release 构建。

@@ -12,7 +12,13 @@ use tracing::{Instrument, instrument::Instrumented};
 
 type Work<S, T> = Instrumented<Timeout<Oneshot<S, Request<T>>>>;
 
-/// 执行停止或内层原始错误；不依赖 RPC Status，不吞掉游戏自定义错误。
+/// 共同执行结果；T 是完整成功值，E 是具体处理错误，不隐含 Response 包装。
+pub type Result<T, E> = std::result::Result<T, Error<E>>;
+
+/// 共同执行结果的失败部分：执行停止或具体处理错误。
+///
+/// 与 Request / Response 一起从 crate 根导出；E 保留路由、业务或适配层的具体失败。
+/// 不包含上下文构造错误，不依赖 RPC Status，不承诺停止时回滚副作用。
 #[derive(Debug, thiserror::Error)]
 pub enum Error<E> {
     /// 原调用范围已取消或预算耗尽；已发生的副作用不回滚。
@@ -23,10 +29,32 @@ pub enum Error<E> {
     Inner(#[source] E),
 }
 
+impl<E> Error<E> {
+    /// 转换具体处理错误，保持执行停止原因不变。
+    pub fn map_inner<F>(self, map: impl FnOnce(E) -> F) -> Error<F> {
+        match self {
+            Self::Stopped(reason) => Error::Stopped(reason),
+            Self::Inner(error) => Error::Inner(map(error)),
+        }
+    }
+}
+impl<E> Error<Error<E>> {
+    /// 合并执行保护的两层错误；外层与内层停止均保持为同一个 Stopped。
+    /// 对已符合执行契约的 Service 再安装 Layer 时，用此方法接续错误结构。
+    pub fn flatten(self) -> Error<E> {
+        match self {
+            Self::Stopped(reason) => Error::Stopped(reason),
+            Self::Inner(error) => error,
+        }
+    }
+}
+
 /// 为任意类型化调用增加原期限、取消及追踪约束，不增加业务重试或后台队列。
 ///
 /// 每次调用克隆内层 Service；需要跨克隆共享的并发限额由内层 Layer 自行共享。
 /// 内层就绪等待放在调用 future 内，计入上下文期限；外层始终就绪不代表内层就绪。
+/// 本 Layer 适配原始 Service 错误；已返回 `Error<E>` 的链再次加保护时，
+/// 使用 ServiceExt::map_err(Error::flatten) 保持统一错误结构。
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Layer;
 impl<S> tower::Layer<S> for Layer {
@@ -48,7 +76,7 @@ where
     type Response = S::Response;
     type Error = Error<S::Error>;
     type Future = Call<S, T>;
-    fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+    fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<std::result::Result<(), Self::Error>> {
         Poll::Ready(Ok(()))
     }
     fn call(&mut self, request: Request<T>) -> Self::Future {
@@ -85,7 +113,7 @@ impl<S, T> Future for Call<S, T>
 where
     S: tower::Service<Request<T>>,
 {
-    type Output = Result<S::Response, Error<S::Error>>;
+    type Output = Result<S::Response, S::Error>;
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
         if let Err(reason) = this.context.check() {

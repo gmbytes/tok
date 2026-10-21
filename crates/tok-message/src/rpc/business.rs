@@ -44,20 +44,36 @@ type ContextFactory<C> = dyn Fn(&CallContext) -> Result<C, Status> + Send + Sync
 
 /// 将传输无关的消息分发表适配为普通业务 RPC；只在此边界构造线协议回应和 Status。
 ///
-/// 上下文转换器负责提取业务状态，错误转换器仅映射原始业务错误。
+/// 上下文转换器负责提取业务状态；默认构造映射原始业务错误，自定义构造映射注册器派发错误。
 /// 此适配器不接受 timer 或服务器事件，也不添加锁、队列或重试。
-pub struct Handler<C, E> {
-    registry: Arc<crate::Registry<C, (), E>>,
+pub struct Handler<C, E, G: tok_execution::Registry + ?Sized = tok_protobuf::Table<u32, C, (), E>> {
+    registry: Arc<crate::Registry<C, (), E, G>>,
     context: Box<ContextFactory<C>>,
-    error: Box<dyn Fn(E) -> Status + Send + Sync>,
+    error: Box<dyn Fn(G::DispatchError) -> Status + Send + Sync>,
 }
 
-impl<C, E> Handler<C, E> {
-    /// 注入可与本地调用共享的分发表，并显式提供业务上下文和业务错误转换。
+impl<C, E> Handler<C, E>
+where
+    C: Send + 'static,
+    E: Send + 'static,
+{
+    /// 使用默认 Table 的状态映射，只需提供原始业务错误转换。
     pub fn new(
         registry: Arc<crate::Registry<C, (), E>>,
         context: impl Fn(&CallContext) -> Result<C, Status> + Send + Sync + 'static,
         error: impl Fn(E) -> Status + Send + Sync + 'static,
+    ) -> Self {
+        Self::from_registry(registry, context, move |failure| {
+            super::handler::table_status(failure, &error)
+        })
+    }
+}
+impl<C, E, G: tok_execution::Registry + ?Sized> Handler<C, E, G> {
+    /// 注入自定义注册器，并显式映射其完整派发错误；执行停止由共同边界映射。
+    pub fn from_registry(
+        registry: Arc<crate::Registry<C, (), E, G>>,
+        context: impl Fn(&CallContext) -> Result<C, Status> + Send + Sync + 'static,
+        error: impl Fn(G::DispatchError) -> Status + Send + Sync + 'static,
     ) -> Self {
         Self {
             registry,
@@ -67,10 +83,17 @@ impl<C, E> Handler<C, E> {
     }
 }
 
-impl<C, E> super::Handler for Handler<C, E>
+impl<C, E, G: ?Sized> super::Handler for Handler<C, E, G>
 where
     C: Send + 'static,
     E: Send + 'static,
+    G: tok_execution::Registry<
+            Key = u32,
+            Input = (C, Vec<u8>),
+            Output = tok_protobuf::Reply<tok_protobuf::Message<u32>>,
+            HandlerError = tok_protobuf::Error<E>,
+        > + 'static,
+    G::DispatchError: Send + 'static,
 {
     fn call(&self, request: tok_execution::Request<(CallContext, Payload)>) -> super::CallTask<'_> {
         Box::pin(async move {

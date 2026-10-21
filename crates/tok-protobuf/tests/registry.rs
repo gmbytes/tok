@@ -74,13 +74,17 @@ async fn protobuf_adapter_accepts_string_keys_and_preserves_decode_and_business_
         registry
             .dispatch(ctx.clone().map(|()| (5, message(vec![]))))
             .await,
-        Err(DispatchError::Handler(protobuf::Error::Handler(Denied)))
+        Err(tok_execution::Error::Inner(DispatchError::Handler(
+            protobuf::Error::Handler(Denied)
+        )))
     ));
     assert!(matches!(
         registry
             .dispatch(ctx.clone().map(|()| (5, message(vec![0xff]))))
             .await,
-        Err(DispatchError::Handler(protobuf::Error::Decode(_)))
+        Err(tok_execution::Error::Inner(DispatchError::Handler(
+            protobuf::Error::Decode(_)
+        )))
     ));
     // 编解码也在执行范围内；已取消调用不再解析坏包。
     ctx.context.cancellation().cancel();
@@ -88,7 +92,9 @@ async fn protobuf_adapter_accepts_string_keys_and_preserves_decode_and_business_
         registry
             .dispatch(ctx.map(|()| (5, message(vec![0xff]))))
             .await,
-        Err(DispatchError::Stopped(tok_execution::StopReason::Cancelled))
+        Err(tok_execution::Error::Stopped(
+            tok_execution::StopReason::Cancelled
+        ))
     ));
 }
 
@@ -153,7 +159,7 @@ async fn direct_service_preserves_policy_metadata_decode_errors_and_registration
     let input = |key, body| Request::new(context(), ((), protobuf::Message { key, body }));
     assert!(matches!(
         frozen.clone().oneshot(input(3, vec![])).await,
-        Err(DispatchError::Unknown(3))
+        Err(tok_execution::Error::Inner(DispatchError::Unknown(3)))
     ));
     assert_eq!(
         registry
@@ -190,12 +196,16 @@ async fn direct_service_preserves_policy_metadata_decode_errors_and_registration
     );
     assert!(matches!(
         chain.clone().oneshot(input(1, vec![0xff])).await,
-        Err(DispatchError::Handler(protobuf::Error::Decode(_)))
+        Err(tok_execution::Error::Inner(DispatchError::Handler(
+            protobuf::Error::Decode(_)
+        )))
     ));
     let request = input(99, vec![]);
     request.context.cancellation().cancel();
     assert!(matches!(
         chain.oneshot(request).await,
-        Err(DispatchError::Stopped(tok_execution::StopReason::Cancelled))
+        Err(tok_execution::Error::Stopped(
+            tok_execution::StopReason::Cancelled
+        ))
     ));
 }

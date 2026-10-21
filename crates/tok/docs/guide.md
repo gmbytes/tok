@@ -112,7 +112,7 @@ tok-core 不提供根 Error / Result；各能力只定义和返回自己能够�
 | 应用配置 | [`config::Error`]：Invalid；配置校验按组件参数给出原因 |
 | 玩家接入配置 | [`gateway::player::ConfigError`] |
 | 注册处理链 | [`execution::registry::Error`]：DuplicateKey |
-| 按键分发执行 | [`execution::registry::DispatchError`]：Unknown、Stopped、Handler，保留键与原始业务错误 |
+| 按键分发执行 | [`execution::Error`]：Stopped / Inner；默认表的 [`execution::registry::DispatchError`]：Unknown / Handler，保留键与原始业务错误 |
 
 各领域接口返回自己的 Result；组合服务由上层聚合，例如 application::Error::Discovery 单独承载发现失败，不再经 Core 透传。发现与锁后端配置校验采用相应领域错误，Application 的整体配置校验将组件校验失败转换为 config::Error::Invalid。application::Error::Configuration 与 Create 分别保留配置和服务构建错误的来源，Unsupported 表达应用尚未实现的可选能力。
 
@@ -349,16 +349,32 @@ trace_sample_ratio = 0.1
 指标不使用 player_id、bid 或 request_id 作为标签。token 和协议正文默认不记录。
 内部 RPC 已通过 metadata 传播 W3C TraceContext；Core NATS 已通过标准 headers 传播，转发进入 session 后继续关联至内部事件 RPC。
 
+## 执行错误与处理链组合
+
+execution 根公开 Context、Request、Response、Error、Result 和 Layer。框架共同执行结果为
+`Result<Response<R>, execution::Error<E>>`：Stopped 表达取消与预算耗尽，Inner(E) 保留具体路由、业务或适配错误；
+上下文构造失败仍由 ContextError 表达，不混入本次调用结果。
+`execution::Result<T, E>` 是标准 `Result<T, execution::Error<E>>` 的别名，T 表示完整成功值，不隐含 Response 包装。
+
+普通 Tower Service 可返回自己的错误，execution::Layer 负责加上执行停止分支；输入和成功结果保持透明。
+已返回 `execution::Error<E>` 的处理链再次安装执行保护时，显式使用
+`Layer.layer(service).map_err(execution::Error::flatten)` 合并为同一层错误，不改变停止原因或原始错误。
+转换具体错误使用 Error::map_inner；该方法不转换 Stopped。注册器的 HandlerError、DispatchError、
+RegistrationError 分别表达处理链错误、注册器自身派发错误与组装错误，不在 DispatchError 中重复定义 Stopped。
+协议、锁和事件的专门错误仍可在明确边界映射执行结果；这不要求第三方 Service 或后端全部采用同一枚举。
+
 ## 按自定义键分发处理链
 
-[`execution::registry::Registry`] 只根据键选择和执行 Tower 处理链，不规定输入、结果或编码方式。
-`Registry<K, T, R, E>` 中，K 是实现 Ord + Clone 的分发键，T 是每次调用的自有输入，R 是 `Response<R>` 的正文，E 是原始业务错误。键可以是枚举、字符串或自定义类型，不要求 Display；零值和空字符串是否有效由协议或业务决定。
+[`execution::Registry`] 是注册与派发 trait，[`execution::Table`] 是基于 BTreeMap 的默认静态实现；不规定消息编码方式。
+`Table<K, T, R, E>` 中，K 是实现 Ord + Clone 的分发键，T 是每次调用的自有输入，R 是 `Response<R>` 的正文，E 是原始业务错误。键可以是枚举、字符串或自定义类型，不要求 Display；零值和空字符串是否有效由协议或业务决定。
 组装完成后通过 [`execution::registry::Registry::into_service`] 注入 `Fn(&Request<T>) -> K` 取键函数，得到 [`execution::registry::Service`]。取键可读取正文或扩展，只负责返回路由键；输入与能力校验由前置 Layer 完成，未注册键返回 Unknown。公共 Layer 放在分发表外，路由专用 Layer 继续通过 register_service 安装。
+Registry trait 通过关联类型声明 Key、Input、Output、HandlerError、DispatchError 和 RegistrationError，最小接口为 register_handler 与 dispatch；register / register_service / into_service 提供默认适配。trait 本身不要求键排序或克隆，默认 Table 才要求 Ord + Clone。Service 克隆共享具体注册器，自定义更新是否对旧调用入口可见，由实现明确约定。
+
 核心执行库不依赖 prost、Tonic 或框架生成协议。分发保留输入 Context 的操作名、期限、取消，以及 Request 的扩展，不创建队列、增加预算或重试。共享业务状态可放在输入的 Arc 中；借用输入仍可直接通过 execution 的 Tower 调用执行，当前注册器只保存静态处理链。
 
 ```rust
 use std::time::Duration;
-use tok::{core::Identity, execution::{self, Context, Request, Registry}};
+use tok::{core::Identity, execution::{self, Context, Request, Registry, Table}};
 use tok::application::CancellationToken;
 use tower::{ServiceBuilder, ServiceExt};
 
@@ -368,7 +384,7 @@ struct Command { operation: Operation, value: u64 }
 
 # #[tokio::main]
 # async fn main() -> Result<(), Box<dyn std::error::Error>> {
-let mut registry = Registry::<Operation, Command, u64, std::io::Error>::new();
+let mut registry = Table::<Operation, Command, u64, std::io::Error>::new();
 registry.register(Operation::Increment, |request| async move {
     assert_eq!(request.extensions().get::<u64>(), Some(&42));
     Ok(tok::execution::Response::new(request.input.value + 1))
@@ -379,7 +395,8 @@ let service = ServiceBuilder::new()
         request.extensions_mut().insert(42u64);
         request
     })
-    .service(registry.into_service(|request| request.input.operation.clone()));
+    .service(registry.into_service(|request| request.input.operation.clone()))
+    .map_err(execution::Error::flatten);
 let context = Context::new(
     Identity { node_id: "local".into(), service_name: "custom".into() },
     "local.increment", Duration::from_secs(1), CancellationToken::new(),
@@ -393,7 +410,59 @@ assert_eq!(service.oneshot(Request::new(context, Command {
 
 路由 Service 的 poll_ready 只表示能接收本次分发，不预留尚未选定路由的容量。取键、查表、目标就绪及处理都在原 Context 范围内；过期或取消时不再调用取键函数，非协作式取键迟到后也不继续执行业务。不新增全局队列、自动重试或默认路由。Service 克隆共享只读分发表和取键函数，不要求取键闭包本身 Clone。Service 入口要求 K 和取键函数满足 Send + Sync + static；显式 dispatch 保留原有键调用方式，不机械收紧其键约束。
 
-注册错误 [`execution::registry::Error`] 保留重复键；运行错误 [`execution::registry::DispatchError`] 区分 Unknown、Stopped 和 Handler，并保留原始键及业务错误。
+注册错误 [`execution::registry::Error`] 保留重复键；默认表的 [`execution::registry::DispatchError`] 区分 Unknown 和 Handler，并保留原始键及业务错误。dispatch 与 Tower 入口统一返回 `execution::Error<G::DispatchError>`，执行停止仅由外层 Stopped 表达。
+
+### 自定义 Registry
+
+Registry 可以改变选链、拦截或委托规则，而编解码继续由上层适配器负责。以下实现将请求编号 7 重定向到已注册的 1：
+
+```rust
+use std::{convert::Infallible, time::Duration};
+use prost::Message as _;
+use tok::{core::{BoxFuture, Identity}, execution::{Context, Registry, Request, Response, registry::Handler}, protobuf};
+use tok::application::CancellationToken;
+
+#[derive(Clone)]
+struct Redirect<G>(G);
+impl<G: Registry<Key = u32>> Registry for Redirect<G> {
+    type Key = u32;
+    type Input = G::Input;
+    type Output = G::Output;
+    type HandlerError = G::HandlerError;
+    type DispatchError = G::DispatchError;
+    type RegistrationError = G::RegistrationError;
+    fn register_handler(&mut self, key: u32, handler: Handler<Self::Input, Self::Output, Self::HandlerError>) -> Result<(), Self::RegistrationError> {
+        self.0.register_handler(key, handler)
+    }
+    fn dispatch<'a>(&'a self, key: &'a u32, request: Request<Self::Input>) -> BoxFuture<'a, Result<Response<Self::Output>, tok::execution::Error<Self::DispatchError>>> {
+        self.0.dispatch(if *key == 7 { &1 } else { key }, request)
+    }
+}
+#[derive(Clone, PartialEq, prost::Message)]
+struct Value { #[prost(uint32, tag = "1")] value: u32 }
+# #[tokio::main]
+# async fn main() -> Result<(), Box<dyn std::error::Error>> {
+let backend = Redirect(protobuf::Table::<u32>::new());
+let mut routes = protobuf::Registry::<u32, (), (), Infallible, _>::from_registry(backend);
+routes.register(1, 2, |request: Request<((), Value)>| async move {
+    Ok(Response::new(protobuf::Reply { message: Value { value: request.input.1.value + 1 }, output: () }))
+})?;
+let context = Context::new(Identity { node_id: "local".into(), service_name: "custom".into() },
+    "redirect", Duration::from_secs(1), CancellationToken::new())?;
+let result = routes.dispatch(Request::new(context, ((), protobuf::Message {
+    key: 7, body: Value { value: 41 }.encode_to_vec(),
+}))).await?;
+assert_eq!(result.output.message.key, 2);
+assert_eq!(Value::decode(result.output.message.body.as_slice())?.value, 42);
+# Ok(())
+# }
+```
+
+`registry::Handler` 擦除具体 Service 类型，并保护就绪等待与执行。自定义派发须接续 Request / Response、原期限、取消和追踪；`registry::Service::new(Arc<G>, key)` 同时保护取键与整个自定义派发过程，允许 G 为 dyn Registry。注册错误保留实现自己的类型，不能通过包装静默放大预算或自动重试。
+
+protobuf::Registry / message::Registry 的最后一个泛型参数 G 是底层 Registry，默认值仍使用静态 Table；from_registry 注入自有实现，from_shared_registry 接受共享实现或 trait 对象。调用时不要求 G 可克隆；通过这两个适配器注册新路由时要求 G: Clone，以便在共享状态下明确按实现的克隆语义更新。普通业务 RPC 的 business::Handler 和玩家 HandlerRegistry 同样支持自定义底层注册器；自定义构造使用 business::Handler::from_registry 或 HandlerRegistry::from_registry / from_shared_registry，并显式注入 G::DispatchError 到 Status 的映射；默认 new 保留默认表的映射。timer 和服务器事件继续走各自隔离入口。
+
+这次抽象的是通用按键消息注册与派发。protobuf / message 的 Registry 是其协议适配器；events::Registry 仍负责借用状态的事件 fan-out，不强行纳入单目标消息表，也不新增内建热更新管理或远端路由功能。
 
 ### protobuf、编号消息与 RPC 适配
 
@@ -403,7 +472,7 @@ assert_eq!(service.oneshot(Request::new(context, Command {
 
 protobuf::Registry 和 message::Registry 的输入已含消息键，可直接作为 `Service<Request<(C, Message<K>)>>` / `Service<Request<(C, message::Message)>>` 交给 ServiceBuilder，不需要额外 service_fn。克隆共享路由快照，后续注册采用写时复制，不改变旧克隆；每条路由的可变限额仍由其 Layer 显式共享。dispatch 复用该 Service 路径。
 
-编解码和内层 Service 的就绪等待也计入原执行范围。解码错误通过 `registry::DispatchError::Handler(protobuf::Error::Decode(...))` 返回，业务错误保留在 `protobuf::Error::Handler` 中；RPC 边界再映射为 Status。
+编解码和内层 Service 的就绪等待也计入原执行范围。默认表的解码错误通过 `execution::Error::Inner(registry::DispatchError::Handler(protobuf::Error::Decode(...)))` 返回，业务错误保留在 `protobuf::Error::Handler` 中；RPC 边界再映射为 Status。
 
 ```rust
 use std::{sync::Arc, time::Duration};
@@ -467,7 +536,7 @@ let rpc = message::rpc::Service::new("local", "custom", Arc::new(adapter))?;
 
 框架业务处理链接收 `execution::Request<T>`，成功返回 `execution::Response<R>`，错误仍为原始 E。Request 包含 Context、input 和输入 Extensions；Response 包含 output 和输出 Extensions，不含 Context。Context 只管理服务、操作、截止点、取消和 Span。使用 [`execution::Request::map`] / try_map 转换正文会移交原 Context 与输入扩展；本地派生由 Context::child 完成，再用 Request::from_parts 显式接续输入扩展。Request / Response 不依赖 ContextError，也不替调用方创建执行范围。Context.service 表示本地执行所属服务，出站目标独立表达。根入口显式创建 Context，不从当前任务自动恢复一个父 Context。
 
-Request 的 Extensions 提供可选输入元信息和本地能力；Response 的 Extensions 承载处理器及内层中间件向外返回的本地元信息，不自动复制输入扩展。Response::map / try_map 转换结果时保留输出扩展，into_parts 用于显式拆装；Err 分支所需元信息由具体错误类型承载。通用 execution::Layer、锁 Layer 与 sync_handler 透明支持任意结果，不强制包装第三方或基础设施接口；框架业务注册器、协议适配和网关 Pipeline 使用 Response。类型相同的值克隆后共享，某个容器的 insert/remove 不回写其他克隆。业务必需输入放在正文，固定处理器依赖由构造注入。跨 gRPC / NATS 只传允许的协议 metadata，接收端校验后安装自身能力，不恢复源 SessionHandle。
+Request 的 Extensions 提供可选输入元信息和本地能力；Response 的 Extensions 承载处理器及内层中间件向外返回的本地元信息，不自动复制输入扩展。Response::map / try_map 转换结果时保留输出扩展，into_parts 用于显式拆装；Err 分支所需元信息由具体错误类型承载。通用 execution::Layer、锁 Layer 与 sync_handler 透明支持任意结果，不强制包装第三方或基础设施接口；框架业务注册器、协议适配和网关 Pipeline 使用 Response。Extensions 的克隆为 O(1)，共享整张 Arc 表；空集合不分配表。共享状态下首次 insert / remove / extend 写时复制表结构，值只克隆 Arc，不深拷贝业务对象；某个容器的修改不回写其他克隆。移除不存在的类型或合并空集合不复制表。业务必需输入放在正文，固定处理器依赖由构造注入。跨 gRPC / NATS 只传允许的协议 metadata，接收端校验后安装自身能力，不恢复源 SessionHandle。
 
 Context::with_budget_limit 只能收紧原截止点。with_cancellation 由可信适配器用于明确的停止边界，不能用于普通嵌套调用规避父取消。独立消费、timer 和补偿任务可以新建有限范围；排队本身不能隐式重置预算。
 

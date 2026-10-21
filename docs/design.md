@@ -198,7 +198,7 @@ protobuf 正文编解码位于 tok-protobuf，基于同一个通用分发表实�
 
 core 不提供根 Error / Result，参数、配置和可选能力校验由实际所属组件表达。所有权后端故障使用 player::ownership::Error::Unavailable，冲突、配置、凭证与不可用语义保持区分。Redis 发现与锁构造/校验采用所属领域错误，整体应用配置在边界映射为 config::Error::Invalid。
 
-registry 注册错误定名为 Error<K>，运行失败定名为 DispatchError<K, E>；后者覆盖未知键、执行停止与业务处理错误，避免 HandleError 误指只有处理者内部失败。protobuf 适配与示例同步新路径，不保留 RegistrationError 旧类型。
+registry 注册错误定名为 Error<K>，运行失败定名为 DispatchError<K, E>；后者覆盖未知键与业务处理错误，执行停止统一由 execution::Error::Stopped 表达，避免 HandleError 误指只有处理者内部失败。protobuf 适配与示例同步新路径，不保留 RegistrationError 旧类型。
 
 ## 移除 core 根校验错误（2026-10-21）
 
@@ -250,3 +250,22 @@ gRPC 的连接缓存、监听、metadata 转换保留为边界组件；执行范
 ## 输入与输出封装校正（2026-10-21）
 
 Request 与 Response 分别由 tok-execution 私有 request.rs / response.rs 实现并根导出。输入转换、编解码、路由、客户端与网关队列保留请求扩展；输出转换保留回应扩展。Context::child 只处理执行范围，调用方显式接续适用输入能力；封装类型不返回 ContextError。事件聚合、通知投递和传输终点的规则见运行模型，Rust 指南提供可执行示例。此变更不修改线协议、所有权、会话串行、独立事件或无重试约定。
+
+## 注册器接口与扩展写时复制（2026-10-21）
+
+通用 execution::Registry 定义注册与派发契约，Key / Input / Output / HandlerError / DispatchError / RegistrationError 为关联类型；register_handler 接收已擦除的受保护 Handler，dispatch 允许自定义查找、拦截、委托和动态状态策略。默认 Table 使用静态 BTreeMap，重复键拒绝；排序与 Clone 约束属于 Table，不作为所有实现的限制。Registry 支持 trait 对象，泛型注册便捷方法仅用于自有实现；Tower 路由 Service 保护取键与整个自定义派发过程。
+
+protobuf、message 及游戏 RPC 适配器通过泛型和 from_registry / from_shared_registry 注入实现，继续负责各自编解码、非零编号和协议校验；不复制通用分发表，也不将自定义实现改写成另一套执行协议。默认实现保持注册快照，自定义克隆是否共享更新由实现声明。注册错误保留具体类型；不预置动态管理、分布式选点或重试规则。事件借用分发与 fan-out 仍由 events::Registry 管理，不机械合并单目标消息表。
+
+Extensions 克隆以 O(1) 共享整张表，空集合不分配表。修改共享非空表时复制键与值的 Arc，业务对象仍共享；容器修改不回写其他克隆。移除不存在的类型、合并空集合不复制表，向空集合合并直接共享已有表。该调整不改变 Request / Response 的扩展方向、会话能力作用域或跨网络传播规则。
+
+
+### 执行错误契约校正（2026-10-21）
+
+execution::Error<E> 与 Request / Response 一起从根公开，统一表达 Stopped 与 Inner(E)；E 保留具体处理错误。
+Registry 关联类型使用 HandlerError、DispatchError 与 RegistrationError；dispatch 和路由 Service 均返回
+execution::Error<G::DispatchError>。默认 Table 的 DispatchError 仅包含 Unknown / Handler，不重复存放执行停止。
+protobuf / message 适配保持这一层结构；自定义 RPC 注册器显式提供 DispatchError 到 Status 的映射，
+默认构造保留默认映射。Error::map_inner 转换具体错误，Error::flatten 接续重复执行保护，
+停止原因、错误来源与请求/响应扩展保持不变。原生 Tower Layer 仍可适配任意内层错误，
+不要求第三方 Service 或后端采用共同返回类型。

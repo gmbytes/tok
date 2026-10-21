@@ -403,7 +403,7 @@ Client::with_endpoint_factory 接收从 ServiceDescriptor 创建 Tonic Endpoint 
 
 core 根 Error / Result 已移除，参数、配置及可选能力校验由实际所属组件表达。所有权故障归 player::ownership::Error::Unavailable；Redis 发现与锁校验使用各自领域错误，整体应用配置映射为 config::Error::Invalid。最终归属与验收见下文。
 
-registry 注册错误定名为 Error<K>，运行失败定名为 DispatchError<K, E>；后者覆盖未知键、执行停止与业务处理错误，避免 HandleError 误指只有处理者内部失败。protobuf 适配与示例同步新路径，不保留 RegistrationError 旧类型。
+registry 注册错误定名为 Error<K>，运行失败定名为 DispatchError<K, E>；后者覆盖未知键与业务处理错误，执行停止统一由 execution::Error::Stopped 表达，避免 HandleError 误指只有处理者内部失败。protobuf 适配与示例同步新路径，不保留 RegistrationError 旧类型。
 
 本轮 Windows 验收：工作区 272 项测试通过，31 项外部专项按约定跳过；全目标编译与 Clippy、workspace rustdoc、dispatch / rpc / client / application smoke、格式、207 个文本文件 UTF-8/LF 和 82 处相对文档路径检查通过。回归覆盖发现错误跨路由传播并保留 source、默认订阅错误的领域归属，以及现有锁状态映射和应用退出清理。未运行真实 Redis/NATS、Linux 或 release 构建；随本次提交交付。
 
@@ -487,3 +487,22 @@ Listener::from_server 已支持带 Tower Layer 的 Tonic Server。内部改为 R
 本批交付：Context 与输入扩展分离、独立 Response 成功封装、请求/结果转换与拆装、各注册器和协议适配迁移，以及 gateway 准入/FIFO/投递结果接续。Request / Response 不依赖 ContextError，Context::child 与能力转移明确分工。泛型保护中间件不强制包装结果；生命周期与后端契约保持各自类型。
 
 验收已覆盖输入能力穿过转换/排队、输出元信息经内层处理到外层策略、编解码后的双向扩展、事件聚合冲突规则、独立范围、传输边界和原始 Err。AGENTS、运行模型和 rustdoc 指南已同步；工作区 317 项、真实 NATS 16 项、Clippy、rustdoc 和六个 smoke 通过，详细结果见 status.md。不增加线协议兼容层或自动重试。
+
+## Registry trait 与写时复制校正（2026-10-21）
+
+本批交付 Extensions 写时复制、Registry trait / 默认 Table / Handler / 泛型路由 Service，以及 protobuf、message、普通 RPC 与玩家适配器的自定义注册器注入。公开 API 和 rustdoc 示例同步迁移，不保留旧 execution::Registry 结构别名，不新增动态管理或重试系统。
+
+验收以自定义实现穿过真实适配器为准，覆盖关联类型及注册错误、自定义键与动态可见性、拦截/重定向、trait 对象、停止和预算、编解码及输出扩展；默认实现和原玩家 timer/事件边界保留回归。工作区 323 项、Clippy、rustdoc 和三个 smoke 通过，详细环境与验证结果见 status.md。
+
+
+### 执行错误契约校正（2026-10-21）
+
+execution::Error<E> 与 Request / Response 一起从根公开，统一表达 Stopped 与 Inner(E)；E 保留具体处理错误。
+Registry 关联类型使用 HandlerError、DispatchError 与 RegistrationError；dispatch 和路由 Service 均返回
+execution::Error<G::DispatchError>。默认 Table 的 DispatchError 仅包含 Unknown / Handler，不重复存放执行停止。
+protobuf / message 适配保持这一层结构；自定义 RPC 注册器显式提供 DispatchError 到 Status 的映射，
+默认构造保留默认映射。Error::map_inner 转换具体错误，Error::flatten 接续重复执行保护，
+停止原因、错误来源与请求/响应扩展保持不变。原生 Tower Layer 仍可适配任意内层错误，
+不要求第三方 Service 或后端采用共同返回类型。
+
+本次错误契约校正已完成；工作区 326 项测试、Clippy、rustdoc 与三个 smoke 通过，验收详情见 status.md。

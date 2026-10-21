@@ -3,7 +3,7 @@
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
 
 use std::{future::Future, sync::Arc};
-use tok_execution::registry::{self, DispatchError};
+use tok_execution::registry;
 use tok_execution::{Request, Response};
 use tower::{Service, ServiceExt};
 
@@ -34,50 +34,79 @@ pub enum Error<E> {
     Handler(#[source] E),
 }
 
-type EncodedRegistry<K, C, O, E> =
-    tok_execution::registry::Registry<K, (C, Vec<u8>), Reply<Message<K>, O>, Error<E>>;
+/// protobuf 注册器使用的默认静态底层表；存储解码前的正文处理链。
+pub type Table<K, C = (), O = (), E = std::convert::Infallible> =
+    tok_execution::Table<K, (C, Vec<u8>), Reply<Message<K>, O>, Error<E>>;
 
 /// 在通用分发表上增加 protobuf 编解码，C 是调用状态，O 是附加结果，E 是业务错误。
 ///
 /// K 可以是数字、字符串或枚举。本适配器不规定零或空字符串是否有效，
 /// 编解码、内层就绪等待和业务执行均在原 Context 约束内，不创建后台任务。
 /// 可直接作为接受 `Request<(C, Message<K>)>` 的 Tower Service，供公共 Layer 包装。
-/// poll_ready 不预留目标路由容量；克隆共享路由快照，克隆后注册新路由不会修改旧快照。
-pub struct Registry<K, C = (), O = (), E = std::convert::Infallible> {
-    inner: Arc<EncodedRegistry<K, C, O, E>>,
+/// poll_ready 不预留目标路由容量；默认 Table 使用注册快照，自定义实现自行定义更新可见性。
+pub struct Registry<K, C = (), O = (), E = std::convert::Infallible, G: ?Sized = Table<K, C, O, E>>
+{
+    inner: Arc<G>,
+    marker: std::marker::PhantomData<fn(K, C, O, E)>,
 }
 impl<K, C, O, E> Default for Registry<K, C, O, E> {
     fn default() -> Self {
         Self {
-            inner: Arc::new(tok_execution::registry::Registry::default()),
+            inner: Arc::new(Table::default()),
+            marker: std::marker::PhantomData,
         }
     }
 }
-impl<K: Clone, C, O, E> Clone for Registry<K, C, O, E> {
+impl<K, C, O, E, G: ?Sized> Clone for Registry<K, C, O, E, G> {
     fn clone(&self) -> Self {
         Self {
             inner: Arc::clone(&self.inner),
+            marker: std::marker::PhantomData,
         }
     }
 }
-impl<K, C, O, E> Registry<K, C, O, E>
-where
-    K: Ord + Clone + Send + Sync + 'static,
-    C: Send + 'static,
-    O: Send + 'static,
-    E: Send + 'static,
-{
-    /// 创建空的 protobuf 分发表。
+impl<K, C, O, E> Registry<K, C, O, E> {
+    /// 使用默认静态 Table 创建空分发表。
     pub fn new() -> Self {
         Self::default()
     }
+}
+impl<K, C, O, E, G: ?Sized> Registry<K, C, O, E, G> {
+    /// 注入共享注册器，支持 dyn Registry；更新可见性由具体实现定义。
+    pub fn from_shared_registry(registry: Arc<G>) -> Self {
+        Self {
+            inner: registry,
+            marker: std::marker::PhantomData,
+        }
+    }
+}
+impl<K, C, O, E, G> Registry<K, C, O, E, G> {
+    /// 注入自定义底层注册器，协议适配仍负责正文编解码。
+    pub fn from_registry(registry: G) -> Self {
+        Self::from_shared_registry(Arc::new(registry))
+    }
+}
+impl<K, C, O, E, G> Registry<K, C, O, E, G>
+where
+    K: Clone + Send + Sync + 'static,
+    C: Send + 'static,
+    O: Send + 'static,
+    E: Send + 'static,
+    G: registry::Registry<
+            Key = K,
+            Input = (C, Vec<u8>),
+            Output = Reply<Message<K>, O>,
+            HandlerError = Error<E>,
+        > + Clone
+        + 'static,
+{
     /// 注册异步业务函数；业务错误不转换为传输状态码。
     pub fn register<Req, Resp, F, Fut>(
         &mut self,
         request_key: K,
         response_key: K,
         handler: F,
-    ) -> Result<(), registry::Error<K>>
+    ) -> Result<(), G::RegistrationError>
     where
         Req: prost::Message + Default + Send + 'static,
         Resp: prost::Message + Send + 'static,
@@ -100,7 +129,7 @@ where
         request_key: K,
         response_key: K,
         service: S,
-    ) -> Result<(), registry::Error<K>>
+    ) -> Result<(), G::RegistrationError>
     where
         Req: prost::Message + Default + Send + 'static,
         Resp: prost::Message + Send + 'static,
@@ -134,24 +163,46 @@ where
             }),
         )
     }
+}
+impl<K, C, O, E, G: ?Sized> Registry<K, C, O, E, G>
+where
+    K: Clone + Send + Sync + 'static,
+    C: Send + 'static,
+    O: Send + 'static,
+    E: Send + 'static,
+    G: registry::Registry<
+            Key = K,
+            Input = (C, Vec<u8>),
+            Output = Reply<Message<K>, O>,
+            HandlerError = Error<E>,
+        > + 'static,
+    G::DispatchError: Send + 'static,
+{
     /// 使用消息键分发并编解码正文，业务状态不进入线协议。
     pub async fn dispatch(
         &self,
         request: Request<(C, Message<K>)>,
-    ) -> Result<Response<Reply<Message<K>, O>>, DispatchError<K, Error<E>>> {
+    ) -> Result<Response<Reply<Message<K>, O>>, tok_execution::Error<G::DispatchError>> {
         self.clone().oneshot(request).await
     }
 }
 
-impl<K, C, O, E> Service<Request<(C, Message<K>)>> for Registry<K, C, O, E>
+impl<K, C, O, E, G: ?Sized> Service<Request<(C, Message<K>)>> for Registry<K, C, O, E, G>
 where
-    K: Ord + Clone + Send + Sync + 'static,
+    K: Clone + Send + Sync + 'static,
     C: Send + 'static,
     O: Send + 'static,
     E: Send + 'static,
+    G: registry::Registry<
+            Key = K,
+            Input = (C, Vec<u8>),
+            Output = Reply<Message<K>, O>,
+            HandlerError = Error<E>,
+        > + 'static,
+    G::DispatchError: Send + 'static,
 {
     type Response = Response<Reply<Message<K>, O>>;
-    type Error = DispatchError<K, Error<E>>;
+    type Error = tok_execution::Error<G::DispatchError>;
     type Future =
         std::pin::Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
     fn poll_ready(
@@ -164,11 +215,13 @@ where
         let inner = Arc::clone(&self.inner);
         Box::pin(async move {
             let (context, (state, message), extensions) = request.into_parts();
-            inner
-                .dispatch(
-                    &message.key,
-                    Request::from_parts(context, (state, message.body), extensions),
-                )
+            let key = message.key;
+            registry::Service::new(inner, move |_: &Request<(C, Vec<u8>)>| key.clone())
+                .oneshot(Request::from_parts(
+                    context,
+                    (state, message.body),
+                    extensions,
+                ))
                 .await
         })
     }

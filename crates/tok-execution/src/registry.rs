@@ -20,55 +20,101 @@ pub enum DispatchError<K, E> {
     /// 没有为指定键注册处理链。
     #[error("分发键尚未注册：{0:?}")]
     Unknown(K),
-    /// 原调用范围已取消或期限耗尽。
-    #[error(transparent)]
-    Stopped(crate::StopReason),
     /// 处理链返回的原始错误。
     #[error("处理链执行失败：{0}")]
     Handler(#[source] E),
 }
 
-type Handler<T, R, E> =
+type HandlerFn<T, R, E> =
     dyn Fn(Request<T>) -> BoxFuture<'static, Result<Response<R>, crate::Error<E>>> + Send + Sync;
 
-/// 通过 K 选择处理链，T、R、E 分别是输入、结果和业务错误。
-///
-/// 键只需支持排序和克隆，不要求数值、字符串或 Display。克隆注册器共享已注册的链；
-/// Service 克隆所需的并发或限流状态须由对应 Layer 共享。不入队、不重试、不重新分配预算。
-pub struct Registry<K, T, R, E = std::convert::Infallible> {
-    handlers: BTreeMap<K, Arc<Handler<T, R, E>>>,
+/// 可克隆的已擦除处理链；克隆共享链工厂，每次调用克隆内层 Service。
+/// 就绪等待与执行始终处于请求原有的期限、取消和追踪范围内。
+pub struct Handler<T, R, E> {
+    call: Arc<HandlerFn<T, R, E>>,
 }
-impl<K, T, R, E> Default for Registry<K, T, R, E> {
-    fn default() -> Self {
-        Self {
-            handlers: BTreeMap::new(),
-        }
-    }
-}
-impl<K: Clone, T, R, E> Clone for Registry<K, T, R, E> {
+impl<T, R, E> Clone for Handler<T, R, E> {
     fn clone(&self) -> Self {
         Self {
-            handlers: self.handlers.clone(),
+            call: Arc::clone(&self.call),
         }
     }
 }
-impl<K, T, R, E> Registry<K, T, R, E>
-where
-    K: Ord + Clone,
-    T: Send + 'static,
-    R: Send + 'static,
-    E: Send + 'static,
-{
-    /// 创建空分发表。
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// 注册异步处理函数；需要中间件时使用 register_service。
-    pub fn register<F, Fut>(&mut self, key: K, handler: F) -> Result<(), Error<K>>
+impl<T: Send + 'static, R: Send + 'static, E: Send + 'static> Handler<T, R, E> {
+    /// 擦除具体 Tower 链类型，不启动任务或添加重试。
+    pub fn new<S>(service: S) -> Self
     where
-        F: Fn(Request<T>) -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = Result<Response<R>, E>> + Send + 'static,
+        S: TowerService<Request<T>, Response = Response<R>, Error = E>
+            + Clone
+            + Send
+            + Sync
+            + 'static,
+        S::Future: Send + 'static,
+    {
+        Self {
+            call: Arc::new(move |request| {
+                let service = service.clone();
+                Box::pin(async move { crate::Layer.layer(service).oneshot(request).await })
+            }),
+        }
+    }
+    /// 执行此链；不会重建上下文或放大预算。
+    pub fn call(
+        &self,
+        request: Request<T>,
+    ) -> BoxFuture<'static, Result<Response<R>, crate::Error<E>>> {
+        (self.call)(request)
+    }
+}
+
+/// 处理链的注册与派发契约；存储、选择和动态更新策略由实现决定。
+///
+/// 实现可以委托、拦截或选择备用处理链；不要求 Key 支持排序或 Clone。
+/// 必须保留 Request / Response 扩展、原期限、取消与追踪，不隐式重试。
+/// 注册失败不得破坏已有注册；克隆后的更新可见性由具体实现说明。
+/// 可作为 dyn Registry 使用；泛型注册便捷方法与 into_service 用于自有实现。
+pub trait Registry: Send + Sync {
+    /// 注册与查找使用的键。
+    type Key;
+    /// 处理链输入正文。
+    type Input;
+    /// 处理链成功结果正文。
+    type Output;
+    /// 注册处理链的原始错误。
+    type HandlerError;
+    /// 注册器自身的路由和处理错误；执行停止由外层 Error 统一表达。
+    type DispatchError;
+    /// 注册失败；由实现保留自己的错误类型。
+    type RegistrationError;
+
+    /// 注册已擦除的处理链，具体实现决定存储与重复键规则。
+    fn register_handler(
+        &mut self,
+        key: Self::Key,
+        handler: Handler<Self::Input, Self::Output, Self::HandlerError>,
+    ) -> Result<(), Self::RegistrationError>;
+
+    /// 在原调用范围中按键派发；执行停止使用 Error::Stopped，其余失败使用 Error::Inner。
+    /// 可以借用当前注册器与键，不自行 spawn；必须接续原期限、取消与追踪。
+    fn dispatch<'a>(
+        &'a self,
+        key: &'a Self::Key,
+        request: Request<Self::Input>,
+    ) -> BoxFuture<'a, crate::Result<Response<Self::Output>, Self::DispatchError>>;
+
+    /// 注册异步回调；需要中间件时使用 register_service。
+    fn register<F, Fut>(
+        &mut self,
+        key: Self::Key,
+        handler: F,
+    ) -> Result<(), Self::RegistrationError>
+    where
+        Self: Sized,
+        Self::Input: Send + 'static,
+        Self::Output: Send + 'static,
+        Self::HandlerError: Send + 'static,
+        F: Fn(Request<Self::Input>) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<Response<Self::Output>, Self::HandlerError>> + Send + 'static,
     {
         let handler = Arc::new(handler);
         self.register_service(
@@ -80,72 +126,121 @@ where
         )
     }
 
-    /// 安装 Tower 处理链；就绪等待和执行共用传入 Context 的原期限与取消范围。
-    pub fn register_service<S>(&mut self, key: K, service: S) -> Result<(), Error<K>>
+    /// 安装具体 Tower 链，共同执行保护由 Handler 提供。
+    fn register_service<S>(
+        &mut self,
+        key: Self::Key,
+        service: S,
+    ) -> Result<(), Self::RegistrationError>
     where
-        S: TowerService<Request<T>, Response = Response<R>, Error = E>
-            + Clone
+        Self: Sized,
+        Self::Input: Send + 'static,
+        Self::Output: Send + 'static,
+        Self::HandlerError: Send + 'static,
+        S: TowerService<
+                Request<Self::Input>,
+                Response = Response<Self::Output>,
+                Error = Self::HandlerError,
+            > + Clone
             + Send
             + Sync
             + 'static,
         S::Future: Send + 'static,
     {
+        self.register_handler(key, Handler::new(service))
+    }
+
+    /// 转为按请求取键的 Tower Service，选择和派发均受原执行范围保护。
+    fn into_service<F>(self, key: F) -> Service<Self, F>
+    where
+        Self: Sized,
+        F: Fn(&Request<Self::Input>) -> Self::Key + Send + Sync + 'static,
+    {
+        Service::new(Arc::new(self), key)
+    }
+}
+
+/// 基于 BTreeMap 的默认静态注册表，重复键拒绝注册；不入队、不重试。
+/// 克隆复制键表并共享已有处理链，后续注册不改变旧克隆；链的并发状态由其 Layer 共享。
+pub struct Table<K, T, R, E = std::convert::Infallible> {
+    handlers: BTreeMap<K, Handler<T, R, E>>,
+}
+impl<K, T, R, E> Default for Table<K, T, R, E> {
+    fn default() -> Self {
+        Self {
+            handlers: BTreeMap::new(),
+        }
+    }
+}
+impl<K: Clone, T, R, E> Clone for Table<K, T, R, E> {
+    fn clone(&self) -> Self {
+        Self {
+            handlers: self.handlers.clone(),
+        }
+    }
+}
+impl<K, T, R, E> Table<K, T, R, E> {
+    /// 创建空的静态注册表。
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+impl<K, T, R, E> Registry for Table<K, T, R, E>
+where
+    K: Ord + Clone + Send + Sync + 'static,
+    T: Send + 'static,
+    R: Send + 'static,
+    E: Send + 'static,
+{
+    type Key = K;
+    type Input = T;
+    type Output = R;
+    type HandlerError = E;
+    type DispatchError = DispatchError<K, E>;
+    type RegistrationError = Error<K>;
+    fn register_handler(&mut self, key: K, handler: Handler<T, R, E>) -> Result<(), Error<K>> {
         if self.handlers.contains_key(&key) {
             return Err(Error::DuplicateKey(key));
         }
-        self.handlers.insert(
-            key,
-            Arc::new(move |request| {
-                let service = service.clone();
-                Box::pin(async move { crate::Layer.layer(service).oneshot(request).await })
-            }),
-        );
+        self.handlers.insert(key, handler);
         Ok(())
     }
-
-    /// 将组装好的分发表转换为标准 Tower Service，由取键函数读取完整请求。
-    ///
-    /// 可在分发表外安装公共 Layer，路由内的 Layer 仍由 register_service 配置。
-    /// Service 克隆共享这份只读分发表与取键函数，不复制全部路由，不重新分配执行预算。
-    pub fn into_service<F>(self, key: F) -> Service<K, T, R, E, F>
-    where
-        K: Send + Sync + 'static,
-        F: Fn(&Request<T>) -> K + Send + Sync + 'static,
-    {
-        Service {
-            registry: Arc::new(self),
-            key: Arc::new(key),
-        }
-    }
-
-    /// 按键分发，保留原操作名、追踪、扩展、期限及取消；键与输入独立传递。
-    pub async fn dispatch(
-        &self,
-        key: &K,
+    fn dispatch<'a>(
+        &'a self,
+        key: &'a K,
         request: Request<T>,
-    ) -> Result<Response<R>, DispatchError<K, E>> {
-        request.context.check().map_err(DispatchError::Stopped)?;
-        let handler = self
-            .handlers
-            .get(key)
-            .ok_or_else(|| DispatchError::Unknown(key.clone()))?;
-        handler(request).await.map_err(|error| match error {
-            crate::Error::Inner(error) => DispatchError::Handler(error),
-            crate::Error::Stopped(reason) => DispatchError::Stopped(reason),
+    ) -> BoxFuture<'a, Result<Response<R>, crate::Error<DispatchError<K, E>>>> {
+        Box::pin(async move {
+            request.context.check()?;
+            let handler = self
+                .handlers
+                .get(key)
+                .ok_or_else(|| crate::Error::Inner(DispatchError::Unknown(key.clone())))?;
+            handler
+                .call(request)
+                .await
+                .map_err(|error| error.map_inner(DispatchError::Handler))
         })
     }
 }
 
-/// 按请求取键并执行已注册处理链的路由 Service，不是包装单个处理器的 Layer。
-///
-/// poll_ready 只表示分发入口可接受调用，不表示目标路由已有容量；取键、路由查询、
-/// 目标就绪等待与执行均受原 Context 的期限、取消与追踪约束。外层中间件的等待
-/// 仍须由外层执行保护负责。克隆共享固定路由快照，路由自己的限额状态由该 Layer 共享。
-pub struct Service<K, T, R, E, F> {
-    registry: Arc<Registry<K, T, R, E>>,
+/// Registry 的 Tower 路由适配；支持自有实现以及 `Arc<dyn Registry>`。
+/// poll_ready 不预留目标容量；取键、派发与内层就绪等待共用原期限与取消范围。
+/// 克隆共享注册器和取键函数，动态更新的可见性由注册器实现决定。
+pub struct Service<G: ?Sized, F> {
+    registry: Arc<G>,
     key: Arc<F>,
 }
-impl<K, T, R, E, F> Clone for Service<K, T, R, E, F> {
+impl<G: Registry + ?Sized, F> Service<G, F> {
+    /// 注入共享注册器与取键函数；可使用 trait 对象实现运行时选择。
+    pub fn new(registry: Arc<G>, key: F) -> Self {
+        Self {
+            registry,
+            key: Arc::new(key),
+        }
+    }
+}
+impl<G: ?Sized, F> Clone for Service<G, F> {
     fn clone(&self) -> Self {
         Self {
             registry: Arc::clone(&self.registry),
@@ -153,40 +248,37 @@ impl<K, T, R, E, F> Clone for Service<K, T, R, E, F> {
         }
     }
 }
-impl<K, T, R, E, F> TowerService<Request<T>> for Service<K, T, R, E, F>
+impl<G, F> TowerService<Request<G::Input>> for Service<G, F>
 where
-    K: Ord + Clone + Send + Sync + 'static,
-    T: Send + 'static,
-    R: Send + 'static,
-    E: Send + 'static,
-    F: Fn(&Request<T>) -> K + Send + Sync + 'static,
+    G: Registry + ?Sized + 'static,
+    G::Key: Send + Sync + 'static,
+    G::Input: Send + 'static,
+    G::Output: Send + 'static,
+    G::DispatchError: Send + 'static,
+    F: Fn(&Request<G::Input>) -> G::Key + Send + Sync + 'static,
 {
-    type Response = Response<R>;
-    type Error = DispatchError<K, E>;
-    type Future = BoxFuture<'static, Result<Response<R>, Self::Error>>;
+    type Response = Response<G::Output>;
+    type Error = crate::Error<G::DispatchError>;
+    type Future = BoxFuture<'static, Result<Self::Response, Self::Error>>;
     fn poll_ready(
         &mut self,
         _: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Result<(), Self::Error>> {
         std::task::Poll::Ready(Ok(()))
     }
-    fn call(&mut self, request: Request<T>) -> Self::Future {
+    fn call(&mut self, request: Request<G::Input>) -> Self::Future {
         let registry = Arc::clone(&self.registry);
         let key = Arc::clone(&self.key);
         Box::pin(async move {
-            // 取键也可能执行用户逻辑，因此放在原执行保护与追踪范围之内。
             crate::Layer
-                .layer(tower::service_fn(move |request: Request<T>| {
+                .layer(tower::service_fn(move |request: Request<G::Input>| {
                     let registry = Arc::clone(&registry);
                     let key = key(&request);
                     async move { registry.dispatch(&key, request).await }
                 }))
                 .oneshot(request)
                 .await
-                .map_err(|error| match error {
-                    crate::Error::Inner(error) => error,
-                    crate::Error::Stopped(reason) => DispatchError::Stopped(reason),
-                })
+                .map_err(crate::Error::flatten)
         })
     }
 }

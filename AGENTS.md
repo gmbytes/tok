@@ -41,6 +41,7 @@ build: 添加 just 开发命令入口
 ## 执行上下文契约
 
 - 框架提供的业务处理链、可组合中间件入口与用户扩展入口统一使用 `tok_execution::Request<T>`，成功结果使用 `tok_execution::Response<R>`，失败保留具体错误类型；协议输入放在 T 中。Request 包含 Context、input 与输入 Extensions，Response 包含 output 与输出 Extensions，不携带 Context。Context 只负责服务、操作、截止点、取消与追踪；Request / Response 不依赖 ContextError，不负责派生执行范围。使用第三方协议或库时，由框架适配器二次封装以接续此契约，不另建只传播部分字段的平行执行上下文。
+- 共同执行结果使用 Result<Response<R>, tok_execution::Error<E>>；Stopped 统一表达执行取消与预算耗尽，Inner(E) 保留具体处理错误。Context 构造错误与注册配置错误分别表达，不混入调用失败。协议边界可显式映射为协议错误，普通第三方 Service 通过执行 Layer 适配；已采用共同错误的链再次安装保护时，使用 Error::flatten 保持一层结构，转换具体错误使用 Error::map_inner，不在模块派发错误中重复增加执行停止变体。
 - 同一次本地执行在解码后的输入转换、处理链组合、排队和任务切换中保留 Context 与 Request 的输入扩展。Request::map / try_map 和 into_parts / from_parts 用于接续输入。派生 Context 后显式移交适用扩展，保留原截止点、取消关系与追踪，不因重新组装请求而重置预算或仅依赖当前任务的隐式 span。`Context.service` 始终表示本地执行所属服务，出站目标另行表达。
 - 根入口、独立异步消费、timer、生命周期通知和补偿任务可以建立新执行范围，但必须明确该范围的起点、预算、停止关系、追踪关联和扩展继承规则。排队本身不是自动切断上下文的理由；独立工作不得隐式继承已经结束的发布者调用期限，也不得借“新范围”绕过原调用预算。
 - 输入 Extensions 承载本地可选元信息与能力；输出 Extensions 沿返回路径传递处理结果元信息，不自动复制输入扩展、不作为输入回写通道。结果转换使用 Response::map / try_map 或拆分重组保留输出扩展；丢弃输出扩展必须位于明确的终端/传输边界，失败元信息由具体错误类型承载。多处理者/目标聚合须明确合并顺序和同类型冲突规则。必需业务输入显式传参，固定处理器依赖优先由构造注入。保留上下文不等于复制所有能力到不同服务或 session；范围变化时显式筛选并安装目标本地能力，避免误用源 SessionHandle 或形成引用环。

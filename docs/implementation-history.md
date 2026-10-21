@@ -660,3 +660,26 @@ protobuf 表克隆改为共享路由快照，注册时写时复制，服务调�
 请求和结果转换分别保留对应扩展，事件聚合按注册顺序合并输出扩展，同类型后者覆盖。PendingResponse、notify_request 和 deliver 提供本地输出元信息；跨进程、客户端编码与 replay 不隐式传输 Extensions。既有预算、取消关系、独立事件、所有权、FIFO 与无自动重试语义保持回归。
 
 Windows 工作区串行 317 项通过（含 20 项 rustdoc 指南示例），32 项外部专项默认跳过；隔离真实 NATS 额外 16 项专项通过。Clippy、无警告 API 文档、六个 smoke、格式/空白、222 个 UTF-8/LF 文本文件及 119 处相对文档路径检查通过。未运行真实 Redis、Linux 或 release 构建。
+
+## Registry trait 与 Extensions 写时复制（2026-10-21）
+
+execution::Registry 改为注册/派发 trait，关联类型表达键、输入、结果及运行/注册错误；默认静态实现更名 Table，Handler 擦除具体链并保护执行，泛型路由 Service 支持 trait 对象。protobuf、message、普通业务 RPC 和玩家 HandlerRegistry 支持自定义底层注册器；默认快照语义与自定义共享更新语义分别明确，timer / 服务器事件保持隔离。
+
+Extensions 改用可选 Arc 表，空集合不分配表，克隆 O(1)，实际修改共享表时仅复制条目与值的 Arc。无效删除或空集合合并不复制；向空集合合并直接共享源表。已有输入/输出扩展方向、目标能力覆盖和跨网络边界保持不变。
+
+Windows 工作区串行 323 项通过（含 21 项 rustdoc 指南示例），32 项外部专项默认跳过。新增回归覆盖写时复制、动态注册/拦截、无 Ord/Clone 键、trait 对象、自定义注册错误、原期限/取消，以及完整 protobuf / message / RPC 与玩家 timer 隔离。Clippy、无警告 workspace 文档、本地分发 / RPC / 客户端 TCP 三个 smoke、格式/空白、223 个 UTF-8/LF 文本及 119 处相对文档路径检查通过。未运行真实 Redis/NATS、Linux 或 release 构建。
+
+
+## 统一执行失败与自定义派发错误（2026-10-21）
+
+执行失败以根导出的 Error<E> 表达，Result<T, E> 仅为标准 Result<T, Error<E>> 的别名，不隐含 Response。
+Registry 的 HandlerError / DispatchError / RegistrationError 分别描述处理错误、派发错误与注册错误，
+dispatch 与路由 Service 保留同一层执行错误，默认 Table 不再单独定义 Stopped。
+Error::map_inner 与 flatten 分别接续具体错误转换和重复执行保护；自定义注册器的完整派发错误穿过
+protobuf / message 适配后由 RPC 显式映射为 Status。新增回归覆盖自定义后端原错误、停止、映射、
+trait 对象、玩家 timer 隔离及重复保护不增加错误层级。
+
+
+本轮 Windows 验收：全工作区串行测试 326 项通过、32 项外部专项按默认规则跳过，其中包括 21 项指南示例。
+全目标 Clippy、无警告 workspace rustdoc、本地分发 / RPC / 客户端 TCP 三个 smoke、格式与空白检查通过；
+223 个文本文件 UTF-8/LF、119 处相对文档路径检查通过。未运行真实 Redis/NATS、Linux 或 release 构建。

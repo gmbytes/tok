@@ -118,3 +118,60 @@ async fn fallible_output_conversion_preserves_metadata_and_error_branch_stays_or
         .unwrap_err();
     assert!(matches!(error, tok_execution::Error::Inner(error) if Arc::ptr_eq(&error, &original)));
 }
+
+// 对已采用共同错误契约的链增加外层预算保护，错误结构仍保持一层。
+#[tokio::test]
+async fn repeated_execution_protection_preserves_errors_and_inner_or_outer_stops() {
+    use tok_execution::Error;
+    let original = Arc::new(String::from("original"));
+    let source = Arc::clone(&original);
+    let inner = tok_execution::Layer.layer(tower::service_fn(move |_: Request<()>| {
+        let source = Arc::clone(&source);
+        async move { Err::<Response<()>, _>(source) }
+    }));
+    let service = tok_execution::Layer.layer(inner).map_err(Error::flatten);
+    let error = service
+        .oneshot(Request::new(context(CancellationToken::new()), ()))
+        .await
+        .unwrap_err();
+    assert!(matches!(error, Error::Inner(error) if Arc::ptr_eq(&error, &original)));
+
+    let inner = tower::service_fn(|_: Request<()>| async {
+        Err::<Response<()>, Error<Denied>>(Error::Stopped(StopReason::Cancelled))
+    });
+    let service = tok_execution::Layer.layer(inner).map_err(Error::flatten);
+    assert!(matches!(
+        service
+            .oneshot(Request::new(context(CancellationToken::new()), ()))
+            .await,
+        Err(Error::Stopped(StopReason::Cancelled))
+    ));
+
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let observed = Arc::clone(&calls);
+    let inner = tower::service_fn(move |_: Request<()>| {
+        observed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        async { Ok::<_, Error<Denied>>(Response::new(())) }
+    });
+    let service = tok_execution::Layer.layer(inner).map_err(Error::flatten);
+    let stop = CancellationToken::new();
+    stop.cancel();
+    assert!(matches!(
+        service.oneshot(Request::new(context(stop), ())).await,
+        Err(Error::Stopped(StopReason::Cancelled))
+    ));
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+}
+
+#[test]
+fn mapping_concrete_error_never_maps_a_stop_reason() {
+    use tok_execution::Error;
+    let error: Error<Denied> = Error::Stopped(StopReason::DeadlineExceeded);
+    let mapped: Error<()> = error.map_inner(|_| panic!("停止不调用具体错误映射"));
+    assert!(matches!(
+        mapped,
+        Error::Stopped(StopReason::DeadlineExceeded)
+    ));
+    let error = Error::Inner(41u32).map_inner(|value| value + 1);
+    assert!(matches!(error, Error::Inner(42)));
+}

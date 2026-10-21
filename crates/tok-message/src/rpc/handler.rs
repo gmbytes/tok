@@ -63,8 +63,16 @@ pub struct HandlerReply<M> {
 }
 
 /// 消息与 timer 的编解码路由；服务器事件委托统一事件 Registry。
-pub struct HandlerRegistry {
-    handlers: crate::Registry<CallContext, Option<TimerUpdate>, Status>,
+pub struct HandlerRegistry<
+    G: tok_execution::Registry + ?Sized = tok_protobuf::Table<
+        u32,
+        CallContext,
+        Option<TimerUpdate>,
+        Status,
+    >,
+> {
+    handlers: crate::Registry<CallContext, Option<TimerUpdate>, Status, G>,
+    error: Box<dyn Fn(G::DispatchError) -> Status + Send + Sync>,
     timers: BTreeMap<u32, Arc<RegisteredHandler>>,
     events: tok_events::Registry<CallContext, Option<TimerUpdate>, Status>,
 }
@@ -74,14 +82,48 @@ impl Default for HandlerRegistry {
     }
 }
 impl HandlerRegistry {
-    /// 创建空表；事件处理者总量上限为 65536，不按玩家分配注册项。
+    /// 使用默认静态 Table 创建空表；事件处理者总量上限为 65536。
     pub fn new() -> Self {
+        Self::from_registry(tok_protobuf::Table::new(), |error| {
+            table_status(error, |status| status)
+        })
+    }
+}
+impl<G: tok_execution::Registry + ?Sized> HandlerRegistry<G> {
+    /// 注入共享自定义消息注册器与其派发错误到 Status 的映射；执行停止由边界统一映射。
+    /// 事件和 timer 仍使用各自隔离入口。
+    pub fn from_shared_registry(
+        registry: Arc<G>,
+        error: impl Fn(G::DispatchError) -> Status + Send + Sync + 'static,
+    ) -> Self {
         Self {
-            handlers: crate::Registry::new(),
+            handlers: crate::Registry::from_shared_registry(registry),
+            error: Box::new(error),
             timers: BTreeMap::new(),
             events: tok_events::Registry::default(),
         }
     }
+}
+impl<G: tok_execution::Registry> HandlerRegistry<G> {
+    /// 注入自定义消息注册器与派发错误映射，保留游戏调用、事件和 timer 的协议约束。
+    pub fn from_registry(
+        registry: G,
+        error: impl Fn(G::DispatchError) -> Status + Send + Sync + 'static,
+    ) -> Self {
+        Self::from_shared_registry(Arc::new(registry), error)
+    }
+}
+impl<G> HandlerRegistry<G>
+where
+    G: tok_execution::Registry<
+            Key = u32,
+            Input = (CallContext, Vec<u8>),
+            Output = tok_protobuf::Reply<tok_protobuf::Message<u32>, Option<TimerUpdate>>,
+            HandlerError = tok_protobuf::Error<Status>,
+        > + Clone
+        + 'static,
+    G::RegistrationError: std::fmt::Display,
+{
     /// 注册 protobuf 请求与对应回应；同步于当前执行范围，不隐式重试。
     pub fn register<Req, Resp, F, Fut>(
         &mut self,
@@ -161,6 +203,8 @@ impl HandlerRegistry {
             )
             .map_err(|error| super::Error::Configuration(error.to_string()))
     }
+}
+impl<G: tok_execution::Registry + ?Sized> HandlerRegistry<G> {
     /// 安装服务器事件的共同注册链；多个处理者按序执行，timer 更新依次合成。
     pub fn register_event<E, H>(&mut self, handler: H) -> Result<(), super::Error>
     where
@@ -260,7 +304,16 @@ impl HandlerRegistry {
         Ok(())
     }
 }
-impl Handler for HandlerRegistry {
+impl<G: ?Sized> Handler for HandlerRegistry<G>
+where
+    G: tok_execution::Registry<
+            Key = u32,
+            Input = (CallContext, Vec<u8>),
+            Output = tok_protobuf::Reply<tok_protobuf::Message<u32>, Option<TimerUpdate>>,
+            HandlerError = tok_protobuf::Error<Status>,
+        > + 'static,
+    G::DispatchError: Send + 'static,
+{
     fn event(
         &self,
         request: ExecutionRequest<(CallContext, Arc<tok_events::Message>)>,
@@ -331,7 +384,7 @@ impl Handler for HandlerRegistry {
                     extensions,
                 ))
                 .await
-                .map_err(|error| dispatch_status(error, |error| error))?;
+                .map_err(|error| dispatch_status(error, &self.error))?;
             Ok(reply.map(|reply| CallResponse {
                 request_id: id,
                 payload: Some(Payload {
@@ -345,13 +398,23 @@ impl Handler for HandlerRegistry {
     }
 }
 pub(super) fn dispatch_status<E>(
+    error: tok_execution::Error<E>,
+    map_error: impl FnOnce(E) -> Status,
+) -> Status {
+    match error {
+        tok_execution::Error::Inner(error) => map_error(error),
+        tok_execution::Error::Stopped(reason) => {
+            execution_status(tok_execution::Error::Stopped(reason))
+        }
+    }
+}
+pub(super) fn table_status<E>(
     error: tok_execution::registry::DispatchError<u32, tok_protobuf::Error<E>>,
     map_error: impl FnOnce(E) -> Status,
 ) -> Status {
     use tok_execution::registry::DispatchError;
     match error {
         DispatchError::Unknown(_) => Status::unimplemented("游戏消息尚未注册"),
-        DispatchError::Stopped(reason) => execution_status(tok_execution::Error::Stopped(reason)),
         DispatchError::Handler(tok_protobuf::Error::Decode(_)) => {
             Status::invalid_argument("游戏消息解码失败")
         }

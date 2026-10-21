@@ -9,7 +9,7 @@ use std::{
 use tok_core::Identity;
 use tok_execution::{
     Context, Request, Response, StopReason,
-    registry::{DispatchError, Error, Registry},
+    registry::{DispatchError, Error, Registry, Table},
 };
 use tokio_util::sync::CancellationToken;
 
@@ -40,7 +40,7 @@ fn context(budget: Duration, stop: CancellationToken) -> Context {
 async fn enum_keys_plain_rust_values_and_original_errors_share_the_execution_chain() {
     let calls = Arc::new(AtomicUsize::new(0));
     let observed = Arc::clone(&calls);
-    let mut registry = Registry::<Action, u32, String, Rejected>::new();
+    let mut registry = Table::<Action, u32, String, Rejected>::new();
     registry
         .register_service(
             Action::Increment,
@@ -76,18 +76,22 @@ async fn enum_keys_plain_rust_values_and_original_errors_share_the_execution_cha
         registry
             .dispatch(&Action::Increment, ctx.clone().map(|()| 0))
             .await,
-        Err(DispatchError::Handler(Rejected(0)))
+        Err(tok_execution::Error::Inner(DispatchError::Handler(
+            Rejected(0)
+        )))
     ));
     assert!(matches!(
         registry.dispatch(&Action::Missing, ctx.map(|()| 7)).await,
-        Err(DispatchError::Unknown(Action::Missing))
+        Err(tok_execution::Error::Inner(DispatchError::Unknown(
+            Action::Missing
+        )))
     ));
     assert_eq!(calls.load(Ordering::SeqCst), 2);
 }
 
 #[tokio::test]
 async fn key_validity_is_owned_by_the_caller_and_duplicate_registration_preserves_the_chain() {
-    let mut numeric = Registry::<u64, u32, u32>::new();
+    let mut numeric = Table::<u64, u32, u32>::new();
     numeric
         .register(
             0,
@@ -110,7 +114,7 @@ async fn key_validity_is_owned_by_the_caller_and_duplicate_registration_preserve
             .output,
         2
     );
-    let mut textual = Registry::<String, u32, u32>::new();
+    let mut textual = Table::<String, u32, u32>::new();
     textual
         .register(String::new(), |request| async move {
             Ok(Response::new(request.input))
@@ -146,7 +150,7 @@ impl tower::Service<Request<()>> for NeverReady {
 #[tokio::test]
 async fn readiness_wait_uses_original_deadline_and_cancelled_requests_do_not_start() {
     let polls = Arc::new(AtomicUsize::new(0));
-    let mut registry = Registry::new();
+    let mut registry = Table::new();
     registry
         .register_service(Action::Increment, NeverReady(Arc::clone(&polls)))
         .unwrap();
@@ -161,7 +165,7 @@ async fn readiness_wait_uses_original_deadline_and_cancelled_requests_do_not_sta
         .unwrap_err();
     assert!(matches!(
         error,
-        DispatchError::Stopped(StopReason::Cancelled)
+        tok_execution::Error::Stopped(StopReason::Cancelled)
     ));
     assert_eq!(polls.load(Ordering::SeqCst), 0);
     let error = registry
@@ -176,7 +180,7 @@ async fn readiness_wait_uses_original_deadline_and_cancelled_requests_do_not_sta
         .unwrap_err();
     assert!(matches!(
         error,
-        DispatchError::Stopped(StopReason::DeadlineExceeded)
+        tok_execution::Error::Stopped(StopReason::DeadlineExceeded)
     ));
     assert!(polls.load(Ordering::SeqCst) > 0);
 }
@@ -184,7 +188,7 @@ async fn readiness_wait_uses_original_deadline_and_cancelled_requests_do_not_sta
 #[tokio::test]
 async fn registry_service_composes_common_and_route_layers_without_losing_context_or_errors() {
     use tower::ServiceExt as _;
-    let mut registry = Registry::<Action, (Action, u32), u32, Rejected>::new();
+    let mut registry = Table::<Action, (Action, u32), u32, Rejected>::new();
     let route = tower::ServiceBuilder::new()
         .map_request(|mut request: Request<(Action, u32)>| {
             assert_eq!(request.extensions().get::<u64>(), Some(&41));
@@ -223,13 +227,17 @@ async fn registry_service_composes_common_and_route_layers_without_losing_contex
             .clone()
             .oneshot(Request::new(context.clone(), (Action::Increment, 0)))
             .await,
-        Err(DispatchError::Handler(Rejected(0)))
+        Err(tok_execution::Error::Inner(DispatchError::Handler(
+            Rejected(0)
+        )))
     ));
     assert!(matches!(
         service
             .oneshot(Request::new(context, (Action::Missing, 7)))
             .await,
-        Err(DispatchError::Unknown(Action::Missing))
+        Err(tok_execution::Error::Inner(DispatchError::Unknown(
+            Action::Missing
+        )))
     ));
 }
 
@@ -240,7 +248,7 @@ async fn service_clones_share_non_clone_selector_and_stop_before_selection_or_un
     let selections = Arc::new(std::sync::Mutex::new(0));
     let observed = Arc::clone(&selections);
     let non_clone = std::sync::Mutex::new(Action::Increment);
-    let mut registry = Registry::new();
+    let mut registry = Table::new();
     registry
         .register_service(Action::Increment, NeverReady(Arc::clone(&polls)))
         .unwrap();
@@ -255,7 +263,7 @@ async fn service_clones_share_non_clone_selector_and_stop_before_selection_or_un
             .clone()
             .oneshot(Request::new(context(Duration::from_secs(1), stop), ()))
             .await,
-        Err(DispatchError::Stopped(StopReason::Cancelled))
+        Err(tok_execution::Error::Stopped(StopReason::Cancelled))
     ));
     assert_eq!(*selections.lock().unwrap(), 0);
     assert_eq!(polls.load(Ordering::SeqCst), 0);
@@ -266,7 +274,7 @@ async fn service_clones_share_non_clone_selector_and_stop_before_selection_or_un
                 ()
             ))
             .await,
-        Err(DispatchError::Stopped(StopReason::DeadlineExceeded))
+        Err(tok_execution::Error::Stopped(StopReason::DeadlineExceeded))
     ));
     assert_eq!(*selections.lock().unwrap(), 1);
     assert!(polls.load(Ordering::SeqCst) > 0);
@@ -277,7 +285,7 @@ async fn slow_key_selection_cannot_dispatch_or_return_a_late_unknown_result() {
     use tower::ServiceExt as _;
     let calls = Arc::new(AtomicUsize::new(0));
     for selected in [Action::Increment, Action::Missing] {
-        let mut registry = Registry::<Action, (), (), Rejected>::new();
+        let mut registry = Table::<Action, (), (), Rejected>::new();
         let calls = Arc::clone(&calls);
         registry
             .register(Action::Increment, move |_| {
@@ -296,7 +304,7 @@ async fn slow_key_selection_cannot_dispatch_or_return_a_late_unknown_result() {
                     ()
                 ))
                 .await,
-            Err(DispatchError::Stopped(StopReason::DeadlineExceeded))
+            Err(tok_execution::Error::Stopped(StopReason::DeadlineExceeded))
         ));
     }
     assert_eq!(calls.load(Ordering::SeqCst), 0);
