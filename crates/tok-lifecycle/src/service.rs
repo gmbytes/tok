@@ -104,7 +104,8 @@ impl From<task::Error> for Error {
 /// ```compile_fail
 /// use std::{sync::Arc, time::Duration};
 /// use tok_core::Extensions;
-/// use tok_service::lifecycle::{Factory, Builder};
+/// use tok_lifecycle::Factory;
+/// use tok_lifecycle::Builder;
 /// async fn build_twice(builder: Builder, factory: Arc<dyn Factory>) {
 ///     let first = builder.build(Arc::clone(&factory), Extensions::default(), Duration::from_secs(1)).await;
 ///     let second = builder.build(factory, Extensions::default(), Duration::from_secs(1)).await;
@@ -202,7 +203,7 @@ impl Builder {
 /// 初始化成功的服务；只能消费一次以启动，不能重新初始化或提前发布就绪。
 ///
 /// ```compile_fail
-/// use tok_service::lifecycle::Prepared;
+/// use tok_lifecycle::Prepared;
 /// fn start_twice(prepared: Prepared) {
 ///     let first = prepared.start();
 ///     let second = prepared.start();

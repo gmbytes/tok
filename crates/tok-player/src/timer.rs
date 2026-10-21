@@ -28,3 +28,14 @@ pub enum TimerUpdate {
         cancel: Vec<String>,
     },
 }
+
+/// 玩家会话调度器产生的一次计时触发；业务调用与计时需求分别表达。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TimerTrigger {
+    /// 调度范围内的稳定 timer 标识。
+    pub timer_id: String,
+    /// 本次触发原定的 UTC Unix 毫秒时刻。
+    pub scheduled_at_ms: i64,
+    /// 实际开始驱动业务的 UTC Unix 毫秒时刻。
+    pub fired_at_ms: i64,
+}

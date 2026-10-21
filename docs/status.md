@@ -4,7 +4,7 @@
 
 ## crate 与基础契约
 
-玩家运行契约已独立为 [tok-player](../crates/tok-player/src/lib.rs)，分库提交为 `9f32c91`；游戏协议 CallContext 位于 [tok-game-rpc](../crates/tok-game-rpc/src/context.rs)。Context / Source / StopReason 归 tok-service，Extensions 独立为 tok_core::Extensions。core 删除 tokio-util 与 tracing 依赖，当前只依赖 serde / thiserror。
+玩家运行契约已独立为 [tok-player](../crates/tok-player/src/lib.rs)，分库提交为 `9f32c91`；游戏协议 CallContext 位于 [tok-game-rpc](../crates/tok-game-rpc/src/context.rs)。Context / StopReason 归 tok-execution，Extensions 独立为 tok_core::Extensions。core 删除 tokio-util 与 tracing 依赖，当前只依赖 serde / thiserror。
 
 | core 范围 | 当前职责与接口 |
 | --- | --- |
@@ -12,7 +12,7 @@
 | discovery | ServiceDirectory 读本地快照，ServiceRegistry 发布/撤销，DirectoryWatch 合并变更通知 |
 | routing | ServiceRouter 根据服务名与业务 ID 选点，不负责发现写入或自动重试 |
 | lock | Key / Lease / Backend 定义请求级租约，后端在 infra、中间件在 RPC |
-| 根导出 | Extensions 是类型化能力集合，TimerTrigger 是通用计时来源，BoxFuture 是不隐含 Result 的 Send Future 别名 |
+| 根导出 | Extensions 是类型化能力集合，BoxFuture 是不隐含 Result 的 Send Future 别名 |
 
 锁、所有权和发现统一使用 BoxFuture，并显式保留 core::Result 或 player::Result。原 Operation 与 RegistrationTask 别名移除；根导出的 ServiceDirectory 等角色名前缀有辨识用途，继续保留。DirectoryStateUnavailable 表达目录本地状态不可用，Unsupported 表达当前组件不支持能力；错误类别按 core 声明的契约定义，不收集 Redis、RPC 或玩家业务专有错误。
 
@@ -34,7 +34,7 @@ AGENTS.md 已记录有官方依据的 API 组织规则：功能命名空间公�
 | --- | --- | --- |
 | 应用组装 | [Application](../crates/tok/src/application.rs) 复用共同 Factory / Builder，配置驱动共享监听、发现、就绪与退出；[RPC 组装](../crates/tok/src/application/rpc.rs) 自动注入初始化绑定 | 自定义 protobuf 可逐服务绑定，或显式注册完整端点；同一端点不混用两种方式 |
 | 无端点服务 | ServiceConfig.endpoint 可省略，纯事件/后台服务使用同一生命周期 | 不发布网络地址，不注入 application::Binding；需要发现查询时由组装层注入 |
-| 执行与中间件 | [service::Context](../crates/tok-service/src/context.rs)、[Request / Tower Layer](../crates/tok-service/src/lib.rs) 用于 RPC、事件、timer 与网关消息链 | 保留具体协议、输入/结果类型、可信入口校验和调度边界，无通用路由器/熔断器 |
+| 执行与中间件 | [execution::Context](../crates/tok-execution/src/context.rs)、[Request / Tower Layer](../crates/tok-execution/src/lib.rs) 用于 RPC、事件、timer 与网关消息链 | 保留具体协议、输入/结果类型、可信入口校验和调度边界，无通用路由器/熔断器 |
 | 服务生命周期 | Factory / Init 初始化，Builder → Prepared → Running 消费式编排；task::Supervisor 驱动有界工作 | 主任务、后台故障及退出期限由所有者监督，不创建隐藏的任务运行时 |
 | RPC | [tok-rpc](../crates/tok-rpc/src/lib.rs) 提供连接、端点和通用执行；[tok-game-rpc](../crates/tok-game-rpc/src/lib.rs) 提供游戏消息、事件、timer 及可选请求锁 | RPC 工厂初始化必须安装处理链，未安装不发布；同一端点不能覆盖同名 protobuf 服务 |
 | 事件 | [Registry](../crates/tok-events/src/registry.rs) 本地借用及远程解码共用处理表，有序多处理者、原始错误及 Arc 保留 | 本地 dispatch 显式等待；远程发布不等待业务结果，不提供事务或隐式去重 |
@@ -73,7 +73,7 @@ release 示例构建通过；release 二进制对全部 8 份示例配置校验�
 
 P1–P7 方向校正完成本轮验收，P7 随本次提交交付。后续功能仍按明确边界另行设计，当前不提供吞吐或延迟压测结论。
 
-## tok-service API 与错误校正（2026-10-21）
+## 调用执行与生命周期 API 错误校正（2026-10-21）
 
 保留调用执行、task 与 lifecycle 的职责边界及公开功能命名空间；Request 与同步 handler 移入私有实现模块，根导出不变。InitTask 更名 InitFuture，复用 core::BoxFuture；task::Task 保留监督任务语义。任务预留和提交改用 SubmitError，区分容量不足、停止、入口关闭及名称非法；任务与服务错误的 Task 变体改名 Join。执行 Error::Inner 通过标准 source 暴露原始错误，任务 panic 时完成报告保留原名称；修正通用任务范围、初始化取消及 256 字节名称限制的中文文本。调用方与 rustdoc 指南同步迁移，不保留旧名称兼容别名。本轮不做 release 构建。
 
@@ -84,3 +84,25 @@ P1–P7 方向校正完成本轮验收，P7 随本次提交交付。后续功能
 通用 tok-rpc 保留 RpcClients / RpcEndpoint / Server，通过泛型请求和 Tower 接入任意协议；正常依赖移除 tok-player / tok-events / tok-proto。新增 tok-game-rpc 承载游戏 CallContext、Handler / HandlerRegistry、玩家与普通业务协议客户端、绑定槽、通知编码及 timer / 事件 / 请求锁适配。门面从 game_rpc 访问游戏协议，rpc 访问通用设施；移除通用 CallHandler 上的事件契约，不提供旧路径兼容别名。Application 的普通自定义 protobuf 绑定继续使用通用端点，游戏 register_rpc_factory 使用新协议适配。客户端 Frame、内部 protobuf、事件 topic、timer、租约和无自动重试语义保持原有约束；事件与 timer 入口仍仅供可信服务端。
 
 本轮 Windows 验收：工作区 255 项测试通过（包含 12 项指南示例和 2 项编译失败文档测试），31 项外部专项跳过；通用 RPC 新增 3 项无游戏类型执行测试，游戏 RPC 的事件入口隔离、身份、timer、共享连接、追踪及请求锁专项通过。全目标 Clippy、workspace rustdoc、application / lifecycle smoke、格式、UTF-8/LF、内部文档链接及空白检查通过。cargo tree 核对通用 RPC 的正常依赖不含玩家、事件或游戏 protobuf。不做 release 构建；未运行真实 Redis/NATS 专项或 Linux，本轮随本次提交交付。
+
+## 调用执行与生命周期分库（2026-10-21）
+
+原 tok-service 拆为 tok-execution 与 tok-lifecycle。tok-execution 保留 Context / StopReason、Request、Tower Layer / Service、Call 和 SyncHandler；tok-lifecycle 根导出 Factory / Init / InitFuture、Builder / Prepared / Running、Handle / Phase / Error，task 模块保留 Supervisor / Handle / Reservation / Task 等通用监督能力。两库共同依赖 tok-core，彼此无依赖；tok-lifecycle 不依赖 Tower、RPC、事件或玩家协议。门面路径改为 tok::execution / tok::lifecycle，不提供旧 tok-service 或 tok::service 兼容路径。
+
+应用、RPC、事件、网关、示例及指南使用新路径；服务启动就绪、任务容量、预算取消、退出等待及线协议语义不变。本轮不做 release 构建。
+
+本轮 Windows 验收：工作区 255 项测试通过，31 项外部专项按约定跳过，包含 12 项指南示例及 2 项消费式生命周期编译失败文档测试；全目标 Clippy、workspace rustdoc、lifecycle / execution smoke、格式、200 个文本文件 UTF-8/LF 及 82 处内部文档链接检查通过。依赖树确认两库无相互依赖、tok-lifecycle 无 Tower 依赖。未运行真实 Redis/NATS 专项、Linux 或 release 构建；本轮随本次提交交付。
+
+## 执行上下文移除固定来源（2026-10-21）
+
+Context 移除 source 字段、Source 枚举和构造/child 的来源参数。执行核心只管理服务、操作、期限、取消、追踪和 Extensions。RPC、事件与网关在入口提供类型化扩展：复用游戏 CallContext、EventId / Topic / Arc<Message>、TimerTrigger，仅网关新增无正文的 ClientRequest 关联标识。RPC 关联信息与事件元信息可以共存，不再将传输方式、触发原因和客户端入口混成互斥枚举。
+
+事件 Registry 的本地与远端分发提供相同事件头，派生子上下文覆盖当前事件头，不修改父扩展；本地派生仍清除继承的原始编码。客户端无法发布事件、请求与 timer 分表、会话身份校验、预算和取消约束保持不变；Extensions 元信息不作为认证证明。调用方和指南已迁移，不保留 Source 兼容类型。
+
+本轮 Windows 验收：工作区 255 项测试通过、31 项外部专项跳过；回归覆盖 RPC 与事件元信息共存、当前事件头覆盖继承值但不修改父上下文、原始消息保留和客户端请求标识。全目标 Clippy、workspace rustdoc、execution / application smoke、格式、UTF-8/LF 与内部链接检查通过。未做 release 构建，未运行真实 Redis/NATS 或 Linux；本轮随本次提交交付。
+
+## 玩家计时触发契约归属校正（2026-10-21）
+
+TimerTrigger 从 tok-core 移至 tok-player，与 TimerSpec / TimerUpdate 聚合，门面路径为 tok::player::TimerTrigger。core 移除 timer 模块及根导出，不保留兼容别名；网关调度、玩家执行与游戏 RPC 统一消费新路径。通用执行测试和示例使用本地扩展类型，不为计时元信息依赖玩家库。内部 protobuf 与计时调度、预算及取消语义不变。本轮不做 release 构建。
+
+本轮 Windows 验收：受影响的 core / execution / player / game-rpc / gateway 共 132 项测试通过、2 项外部专项跳过；demo 生产测试 2 项、指南示例 12 项通过。全目标编译与 Clippy、workspace rustdoc、execution smoke、格式、199 个文本文件 UTF-8/LF 与内部文档链接检查通过。未重复无关外部专项或完整工作区测试；未做 release 构建或 Linux 验证，本轮随本次提交交付。

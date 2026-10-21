@@ -16,8 +16,8 @@ use std::{
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use tok_core::TimerTrigger;
 use tok_infra::ownership::MemoryOwnership;
+use tok_player::TimerTrigger;
 use tok_player::{
     LogicalMessage, MessageKind, TimerSpec, TimerUpdate,
     ownership::{Owner as SessionOwner, Store as OwnershipStore},
@@ -41,7 +41,7 @@ struct TestExecutor {
 impl Executor for TestExecutor {
     fn execute_request(
         &self,
-        input: tok_service::Request<crate::player::RequestInput>,
+        input: tok_execution::Request<crate::player::RequestInput>,
     ) -> Task<'_> {
         let crate::player::RequestInput {
             identity: _identity,
@@ -67,7 +67,7 @@ impl Executor for TestExecutor {
             })
         })
     }
-    fn execute_timer(&self, input: tok_service::Request<crate::player::TimerInput>) -> Task<'_> {
+    fn execute_timer(&self, input: tok_execution::Request<crate::player::TimerInput>) -> Task<'_> {
         let crate::player::TimerInput {
             identity,
             request_id: _request_id,

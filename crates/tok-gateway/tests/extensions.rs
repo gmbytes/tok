@@ -12,6 +12,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tok_core::{Extensions, service::Identity};
+use tok_execution::Request;
 use tok_gateway::{
     ErrorCode, Gateway, GatewayError, Result,
     codec::{FrameCodec, VERSION},
@@ -26,14 +27,10 @@ use tok_gateway::{
     protocol::{self, Frame, frame::Content},
 };
 use tok_infra::ownership::MemoryOwnership;
+use tok_lifecycle::{Builder, Init, InitFuture, task::Task};
 use tok_player::{
     LogicalMessage, MessageKind, TimerSpec, TimerUpdate,
     ownership::{Owner as SessionOwner, Store as OwnershipStore},
-};
-use tok_service::{
-    Request,
-    lifecycle::{Builder, Init, InitFuture},
-    task::Task,
 };
 use tokio::{
     net::{TcpListener, TcpStream},
@@ -143,6 +140,13 @@ struct Execution(Arc<Counts>);
 impl Executor for Execution {
     fn execute_request(&self, request: Request<RequestInput>) -> player::Task<'_> {
         Box::pin(async move {
+            assert_eq!(
+                request.context.extensions().get::<player::ClientRequest>(),
+                Some(&player::ClientRequest {
+                    request_id: request.input.message.request_id,
+                    message_id: request.input.message.message_id,
+                })
+            );
             request
                 .context
                 .extensions()
@@ -333,8 +337,8 @@ struct Fixture {
     address: std::net::SocketAddr,
     manager: SessionManager,
     gateway: tok_gateway::Handle,
-    service: tok_service::lifecycle::Handle,
-    task: Option<tokio::task::JoinHandle<std::result::Result<(), tok_service::lifecycle::Error>>>,
+    service: tok_lifecycle::Handle,
+    task: Option<tokio::task::JoinHandle<std::result::Result<(), tok_lifecycle::Error>>>,
     counts: Arc<Counts>,
     ownership: Arc<MemoryOwnership>,
 }

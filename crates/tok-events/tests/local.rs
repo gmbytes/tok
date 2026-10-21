@@ -2,7 +2,7 @@
 mod support;
 use std::sync::Arc;
 use tok_events::{DispatchError, Envelope, Error, Event, EventId, Input, Registry};
-use tok_service::{Request, sync_handler};
+use tok_execution::{Request, sync_handler};
 struct Changed(i32);
 impl Event for Changed {
     const NAME: &'static str = "test.changed.v1";
@@ -163,15 +163,14 @@ async fn cancellation_and_deadline_are_not_renewed_for_nested_events() {
         registry
             .dispatch(&mut (), Request::new(context, &changed(1)))
             .await,
-        Err(DispatchError::Stopped(tok_service::StopReason::Cancelled))
+        Err(DispatchError::Stopped(tok_execution::StopReason::Cancelled))
     ));
-    let context = tok_service::Context::new(
+    let context = tok_execution::Context::new(
         tok_core::service::Identity {
             node_id: "n".into(),
             service_name: "s".into(),
         },
         "parent",
-        tok_service::Source::Rpc { request_id: 1 },
         std::time::Duration::ZERO,
         tokio_util::sync::CancellationToken::new(),
     )
@@ -182,7 +181,7 @@ async fn cancellation_and_deadline_are_not_renewed_for_nested_events() {
             .dispatch(&mut (), Request::new(context, &changed(1)))
             .await,
         Err(DispatchError::Stopped(
-            tok_service::StopReason::DeadlineExceeded
+            tok_execution::StopReason::DeadlineExceeded
         ))
     ));
 }

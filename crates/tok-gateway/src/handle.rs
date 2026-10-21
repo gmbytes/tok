@@ -5,7 +5,7 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 use tok_core::{Extensions, service::Identity};
-use tok_service::task;
+use tok_lifecycle::task;
 use tokio::sync::{Semaphore, watch};
 use tokio_util::sync::CancellationToken;
 

@@ -31,7 +31,7 @@ fn handler(
     delay: Duration,
     fail: bool,
 ) -> impl tower::Service<
-    tok_service::Request<(CallContext, Payload)>,
+    tok_execution::Request<(CallContext, Payload)>,
     Response = CallResponse,
     Error = Status,
     Future: Send,
@@ -51,21 +51,20 @@ fn handler(
         }
     })
 }
-fn execution<T>(input: T) -> tok_service::Request<T> {
-    let context = tok_service::Context::new(
+fn execution<T>(input: T) -> tok_execution::Request<T> {
+    let context = tok_execution::Context::new(
         tok_core::service::Identity {
             node_id: "node-a".into(),
             service_name: "guild".into(),
         },
         "test",
-        tok_service::Source::Rpc { request_id: 1 },
         Duration::from_secs(30),
         tokio_util::sync::CancellationToken::new(),
     )
     .unwrap();
-    tok_service::Request::new(context, input)
+    tok_execution::Request::new(context, input)
 }
-fn request() -> tok_service::Request<(CallContext, Payload)> {
+fn request() -> tok_execution::Request<(CallContext, Payload)> {
     execution((context(), Payload::default()))
 }
 
@@ -305,7 +304,7 @@ async fn business_rpc_on_two_nodes_shares_locks_after_target_validation() {
             Arc::clone(&peak),
         );
         let handler = tower::service_fn(
-            move |request: tok_service::Request<(CallContext, Payload)>| {
+            move |request: tok_execution::Request<(CallContext, Payload)>| {
                 let (context, _payload) = request.input;
                 let (calls, active, total, peak) = (
                     Arc::clone(&calls),
@@ -438,7 +437,7 @@ async fn encoded_business_failure_is_preserved_when_release_fails() {
 
 #[derive(Clone)]
 struct NeverReady;
-impl tower::Service<tok_service::Request<(CallContext, Payload)>> for NeverReady {
+impl tower::Service<tok_execution::Request<(CallContext, Payload)>> for NeverReady {
     type Response = CallResponse;
     type Error = Status;
     type Future = tok_game_rpc::CallTask<'static>;
@@ -448,7 +447,7 @@ impl tower::Service<tok_service::Request<(CallContext, Payload)>> for NeverReady
     ) -> std::task::Poll<Result<(), Status>> {
         std::task::Poll::Pending
     }
-    fn call(&mut self, _: tok_service::Request<(CallContext, Payload)>) -> Self::Future {
+    fn call(&mut self, _: tok_execution::Request<(CallContext, Payload)>) -> Self::Future {
         panic!("未就绪时不得执行业务")
     }
 }

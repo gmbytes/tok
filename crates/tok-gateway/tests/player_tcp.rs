@@ -71,7 +71,7 @@ struct TestExecutor(Arc<Tracker>);
 impl Executor for TestExecutor {
     fn execute_event(
         &self,
-        input: tok_service::Request<tok_gateway::player::EventInput>,
+        input: tok_execution::Request<tok_gateway::player::EventInput>,
     ) -> tok_gateway::player::EventTask<'_> {
         let context = input.context;
         let tok_gateway::player::EventInput {
@@ -82,7 +82,7 @@ impl Executor for TestExecutor {
         Box::pin(async move {
             self.0.events.lock().unwrap().push(request_id);
             let reply = self
-                .execute_request(tok_service::Request::new(
+                .execute_request(tok_execution::Request::new(
                     context,
                     tok_gateway::player::RequestInput {
                         identity,
@@ -103,7 +103,7 @@ impl Executor for TestExecutor {
 
     fn execute_request(
         &self,
-        input: tok_service::Request<tok_gateway::player::RequestInput>,
+        input: tok_execution::Request<tok_gateway::player::RequestInput>,
     ) -> Task<'_> {
         let tok_gateway::player::RequestInput {
             identity,
@@ -2004,19 +2004,18 @@ async fn built_in_event_handlers_and_custom_components_compose_independently() {
     fixture.finish().await;
 }
 
-fn event_request<T>(input: T) -> tok_service::Request<T> {
-    let context = tok_service::Context::new(
+fn event_request<T>(input: T) -> tok_execution::Request<T> {
+    let context = tok_execution::Context::new(
         tok_core::service::Identity {
             node_id: "test".into(),
             service_name: "gateway".into(),
         },
         "test",
-        tok_service::Source::Rpc { request_id: 1 },
         Duration::from_secs(5),
         CancellationToken::new(),
     )
     .unwrap();
-    tok_service::Request::new(context, input)
+    tok_execution::Request::new(context, input)
 }
 
 fn tok_core_identity() -> tok_core::service::Identity {

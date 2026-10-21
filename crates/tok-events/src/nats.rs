@@ -434,13 +434,15 @@ impl Subscription {
                         #[expect(clippy::let_underscore_must_use, reason="追踪关联失败不能阻断有效业务事件。")]
                         let _ = span.set_parent(parent);
                     }
-                    let mut context = tok_service::Context::new(
+                    let mut context = tok_execution::Context::new(
                         self.service.clone(), format!("event/{}", message.event_type),
-                        tok_service::Source::Event { event_id: message.event_id.to_string() },
                         Duration::from_millis(self.bus.config.handler_timeout_ms), shutdown.child_token(),
                     ).map_err(|_| Error::InvalidInput("事件执行上下文无效"))?.with_span(span.clone());
                     *context.extensions_mut() = self.extensions.clone();
-                    let request = tok_service::Request::new(context, message);
+                    context.extensions_mut().insert(message.event_id.clone());
+                    context.extensions_mut().insert(message.topic.clone());
+                    context.extensions_mut().insert(Arc::clone(&message));
+                    let request = tok_execution::Request::new(context, message);
                     let result = tokio::select! {
                         biased;
                         () = shutdown.cancelled() => break Ok(()),

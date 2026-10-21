@@ -171,7 +171,7 @@ pub fn handlers(
     registry.register_timer_service(
         ProductionFinished::MESSAGE_ID,
         tok::game_rpc::tower::service_fn(
-            move |request: tok::service::Request<(CallContext, ProductionFinished)>| {
+            move |request: tok::execution::Request<(CallContext, ProductionFinished)>| {
                 let execution = request.context;
                 let context = request.input.0;
                 let state = Arc::clone(&state);
@@ -196,7 +196,7 @@ pub fn handlers(
                     )
                     .map_err(|error| Status::internal(error.to_string()))?;
                     production
-                        .dispatch(stored, tok::service::Request::new(execution, &event))
+                        .dispatch(stored, tok::execution::Request::new(execution, &event))
                         .await
                         .map_err(|error| match error {
                             tok::events::DispatchError::Handler(error) => error,

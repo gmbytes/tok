@@ -26,7 +26,7 @@ impl TopicTransport {
             fail_at: AtomicUsize::new(0),
         }
     }
-    pub fn pool(self: &Arc<Self>, tasks: tok_service::task::Handle) -> Pool {
+    pub fn pool(self: &Arc<Self>, tasks: tok_lifecycle::task::Handle) -> Pool {
         let components = ["a", "b"].map(|name| {
             (
                 name.into(),
@@ -59,7 +59,7 @@ impl Handler for Ignore {
     fn event_types(&self) -> Vec<&str> {
         vec!["test.topic"]
     }
-    fn handle(&self, _: tok_service::Request<Arc<Message>>) -> Task<'_> {
+    fn handle(&self, _: tok_execution::Request<Arc<Message>>) -> Task<'_> {
         Box::pin(async { Ok(Outcome::Ignored) })
     }
 }

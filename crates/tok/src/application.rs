@@ -7,11 +7,9 @@ use tok_core::discovery::ServiceRegistry;
 use tok_core::{Extensions, service::Identity};
 use tok_core::{ServiceDescriptor, ServiceDirectory};
 use tok_infra::discovery::{MemoryDirectory, redis::RedisDirectory};
+use tok_lifecycle as lifecycle;
+use tok_lifecycle::{Builder, Factory, Handle, task::BoxError};
 use tok_rpc::{RpcEndpoint, RpcReadiness};
-use tok_service::{
-    lifecycle::{self, Builder, Factory, Handle},
-    task::BoxError,
-};
 use tokio::task::{JoinError, JoinSet};
 /// 服务协作退出的取消令牌；详细 API 见 tokio-util 上游文档。
 pub use tokio_util::sync::CancellationToken;
@@ -445,7 +443,7 @@ fn unexpected(result: Option<ServiceCompletion>) -> Error {
 }
 
 fn task_error(service_name: String, source: BoxError) -> Error {
-    match source.downcast::<tok_service::lifecycle::Error>() {
+    match source.downcast::<tok_lifecycle::Error>() {
         Ok(error) => service_error(&service_name, *error, false),
         Err(source) => Error::Run {
             service_name,
@@ -454,7 +452,7 @@ fn task_error(service_name: String, source: BoxError) -> Error {
     }
 }
 
-fn service_error(name: &str, error: tok_service::lifecycle::Error, starting: bool) -> Error {
+fn service_error(name: &str, error: tok_lifecycle::Error, starting: bool) -> Error {
     match error {
         lifecycle::Error::InitializationTimeout => Error::StartTimeout(name.into()),
         lifecycle::Error::Join(error) => Error::Task(error),

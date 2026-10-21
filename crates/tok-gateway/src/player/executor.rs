@@ -2,13 +2,14 @@
 
 use crate::{ErrorCode, Result};
 use std::{future::Future, pin::Pin, sync::Arc};
-use tok_core::{ServiceRouter, TimerTrigger};
+use tok_core::ServiceRouter;
 use tok_game_rpc::CallContext;
 use tok_game_rpc::{
     player::Client,
     protocol::internal::v1::Payload,
     tonic::{Code, Status},
 };
+use tok_player::TimerTrigger;
 use tok_player::{LogicalMessage, MessageKind, SessionIdentity, TimerSpec, TimerUpdate};
 
 /// 单次玩家调用的结果，受 session 的调用期限控制。
@@ -31,6 +32,15 @@ impl From<LogicalMessage> for Reply {
             timers: None,
         }
     }
+}
+
+/// 可信客户端请求的关联标识；不含正文，不作为认证或分发依据。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClientRequest {
+    /// 当前客户端请求关联序号。
+    pub request_id: u64,
+    /// 已准入的业务消息 ID。
+    pub message_id: u32,
 }
 
 /// 客户端业务执行输入，身份由会话所有权确定。
@@ -63,13 +73,13 @@ pub struct TimerInput {
 /// 只在 session FIFO 和所有权检查之后执行的业务扩展点，使用共同执行上下文。
 pub trait Executor: Send + Sync {
     /// 执行服务器事件；默认拒绝，不自动向客户端回应。
-    fn execute_event(&self, _request: tok_service::Request<EventInput>) -> EventTask<'_> {
+    fn execute_event(&self, _request: tok_execution::Request<EventInput>) -> EventTask<'_> {
         Box::pin(async { Err(ErrorCode::UnknownMessage.into()) })
     }
     /// 执行已准入的客户端业务请求。
-    fn execute_request(&self, request: tok_service::Request<RequestInput>) -> Task<'_>;
+    fn execute_request(&self, request: tok_execution::Request<RequestInput>) -> Task<'_>;
     /// 执行内部 timer；默认拒绝未支持的来源。
-    fn execute_timer(&self, _request: tok_service::Request<TimerInput>) -> Task<'_> {
+    fn execute_timer(&self, _request: tok_execution::Request<TimerInput>) -> Task<'_> {
         Box::pin(async { Err(ErrorCode::UnknownMessage.into()) })
     }
 }
@@ -131,7 +141,7 @@ impl RpcExecutor {
 }
 
 impl Executor for RpcExecutor {
-    fn execute_event(&self, request: tok_service::Request<EventInput>) -> EventTask<'_> {
+    fn execute_event(&self, request: tok_execution::Request<EventInput>) -> EventTask<'_> {
         let EventInput {
             identity,
             request_id,
@@ -171,10 +181,10 @@ impl Executor for RpcExecutor {
         })
     }
 
-    fn execute_request(&self, request: tok_service::Request<RequestInput>) -> Task<'_> {
+    fn execute_request(&self, request: tok_execution::Request<RequestInput>) -> Task<'_> {
         self.call(request.input.identity, request.input.message, None)
     }
-    fn execute_timer(&self, request: tok_service::Request<TimerInput>) -> Task<'_> {
+    fn execute_timer(&self, request: tok_execution::Request<TimerInput>) -> Task<'_> {
         let TimerInput {
             identity,
             request_id,

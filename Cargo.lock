@@ -1976,13 +1976,14 @@ dependencies = [
  "thiserror",
  "tok-core",
  "tok-events",
+ "tok-execution",
  "tok-game-rpc",
  "tok-gateway",
  "tok-infra",
+ "tok-lifecycle",
  "tok-observability",
  "tok-player",
  "tok-rpc",
- "tok-service",
  "tokio",
  "tokio-util",
  "toml",
@@ -2010,14 +2011,28 @@ dependencies = [
  "serde",
  "thiserror",
  "tok-core",
+ "tok-execution",
+ "tok-lifecycle",
  "tok-proto",
- "tok-service",
  "tokio",
  "tokio-util",
  "tower",
  "tracing",
  "tracing-opentelemetry",
  "uuid",
+]
+
+[[package]]
+name = "tok-execution"
+version = "0.1.0"
+dependencies = [
+ "thiserror",
+ "tok-core",
+ "tokio",
+ "tokio-util",
+ "tower",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -2029,11 +2044,12 @@ dependencies = [
  "prost",
  "tok-core",
  "tok-events",
+ "tok-execution",
  "tok-infra",
+ "tok-lifecycle",
  "tok-player",
  "tok-proto",
  "tok-rpc",
- "tok-service",
  "tokio",
  "tokio-stream",
  "tokio-util",
@@ -2058,10 +2074,11 @@ dependencies = [
  "thiserror",
  "tok-core",
  "tok-events",
+ "tok-execution",
  "tok-game-rpc",
  "tok-infra",
+ "tok-lifecycle",
  "tok-player",
- "tok-service",
  "tokio",
  "tokio-util",
  "tower",
@@ -2082,6 +2099,18 @@ dependencies = [
  "tokio",
  "tokio-util",
  "uuid",
+]
+
+[[package]]
+name = "tok-lifecycle"
+version = "0.1.0"
+dependencies = [
+ "thiserror",
+ "tok-core",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -2134,7 +2163,7 @@ dependencies = [
  "opentelemetry",
  "thiserror",
  "tok-core",
- "tok-service",
+ "tok-execution",
  "tokio",
  "tokio-stream",
  "tokio-util",
@@ -2142,19 +2171,6 @@ dependencies = [
  "tower",
  "tracing",
  "tracing-opentelemetry",
-]
-
-[[package]]
-name = "tok-service"
-version = "0.1.0"
-dependencies = [
- "thiserror",
- "tok-core",
- "tokio",
- "tokio-util",
- "tower",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]

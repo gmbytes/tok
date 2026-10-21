@@ -3,12 +3,13 @@ use super::{Application, Error};
 use std::convert::Infallible;
 use std::{collections::BTreeMap, sync::Arc};
 use tok_game_rpc::RpcService;
+use tok_lifecycle as lifecycle;
+use tok_lifecycle::Factory;
 use tok_rpc::{
     RpcEndpoint,
     tonic::{body::Body, codegen::http, server::NamedService},
     tower::Service,
 };
-use tok_service::lifecycle::{self, Factory};
 
 type EndpointBinding = Box<dyn FnOnce(RpcEndpoint) -> Result<RpcEndpoint, tok_rpc::Error> + Send>;
 pub(super) struct Registration {

@@ -13,10 +13,7 @@ use tok::{
     application::{self, Application},
     core::ServiceDirectory,
     game_rpc::{HandlerRegistry, RpcEndpoint, RpcService},
-    service::{
-        lifecycle::{self, Init, InitFuture},
-        task::Task,
-    },
+    lifecycle::{self, Init, InitFuture, task::Task},
 };
 
 struct Factory {

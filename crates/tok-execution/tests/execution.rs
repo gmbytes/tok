@@ -9,40 +9,33 @@ use std::{
     task::{Context as TaskContext, Poll},
     time::Duration,
 };
-use tok_core::{TimerTrigger, service::Identity};
-use tok_service::{Context, Source, StopReason};
-use tok_service::{Error, Request};
+use tok_core::service::Identity;
+use tok_execution::{Context, Error, Request, StopReason};
 use tokio_util::sync::CancellationToken;
 use tower::{Layer, Service, ServiceExt, service_fn};
+
+#[derive(Debug, Clone)]
+struct Tick {
+    fired_at_ms: i64,
+}
 
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
 #[error("业务拒绝：{0}")]
 struct Rejected(u32);
-fn context(
-    operation: &str,
-    source: Source,
-    budget: Duration,
-    cancellation: CancellationToken,
-) -> Context {
+fn context(operation: &str, budget: Duration, cancellation: CancellationToken) -> Context {
     Context::new(
         Identity {
             node_id: "node".into(),
             service_name: "service".into(),
         },
         operation,
-        source,
         budget,
         cancellation,
     )
     .unwrap()
 }
 fn call_context(operation: &str) -> Context {
-    context(
-        operation,
-        Source::Rpc { request_id: 1 },
-        Duration::from_secs(2),
-        CancellationToken::new(),
-    )
+    context(operation, Duration::from_secs(2), CancellationToken::new())
 }
 #[derive(Clone)]
 struct AuditLayer(Arc<Mutex<Vec<String>>>);
@@ -126,7 +119,7 @@ fn add<'a>(
 async fn one_layer_handles_rpc_client_event_and_timer_with_typed_results_and_borrowed_state() {
     let log = Arc::new(Mutex::new(Vec::new()));
     let audit = AuditLayer(Arc::clone(&log));
-    let budget = tok_service::Layer;
+    let budget = tok_execution::Layer;
     let rpc = budget.layer(audit.layer(service_fn(|request: Request<u32>| {
         ready(Ok::<_, Rejected>(request.input + 1))
     })));
@@ -137,14 +130,7 @@ async fn one_layer_handles_rpc_client_event_and_timer_with_typed_results_and_bor
         42
     );
     let parent = call_context("outer");
-    let child = parent
-        .child(
-            "event",
-            Source::Event {
-                event_id: "event:7".into(),
-            },
-        )
-        .unwrap();
+    let child = parent.child("event").unwrap();
     assert_eq!(child.deadline(), parent.deadline());
     let mut state = State::default();
     let event = Added { delta: 5 };
@@ -157,14 +143,7 @@ async fn one_layer_handles_rpc_client_event_and_timer_with_typed_results_and_bor
     let invalid = Added { delta: -1 };
     let error = event_handler
         .oneshot(Request::new(
-            parent
-                .child(
-                    "rejected",
-                    Source::Event {
-                        event_id: "event:8".into(),
-                    },
-                )
-                .unwrap(),
+            parent.child("rejected").unwrap(),
             (&mut state, &invalid),
         ))
         .await
@@ -175,38 +154,28 @@ async fn one_layer_handles_rpc_client_event_and_timer_with_typed_results_and_bor
         request.input.value += 2;
         ready(Ok::<_, Rejected>(request.input.value))
     })));
-    let client = parent
-        .child(
-            "client",
-            Source::Client {
-                request_id: 9,
-                message_id: 12,
-            },
-        )
-        .unwrap();
+    let client = parent.child("client").unwrap();
     assert_eq!(
         sync.oneshot(Request::new(client, &mut state))
             .await
             .unwrap(),
         7
     );
-    let trigger = TimerTrigger {
-        timer_id: "production".into(),
-        scheduled_at_ms: 1,
-        fired_at_ms: 2,
-    };
+    let trigger = Tick { fired_at_ms: 2 };
     let timer = budget.layer(audit.layer(service_fn(|request: Request<()>| {
-        ready(Ok::<_, Rejected>(match request.context.source() {
-            Source::Timer(trigger) => Some(trigger.fired_at_ms),
-            _ => None,
-        }))
+        ready(Ok::<_, Rejected>(
+            request
+                .context
+                .extensions()
+                .get::<Tick>()
+                .map(|trigger| trigger.fired_at_ms),
+        ))
     })));
+    let mut timer_context = parent.child("timer").unwrap();
+    timer_context.extensions_mut().insert(trigger);
     assert_eq!(
         timer
-            .oneshot(Request::new(
-                parent.child("timer", Source::Timer(trigger)).unwrap(),
-                ()
-            ))
+            .oneshot(Request::new(timer_context, ()))
             .await
             .unwrap(),
         Some(2)
@@ -256,14 +225,13 @@ impl Service<Request<()>> for NotReady {
 async fn readiness_is_inside_the_budget_and_never_starts_business_after_expiry() {
     let polls = Arc::new(AtomicUsize::new(0));
     let calls = Arc::new(AtomicUsize::new(0));
-    let service = tok_service::Layer.layer(NotReady {
+    let service = tok_execution::Layer.layer(NotReady {
         polls: Arc::clone(&polls),
         calls: Arc::clone(&calls),
         failure: false,
     });
     let context = context(
         "waiting",
-        Source::Rpc { request_id: 1 },
         Duration::from_millis(50),
         CancellationToken::new(),
     );
@@ -283,7 +251,7 @@ async fn readiness_is_inside_the_budget_and_never_starts_business_after_expiry()
 #[tokio::test]
 async fn readiness_errors_keep_the_original_error_type() {
     let calls = Arc::new(AtomicUsize::new(0));
-    let service = tok_service::Layer.layer(NotReady {
+    let service = tok_execution::Layer.layer(NotReady {
         polls: Arc::new(AtomicUsize::new(0)),
         calls: Arc::clone(&calls),
         failure: true,
@@ -318,17 +286,10 @@ async fn parent_cancellation_wakes_and_drops_inflight_work() {
     });
     let parent = call_context("parent");
     let cancellation = parent.cancellation();
-    let child = parent
-        .child(
-            "child",
-            Source::Event {
-                event_id: "event:cancel".into(),
-            },
-        )
-        .unwrap();
+    let child = parent.child("child").unwrap();
     // owned 调用自动满足 Send，可交给运行时；借用调用不要求这么做。
     let task = tokio::spawn(
-        tok_service::Layer
+        tok_execution::Layer
             .layer(inner)
             .oneshot(Request::new(child, ())),
     );
@@ -361,7 +322,7 @@ async fn dropping_call_releases_borrowed_handler_without_cancelling_parent() {
         }
     });
     let mut future = Box::pin(
-        tok_service::Layer
+        tok_execution::Layer
             .layer(inner)
             .oneshot(Request::new(parent, &mut state)),
     );
@@ -382,7 +343,6 @@ async fn cancelled_or_expired_calls_do_not_poll_readiness_or_execute_handlers() 
         let token = CancellationToken::new();
         let context = context(
             "stopped",
-            Source::Rpc { request_id: 1 },
             if cancelled {
                 Duration::from_secs(1)
             } else {
@@ -395,7 +355,7 @@ async fn cancelled_or_expired_calls_do_not_poll_readiness_or_execute_handlers() 
         }
         let polls = Arc::new(AtomicUsize::new(0));
         let calls = Arc::new(AtomicUsize::new(0));
-        let service = tok_service::Layer.layer(NotReady {
+        let service = tok_execution::Layer.layer(NotReady {
             polls: Arc::clone(&polls),
             calls: Arc::clone(&calls),
             failure: false,
@@ -412,14 +372,9 @@ async fn a_non_cooperative_handler_cannot_return_success_after_the_original_dead
         std::thread::sleep(Duration::from_millis(40));
         ready(Ok::<_, Rejected>(42))
     });
-    let context = context(
-        "late",
-        Source::Rpc { request_id: 1 },
-        Duration::from_millis(10),
-        CancellationToken::new(),
-    );
+    let context = context("late", Duration::from_millis(10), CancellationToken::new());
     assert!(matches!(
-        tok_service::Layer
+        tok_execution::Layer
             .layer(inner)
             .oneshot(Request::new(context, ()))
             .await,
@@ -439,14 +394,7 @@ async fn captured_span_is_active_before_and_after_an_async_yield() {
             call_context("trace")
         };
         let parent = context.span().id();
-        let child = context
-            .child(
-                "trace.event",
-                Source::Event {
-                    event_id: "trace:1".into(),
-                },
-            )
-            .unwrap();
+        let child = context.child("trace.event").unwrap();
         assert_eq!(child.span().id(), parent);
         let handler = service_fn(move |_request: Request<()>| {
             let expected = expected.clone();
@@ -457,7 +405,7 @@ async fn captured_span_is_active_before_and_after_an_async_yield() {
                 Ok::<_, Rejected>(())
             }
         });
-        tok_service::Layer
+        tok_execution::Layer
             .layer(handler)
             .oneshot(Request::new(child, ()))
             .await
@@ -476,19 +424,12 @@ async fn ordered_borrowed_event_handlers_stop_on_the_first_business_error() {
     }
     let handlers: [EventHandler; 3] = [add, reject, add];
     let parent = call_context("parent");
-    let child = parent
-        .child(
-            "ordered",
-            Source::Event {
-                event_id: "ordered:1".into(),
-            },
-        )
-        .unwrap();
+    let child = parent.child("ordered").unwrap();
     let mut state = State::default();
     let event = Added { delta: 3 };
     let result = async {
         for handler in handlers {
-            tok_service::Layer
+            tok_execution::Layer
                 .layer(service_fn(handler))
                 .oneshot(Request::new(child.clone(), (&mut state, &event)))
                 .await?;

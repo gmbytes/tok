@@ -9,7 +9,8 @@ license.workspace = true
 [dependencies]
 tok-core.workspace = true
 tok-player.workspace = true
-tok-service.workspace = true
+tok-execution.workspace = true
+tok-lifecycle.workspace = true
 tok-events.workspace = true
 tok-gateway.workspace = true
 tok-infra.workspace = true

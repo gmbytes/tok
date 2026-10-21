@@ -9,7 +9,7 @@ tok 是实验性的 Rust 游戏服务器框架。游戏通过本 crate 组装组
 | 范围 | 接口与边界 |
 | --- | --- |
 | 服务构建与运行 | Factory / Init / Builder / Running；Application 按配置组装，Gateway 作为扩展 |
-| 统一处理协议 | Request / service::Context / Tower Layer；保留各入口的输入、结果及调度约束 |
+| 统一处理协议 | Request / execution::Context / Tower Layer；保留各入口的输入、结果及调度约束 |
 | RPC 与事件 | 配置驱动的 RPC 工厂、统一事件 Registry，本地借用与远程解码共用处理链 |
 | 主题兴趣 | Event::topic 决定路由，Pool 聚合固定与会话兴趣，group 属于订阅组件 |
 | 生命周期扩展 | 网关、管理器、会话快照与结束等待，会话状态工厂及显式交接适配 |
@@ -40,23 +40,24 @@ tok-gateway 是这套基础设施的内置扩展，增加连接、认证、sessi
 | 使用入口 | 职责 |
 | --- | --- |
 | [`core`] / tok-core | 服务身份、Extensions、发现、路由和通用请求锁契约 |
-| [`service`] / tok-service | Context / Source / StopReason、Request、Tower 执行、服务工厂、生命周期和有界任务监督 |
-| [`player`] / tok-player | SessionIdentity、LogicalMessage、TimerSpec / TimerUpdate、所有权与恢复凭证契约 |
+| [`execution`] / tok-execution | Context / StopReason、Request、Tower 调用执行与 handler 适配 |
+| [`lifecycle`] / tok-lifecycle | 服务工厂、生命周期编排和有界任务监督 |
+| [`player`] / tok-player | SessionIdentity、LogicalMessage、TimerSpec / TimerTrigger / TimerUpdate、所有权与恢复凭证契约 |
 | [`rpc`] / tok-rpc | 通用 Channel 缓存、共享端点、追踪、期限及类型化执行，不理解游戏正文 |
 | [`game_rpc`] / tok-game-rpc | CallContext、RPC 编解码、客户端和处理链适配 |
 | [`gateway`] / tok-gateway | 连接、session FIFO、计时调度、下行和恢复的运行实现 |
 
-通用服务层不依赖 tok-player。tok-player 只依赖 tok-core，供 RPC、网关和基础设施后端共同使用，不能反向依赖 gateway 或门面。[`core::TimerTrigger`] 只表达通用调度来源；玩家具体调用哪个消息、携带什么正文以及如何更新计时集合，由 player 的计时需求表达。
+调用执行层和生命周期层均不依赖 tok-player，彼此也不依赖。tok-player 只依赖 tok-core，供 RPC、网关和基础设施后端共同使用，不能反向依赖 gateway 或门面。[`player::TimerTrigger`] 表达玩家会话的实际计时触发，与同库 TimerSpec / TimerUpdate 组成计时契约；通用执行设施不依赖这些类型。
 
-所有权使用 [`player::ownership::Store`]、[`player::ownership::Owner`]、[`player::ownership::Record`]；恢复凭证使用 [`player::credentials::ResumeTokenCodec`]。它们的结果为 [`player::Result`]，所有权冲突与本地凭证不可用属于 [`player::Error`]；通用参数或后端错误保留在 Error::Core 中。请求锁仍使用 core::lock，不要求玩家会话。锁、所有权与发现接口统一使用 [`core::BoxFuture`]，其中输出参数是完整类型，不隐含 Result。锁与发现返回 `BoxFuture<'a, core::Result<T>>`，所有权返回 `BoxFuture<'a, player::Result<T>>`。此别名不会自行排队、启动或监督任务；service::task::Task 继续表达交给监督范围的工作。原 Operation 与 RegistrationTask 别名已移除。
+所有权使用 [`player::ownership::Store`]、[`player::ownership::Owner`]、[`player::ownership::Record`]；恢复凭证使用 [`player::credentials::ResumeTokenCodec`]。它们的结果为 [`player::Result`]，所有权冲突与本地凭证不可用属于 [`player::Error`]；通用参数或后端错误保留在 Error::Core 中。请求锁仍使用 core::lock，不要求玩家会话。锁、所有权与发现接口统一使用 [`core::BoxFuture`]，其中输出参数是完整类型，不隐含 Result。锁与发现返回 `BoxFuture<'a, core::Result<T>>`，所有权返回 `BoxFuture<'a, player::Result<T>>`。此别名不会自行排队、启动或监督任务；lifecycle::task::Task 继续表达交给监督范围的工作。原 Operation 与 RegistrationTask 别名已移除。
 
-迁移时将旧 core 下的玩家类型改从 player 导入，将 CallContext 改从 game_rpc 导入；Context / Source / StopReason 改从 service 导入，Extensions 改从 core 根导入；不保留旧路径兼容别名。game_rpc::player 是 PlayerRpc 客户端适配，gateway::player 是会话运行实现，顶层 player 是共享契约，职责不同。
+迁移时将旧 core 下的玩家类型改从 player 导入，将 CallContext 改从 game_rpc 导入；Context / StopReason 改从 execution 导入，Extensions 改从 core 根导入；不保留旧路径兼容别名。game_rpc::player 是 PlayerRpc 客户端适配，gateway::player 是会话运行实现，顶层 player 是共享契约，职责不同。
 
 ## 公开路径与内部模块
 
 公开 API 按使用者的功能概念组织，内部文件组织通过 mod 隐藏，主要入口可以由 pub use 重导出。此规则来自 Rust 官方对公开 API 与内部结构解耦的指导，不是固定目录模板。公开模块路径与根路径可以同时存在，指向同一定义，不要求只保留一个路径。
 
-core::discovery / lock / routing / service 是功能命名空间；常用的 Identity、ServiceDescriptor、ServiceDirectory、ServiceRegistry、DirectoryWatch 和 ServiceRouter 同时可从 core 根导入。Error / Result、Extensions、TimerTrigger 和 BoxFuture 直接从根访问，其实现模块私有。通常可导入主要类型；使用锁接口等一组相关项时保留模块限定名，避免 Key / Lease 等通用名字失去上下文。
+core::discovery / lock / routing / service 是功能命名空间；常用的 Identity、ServiceDescriptor、ServiceDirectory、ServiceRegistry、DirectoryWatch 和 ServiceRouter 同时可从 core 根导入。Error / Result、Extensions 和 BoxFuture 直接从根访问，其实现模块私有。通常可导入主要类型；使用锁接口等一组相关项时保留模块限定名，避免 Key / Lease 等通用名字失去上下文。
 
 例如服务身份既可使用 `use tok::core::Identity`，也可使用 `use tok::core::service::Identity`；错误分类说明位于公开的 Error 类型文档，不需要访问内部 error 模块。根导出的角色名前缀按辨识价值保留，不因路径形式机械删改。
 
@@ -68,15 +69,15 @@ core::discovery / lock / routing / service 是功能命名空间；常用的 Ide
 
 ## 通用执行与处理链
 
-使用 [`service::Context`]、类型化 [`service::Request`] 与共同的 [`service::Layer`]。
+使用 [`execution::Context`]、类型化 [`execution::Request`] 与共同的 [`execution::Layer`]。
 上下文的 `service()` 表示当前执行所属服务，`operation()` 是入口适配器填写的稳定操作标识，不拼接实体或请求 ID。业务实体身份、路由输入等按需使用类型化输入或扩展携带；当前未提供通用路由器或熔断器。
-执行上下文、类型化执行与生命周期统一位于 tok-service，类型化能力容器使用 tok_core::Extensions；普通服务与 gateway 共用，网关另行增加会话能力及专用协议状态机。
+执行上下文和类型化处理链位于 tok-execution，服务构建、生命周期和任务监督位于 tok-lifecycle，两者只共同依赖 tok-core；类型化能力容器使用 tok_core::Extensions；普通服务与 gateway 共用这两组设施，网关另行增加会话能力及专用协议状态机。
 
 以下普通 Rust 输入不要求 protobuf，本地状态直接借用，经过 await 后仍在当前任务中修改：
 
 ```rust
 use std::{io, time::Duration};
-use tok::{service::{Context, Source, Layer as ExecutionLayer, Request}, core::Identity, application::CancellationToken};
+use tok::{execution::{Context, Layer as ExecutionLayer, Request}, core::Identity, application::CancellationToken};
 use tower::{Layer, ServiceExt, service_fn};
 
 async fn update(request: Request<&mut u64>) -> io::Result<u64> {
@@ -88,7 +89,7 @@ async fn update(request: Request<&mut u64>) -> io::Result<u64> {
 # async fn example() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 let context = Context::new(
     Identity { node_id: "local".into(), service_name: "counter".into() },
-    "counter.changed", Source::Event { event_id: "example:1".into() },
+    "counter.changed",
     Duration::from_secs(2), CancellationToken::new(),
 )?;
 let mut value = 0;
@@ -103,7 +104,16 @@ assert_eq!((result, value), (1, 1));
 
 Context::child 继承当前服务身份、原截止点、追踪和扩展，父取消向子传播，子取消不关闭父调用。
 Extensions 共享类型化能力；插入 Arc 状态等能力由游戏明确选择，不强制把本地 &mut 状态转换为共享锁。
-Source 是可信入口的关联信息，构造这个类型本身不构成认证；远程适配仍需验证元数据。
+Context 不固定调用来源。入口适配器通过 Extensions 提供自己的类型化元信息，各维度可同时存在：
+
+| 入口 | 已提供的扩展 |
+| --- | --- |
+| 游戏 RPC | [`game_rpc::CallContext`]；timer 调用另有 [`player::TimerTrigger`] |
+| 事件分发 | [`events::EventId`]、[`events::Topic`]；编码接收另保留 `Arc<events::Message>` |
+| 玩家请求准入与执行 | [`gateway::player::ClientRequest`]，只含 request_id / message_id |
+| session 事件与 timer 执行 | 事件头及原始 `Arc<Message>`，或既有 TimerTrigger |
+
+事件 Registry 派生子上下文，使用当前事件的 ID / topic 覆盖继承值，不改变父上下文；本地派生事件清除继承的原始编码消息。其余扩展按 Context::child 规则保留，因此 RPC 关联信息与事件头可以共存。这些值用于中间件观察，不构成认证或分发权限；请求、事件和 timer 仍由各自协议入口及分发表隔离。
 
 ExecutionLayer 将内层就绪与执行放入同一预算，执行前后检查取消和截止点，丢弃 future 会停止本地等待，不回滚副作用。
 外层 poll_ready 立即就绪，内层 readiness 在调用 future 内等待；它不承诺内层立即可执行。
@@ -122,8 +132,7 @@ owned 输入满足相应 Send 条件时仍可交给运行时。P1 不增加隐�
 多个服务可以引用同一个端点；端点中的协议名由对应的传输组件解释。
 
 ```rust
-use tok::{AppConfig, core::ServiceDirectory, application::Application,
-    service::{lifecycle::{Init, Factory, InitFuture}, task::Task}};
+use tok::{AppConfig, core::ServiceDirectory, application::Application, lifecycle::{Init, Factory, InitFuture, task::Task}};
 
 struct GameService;
 
@@ -171,13 +180,13 @@ assert!(directory.snapshot("guild")?.is_empty());
 # }
 ```
 
-[`service::lifecycle::Factory::initialize`] 返回初始化 future；初始化完成后返回持续运行的服务任务。
+[`lifecycle::Factory::initialize`] 返回初始化 future；初始化完成后返回持续运行的服务任务。
 [`application::Application::run_until`] 监督任务，初始化失败、超时、提前结束或崩溃会触发整个进程清理。
-服务通过 [`service::lifecycle::Handle::cancellation`] 接收取消通知。
+服务通过 [`lifecycle::Handle::cancellation`] 接收取消通知。
 
-初始化返回 [`service::lifecycle::InitFuture`]，成功后提供受监督的 [`service::task::Task`]。
-任务容量预留与提交返回 [`service::task::SubmitError`]，可按 CapacityExceeded、Stopping、Closed、InvalidName 区分失败原因；名称须非空白且不超过 256 字节。提交成功仅表示入队。
-调用执行错误为 [`service::Error`]，内层错误通过标准 source 链保留；任务执行与退出错误为 [`service::task::Error`]，服务初始化与退出错误为 [`service::lifecycle::Error`]。后两者使用 Join 表示 Tokio 任务异常结束，正常返回错误使用 Run；任务完成报告在 panic 时仍保留提交名称。
+初始化返回 [`lifecycle::InitFuture`]，成功后提供受监督的 [`lifecycle::task::Task`]。
+任务容量预留与提交返回 [`lifecycle::task::SubmitError`]，可按 CapacityExceeded、Stopping、Closed、InvalidName 区分失败原因；名称须非空白且不超过 256 字节。提交成功仅表示入队。
+调用执行错误为 [`execution::Error`]，内层错误通过标准 source 链保留；任务执行与退出错误为 [`lifecycle::task::Error`]，服务初始化与退出错误为 [`lifecycle::Error`]。后两者使用 Join 表示 Tokio 任务异常结束，正常返回错误使用 Run；任务完成报告在 panic 时仍保留提交名称。
 
 默认初始化期限为 30 秒，整体退出期限为 10 秒，可通过
 [`application::Application::with_timeouts`] 调整。
@@ -185,7 +194,7 @@ assert!(directory.snapshot("guild")?.is_empty());
 
 ## 通用工厂与生命周期
 
-[`service::lifecycle::Factory`] 是公共构建契约，可实现 trait 或使用返回 InitFuture 的闭包。
+[`lifecycle::Factory`] 是公共构建契约，可实现 trait 或使用返回 InitFuture 的闭包。
 工厂创建状态、入口和 Tower 链，返回主任务；普通服务不要求网络端点或 session。
 Application 通过类型化 [`application::Binding`] 扩展注入端点和发现查询；RPC 入口可通过 RpcService::deferred 创建绑定槽，再在工厂中使用 game_rpc::Binding::install 安装实际处理链；示例 player/guild 已按此方式初始化状态。端点仍由 Application 共享监听，就绪后才接受调用。
 
@@ -193,18 +202,18 @@ Application 通过类型化 [`application::Binding`] 扩展注入端点和发现
 
 | 设施 | 职责及状态 |
 | --- | --- |
-| [`service::task::Supervisor`] | 通用任务所有者，驱动任务及有界退出；状态为 Open / Stopping / Stopped |
-| [`service::task::Handle`] | 提交任务、预留容量、查询使用量、请求停止和等待任务范围结束 |
-| [`service::lifecycle::Builder`] | 尚未初始化的服务；消费自身初始化，返回 Prepared |
-| [`service::lifecycle::Prepared`] | 初始化已完成；消费自身 start，将主任务交给监督并推进就绪 |
-| [`service::lifecycle::Running`] | 主任务已启动；run 监督服务策略并收束完整退出 |
-| [`service::lifecycle::Handle`] | 服务阶段、停止和结束等待；通过 tasks() 操作任务范围 |
+| [`lifecycle::task::Supervisor`] | 通用任务所有者，驱动任务及有界退出；状态为 Open / Stopping / Stopped |
+| [`lifecycle::task::Handle`] | 提交任务、预留容量、查询使用量、请求停止和等待任务范围结束 |
+| [`lifecycle::Builder`] | 尚未初始化的服务；消费自身初始化，返回 Prepared |
+| [`lifecycle::Prepared`] | 初始化已完成；消费自身 start，将主任务交给监督并推进就绪 |
+| [`lifecycle::Running`] | 主任务已启动；run 监督服务策略并收束完整退出 |
+| [`lifecycle::Handle`] | 服务阶段、停止和结束等待；通过 tasks() 操作任务范围 |
 
 下面的普通服务没有端点，初始化提交后台任务，再按唯一顺序启动、停止并等待退出：
 
 ```rust
 use std::{sync::Arc, time::Duration};
-use tok::{core::{Extensions, service::Identity}, application::CancellationToken, service::{lifecycle::{Init, Factory, Phase, InitFuture, Builder}, task::Task}};
+use tok::{core::{Extensions, service::Identity}, application::CancellationToken, lifecycle::{Init, Factory, Phase, InitFuture, Builder, task::Task}};
 
 fn initialize(init: Init) -> InitFuture {
     Box::pin(async move {
@@ -293,7 +302,7 @@ trace_sample_ratio = 0.1
 
 通用 RPC 设施从 [`rpc`] 导入；游戏消息、玩家事件、timer 和 CallContext 从 [`game_rpc`] 导入。后者的 RpcClients / RpcEndpoint 是通用类型的便捷重导出。
 
-自定义 protobuf 不需要依赖游戏协议：用 [`rpc::RpcClients::execute`] 包装生成客户端；服务端由 [`rpc::Server::context`] 建立预算、追踪和取消范围，再用 [`rpc::Server::execute`] 调用任意类型化 Tower Service。协议适配器负责认证、输入校验与操作名，Server 不负责解码或决定业务来源。
+自定义 protobuf 不需要依赖游戏协议：用 [`rpc::RpcClients::execute`] 包装生成客户端；服务端由 [`rpc::Server::context`] 建立预算、追踪和取消范围，再用 [`rpc::Server::execute`] 调用任意类型化 Tower Service。协议适配器负责认证、输入校验、操作名和类型化元信息，Server 不负责解码或决定业务入口。
 
 先用 [`game_rpc::HandlerRegistry`] 注册游戏消息，再用 [`game_rpc::RpcService`] 显式绑定节点和业务服务名。
 player 使用 `into_player`，普通业务服务使用 `into_business`，两者使用不同的 protobuf 服务。
@@ -305,9 +314,7 @@ player 使用 `into_player`，普通业务服务使用 `into_business`，两者�
 
 ```rust,no_run
 use std::sync::Arc;
-use tok::{AppConfig, game_rpc::{HandlerRegistry, RpcService},
-    application::{Application, shutdown_signal},
-    service::{lifecycle::{Init, InitFuture}, task::Task}};
+use tok::{AppConfig, game_rpc::{HandlerRegistry, RpcService}, application::{Application, shutdown_signal}, lifecycle::{Init, InitFuture, task::Task}};
 
 #[derive(Clone, PartialEq, prost::Message)]
 struct ReadGuild {
@@ -406,11 +413,7 @@ Redis 后端使用有限 TTL 和唯一持有者标识，Lua 比较身份后释�
 
 ```rust
 use std::sync::Arc;
-use tok::{
-    core::lock::Backend,
-    infra::locks,
-    game_rpc::{Handler, HandlerRegistry, RpcService, TowerHandler, lock, tower::{self, Layer}},
-};
+use tok::{core::lock::Backend, infra::locks, game_rpc::{Handler, HandlerRegistry, RpcService, TowerHandler, lock, tower::{self, Layer}}};
 
 # fn example() -> Result<(), Box<dyn std::error::Error>> {
 let backend: Arc<dyn Backend> = Arc::new(locks::Memory::new(1024)?);
@@ -600,8 +603,7 @@ protobuf 命名空间仍为 `tok.client.v1`，帧版本由 `VERSION` 决定；�
 
 ```rust,no_run
 use std::time::Duration;
-use tok::gateway::{codec::{FrameCodec, VERSION},
-    protocol::{Frame, LoginRequest, BusinessRequest, Ack, frame::Content}};
+use tok::gateway::{codec::{FrameCodec, VERSION}, protocol::{Frame, LoginRequest, BusinessRequest, Ack, frame::Content}};
 use tokio::net::TcpStream;
 
 #[tokio::main]
@@ -917,7 +919,7 @@ timer 失败或超时只记录本次失败，不重试；周期的后续触发�
 
 ```rust
 use std::sync::Arc;
-use tok::{game_rpc::{RpcService, HandlerRegistry}, service::{lifecycle::{Factory, Init, InitFuture}, task::Task}};
+use tok::{game_rpc::{RpcService, HandlerRegistry}, lifecycle::{Factory, Init, InitFuture, task::Task}};
 # fn example() -> Result<(), Box<dyn std::error::Error>> {
 let (endpoint, binding) = RpcService::deferred("node-a", "guild")?;
 let factory = move |init: Init| -> InitFuture {
@@ -949,12 +951,12 @@ RPC 默认服务执行上限为 30 秒，可用 `with_execution` 显式设置；
 `DELIVERY` 默认 Immediate；本地执行不应用传输投递策略。普通 Rust 事件无需 prost。
 
 [`events::Registry`] 同时保存多种事件，每种事件可按顺序注册多个处理者。容量按处理者总数计算。
-`register` 接收可跨 await 借用状态和事件的回调；`register_service` 安装相同输入的 Tower 链；同步回调通过 [`service::sync_handler`] 适配。
+`register` 接收可跨 await 借用状态和事件的回调；`register_service` 安装相同输入的 Tower 链；同步回调通过 [`execution::sync_handler`] 适配。
 `dispatch(...).await` 直接在当前任务执行，不 spawn、不进入 session 队列，不内部获取实体锁。
 
 ```rust
 use std::time::Duration;
-use tok::{service::{Context, Source, Request}, core::service::Identity, events::{Event, Envelope, EventId, Registry}};
+use tok::{execution::{Context, Request}, core::service::Identity, events::{Event, Envelope, EventId, Registry}};
 use tokio_util::sync::CancellationToken;
 struct Changed { delta: i64 }
 impl Event for Changed { const NAME: &'static str = "game.value.changed.v1"; }
@@ -967,7 +969,7 @@ events.register::<Changed, _>(|request| Box::pin(async move {
     Ok(())
 }))?;
 let parent = Context::new(Identity { node_id: "node-a".into(), service_name: "player".into() },
-    "update", Source::Rpc { request_id: 1 }, Duration::from_secs(1), CancellationToken::new())?;
+    "update", Duration::from_secs(1), CancellationToken::new())?;
 let event = Envelope::new(EventId::generate(), Changed { delta: 3 })?;
 let mut value = 0;
 let results = events.dispatch(&mut value, Request::new(parent, &event)).await?;
@@ -1158,7 +1160,7 @@ impl Event for ChatMessage {
         Topic::named(format!("chat:{}", self.channel_id))
     }
 }
-# async fn assemble(init: &tok::service::lifecycle::Init, ingress: Ingress, bus: events::nats::Bus, chat_message_id: u32)
+# async fn assemble(init: &tok::lifecycle::Init, ingress: Ingress, bus: events::nats::Bus, chat_message_id: u32)
 # -> Result<(Ingress, events::interest::Lease), Box<dyn std::error::Error + Send + Sync>> {
 // 由可信游戏策略选择初始频道；生产可从已验证身份和状态计算。
 let ingress = ingress.with_topic_policy(|_request| Ok(vec!["chat:7".into()]));
@@ -1257,8 +1259,7 @@ Scene 目前仅预留模块，不套用 Player 的串行与所有权语义。
 
 ```rust
 use std::sync::Arc;
-use tok::{player::LogicalMessage, gateway::player::{Executor, Pipeline, SessionHandle}, service::Request};
-use tok::game_rpc::tower::util::MapRequestLayer;
+use tok::{player::LogicalMessage, gateway::player::{Executor, Pipeline, SessionHandle}, execution::Request, game_rpc::tower::util::MapRequestLayer};
 fn pipeline(executor: Arc<dyn Executor>) -> Pipeline {
     let downlink = MapRequestLayer::new(|mut request: Request<LogicalMessage>| {
         // 此时尚未编号和编码；可查询当前会话并修改新消息正文。
@@ -1296,7 +1297,8 @@ fn pipeline(executor: Arc<dyn Executor>) -> Pipeline {
 | [`config`] | TOML 加载、校验与端点引用 |
 | [`application`] | 服务工厂、启动监督与退出 |
 | [`core`] | 共享类型、错误、Extensions 和基础组件契约 |
-| [`service`] | 类型化执行与预算/取消 Layer，以及公共工厂、任务监督和生命周期 |
+| [`execution`] | 类型化请求与预算/取消执行 Layer |
+| [`lifecycle`] | 公共工厂、任务监督和服务生命周期 |
 | [`infra`] | 服务目录、路由及协调后端 |
 | [`rpc`] | 内部 RPC 与 Tower 组装 |
 | [`gateway`] | 统一 Gateway 运行框架与已实现的 Player 接入；Scene 尚未实现 |

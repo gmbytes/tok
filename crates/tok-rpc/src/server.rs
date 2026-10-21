@@ -1,7 +1,7 @@
 //! 任意 RPC 协议适配器共用的执行期限、追踪与处理链。
 use std::time::Duration;
 use tok_core::{Extensions, Identity};
-use tok_service::{Context, Request, Source, StopReason};
+use tok_execution::{Context, Request, StopReason};
 use tokio_util::sync::CancellationToken;
 use tonic::{Status, metadata::MetadataMap};
 use tower::{Layer as _, Service, ServiceExt};
@@ -49,11 +49,10 @@ impl Server {
         self.extensions = extensions;
         Ok(self)
     }
-    /// 从 RPC 元数据建立原调用范围；来源与稳定操作名由可信协议适配器提供。
+    /// 从 RPC 元数据建立原调用范围；稳定操作名及协议扩展由可信适配器提供。
     pub fn context(
         &self,
         metadata: &MetadataMap,
-        source: Source,
         operation: impl Into<String>,
     ) -> Result<Context, Status> {
         let budget = request_budget(metadata, self.budget)?;
@@ -67,7 +66,6 @@ impl Server {
         let mut context = Context::new(
             self.identity.clone(),
             operation,
-            source,
             budget,
             self.cancellation.child_token(),
         )
@@ -87,16 +85,16 @@ impl Server {
             return Err(Status::failed_precondition("RPC 执行服务与入口不匹配"));
         }
         let started = std::time::Instant::now();
-        let result = tok_service::Layer
+        let result = tok_execution::Layer
             .layer(service)
             .oneshot(request)
             .await
             .map_err(|error| match error {
-                tok_service::Error::Inner(error) => error,
-                tok_service::Error::Stopped(StopReason::Cancelled) => {
+                tok_execution::Error::Inner(error) => error,
+                tok_execution::Error::Stopped(StopReason::Cancelled) => {
                     Status::cancelled("调用已取消")
                 }
-                tok_service::Error::Stopped(StopReason::DeadlineExceeded) => {
+                tok_execution::Error::Stopped(StopReason::DeadlineExceeded) => {
                     Status::deadline_exceeded("调用预算已耗尽")
                 }
             });

@@ -8,7 +8,7 @@
 | --- | --- | --- |
 | 组装与运行 | Application 复用 Factory / Init；RPC 按配置自动绑定，纯事件服务可无端点 | 端点、发现和处理链就绪分别检查，初始化失败不发布 |
 | 扩展能力 | 网关、manager、session 身份、快照、状态工厂、停止和等待 | 不暴露内部锁，不将具体游戏状态放入通用核心 |
-| 处理链 | Request / service::Context / Tower Layer 覆盖 RPC、事件、timer 与网关业务 | 保留各入口的协议和结果边界、FIFO 及所有权检查 |
+| 处理链 | Request / execution::Context / Tower Layer 覆盖 RPC、事件、timer 与网关业务 | 保留各入口的协议和结果边界、FIFO 及所有权检查 |
 | 事件路由 | Event::topic 默认全局，可固定或由正文派生；NATS 负责安全 subject 编码 | group 属于订阅组件，不强制广播或提供玩家归属路由 |
 | 主题兴趣 | Pool 按组件和主题聚合独立引用，异步成员操作，初始策略和交接就绪 | 逻辑会话宽限期/冻结保留兴趣，不补收即时事件 |
 
@@ -18,7 +18,7 @@
 
 本批统一工作的根本目标是建立框架通用的“服务 + 处理链”基础设施。tok-gateway 是复用该设施的内置扩展实例，面向通用游戏运行时提供连接和 session 等能力；不是要求其他服务继承或依赖的核心基类。普通 RPC/事件服务、gateway 和游戏自定义服务使用相同的构建、上下文、中间件和生命周期扩展契约。
 
-当前 tok crate 承担统一导出与 Application 组装，已经依赖 tok-gateway。共同设施必须位于二者可共同依赖的下层：通用基础契约归 tok-core，执行、构建和运行设施由 tok-service 承载；玩家会话、消息、计时需求、所有权与恢复凭证独立归 tok-player。tok-player 只依赖 tok-core，tok-service 和 tok-events 不依赖玩家契约。禁止通过 gateway 依赖 tok 门面形成循环，也不在 gateway 内复制共同执行器来绕过分层。完整职责表见[框架核心与扩展分层](design.md#框架核心与扩展分层)。
+当前 tok crate 承担统一导出与 Application 组装，已经依赖 tok-gateway。共同设施必须位于二者可共同依赖的下层：通用基础契约归 tok-core，调用执行设施由 tok-execution 承载，服务构建、生命周期和任务监督由 tok-lifecycle 承载；玩家会话、消息、计时需求、所有权与恢复凭证独立归 tok-player。tok-player 只依赖 tok-core，tok-execution、tok-lifecycle 和 tok-events 不依赖玩家契约。禁止通过 gateway 依赖 tok 门面形成循环，也不在 gateway 内复制共同执行器来绕过分层。完整职责表见[框架核心与扩展分层](design.md#框架核心与扩展分层)。
 
 构建时以普通服务和 gateway 两个最小样例验证：共同设施不导入 player/scene 或网关线协议；gateway 通过组合增加连接和会话能力；游戏从 tok 门面取得便捷组装入口，无需理解内部拆分。通用任务监督和生命周期由基础设施复用，各接入状态机继续承担自己的职责。
 
@@ -42,7 +42,7 @@ RPC / 客户端业务消息 / 本地或 NATS 事件 / timer
 
 ### 抽象执行上下文
 
-采用与消息类型、protobuf 和 gRPC 无关的 ExecutionContext。基本部分提供服务/节点身份、操作身份、可信来源、关联与追踪信息、剩余执行预算和取消信号。请求 ID、事件 ID、timer 来源按各自种类保留在类型化调用元数据中，不把它们强行解释为同一序号。
+采用与消息类型、protobuf 和 gRPC 无关的 Context。固定部分提供服务/节点身份、操作身份、追踪、剩余执行预算、取消信号和 Extensions。RPC 关联信息、事件 ID / topic、timer 触发及客户端标识由各层提供类型化元信息，可以同时存在；不使用互斥 Source 枚举，也不把它们解释为同一序号。
 
 运行时能力通过类型化扩展提供：普通服务取得自己的生命周期、状态与发布能力；网关入口增加 gateway 和 session manager 句柄；会话内执行再增加对应 session 句柄。普通服务不强制依赖 player，也不把大量可选网关字段堆入公共上下文。业务状态和消息正文分别传递，生命周期查询能力不等于任意写入内部状态的权限。
 
@@ -76,9 +76,9 @@ RPC 调用产生对应回应，事件产生当前 handler 的执行结果或允�
 
 ## P1 已验证的基础与适用边界
 
-执行上下文使用 `tok_service::Context`，同 crate 提供 Source 和 StopReason，负责调用期限、取消传播及追踪范围。类型化能力容器独立使用 `tok_core::Extensions`，只依赖标准库。服务身份使用 `tok_core::service::Identity`，不携带网络地址。
+执行上下文使用 `tok_execution::Context`，同 crate 提供 StopReason，负责调用期限、取消传播及追踪范围。类型化能力容器独立使用 `tok_core::Extensions`，只依赖标准库。服务身份使用 `tok_core::service::Identity`，不携带网络地址。
 
-实际执行设施放在 tok-service，使用既有 Tower 协议，不增加平行 Handler trait：Request<T> 可携带 owned 输入或局部借用，Layer 返回 Service<S>，调用 future 保留真实输入生命周期。执行核心只依赖基础契约、Tokio、Tower、tracing 等通用设施，不依赖 gateway、RPC、事件或 NATS。tok 门面统一导出；gateway 能力在游戏示例的组装层注入，不形成反向依赖。
+实际执行设施放在 tok-execution，使用既有 Tower 协议，不增加平行 Handler trait：Request<T> 可携带 owned 输入或局部借用，Layer 返回 Service<S>，调用 future 保留真实输入生命周期。执行核心只依赖基础契约、Tokio、Tower、tracing 等通用设施，不依赖 gateway、RPC、事件或 NATS。tok 门面统一导出；gateway 能力在游戏示例的组装层注入，不形成反向依赖。
 
 就绪等待放在预算 Layer 的调用 future 内；外层 poll_ready 只表示可以开始受保护的等待。原期限在派生调用中保留，取消在等待及执行期间唤醒并丢弃内层 future，非协作式处理者迟到返回也不能作为按时成功接受。此机制不回滚副作用，不等于进程级抢占或远端取消。
 
@@ -88,9 +88,9 @@ P1 只验证执行核心；P2 已提供下述工厂与生命周期设施。RPC/�
 
 ## P2 公共构建与生命周期落点
 
-公共工厂契约为 `tok_service::lifecycle::Factory`；Init 提供服务 Identity、服务 Handle 和类型化 Extensions。工厂初始化业务状态、入口和 Tower Layer，返回 `tok_service::task::Task` 主任务。闭包可直接实现契约，不要求普通服务有网络端点，也不增加平行的中间件或 handler trait；P3 已接入统一事件注册与 RPC 处理链适配。
+公共工厂契约为 `tok_lifecycle::Factory`；Init 提供服务 Identity、服务 Handle 和类型化 Extensions。工厂初始化业务状态、入口和 Tower Layer，返回 `tok_lifecycle::task::Task` 主任务。闭包可直接实现契约，不要求普通服务有网络端点，也不增加平行的中间件或 handler trait；P3 已接入统一事件注册与 RPC 处理链适配。
 
-公共设施按职责分成两层：`tok_service::task` 管理通用任务范围，`tok_service::lifecycle` 编排服务生命周期。前者不接收工厂，不知道服务 Ready，也不决定主任务提前结束是否错误。后者驱动 Factory，监督启动及运行故障，管理服务阶段与主任务清理。
+公共设施按职责分成两层：`tok_lifecycle::task` 管理通用任务范围，`tok_lifecycle` 编排服务生命周期。前者不接收工厂，不知道服务 Ready，也不决定主任务提前结束是否错误。后者驱动 Factory，监督启动及运行故障，管理服务阶段与主任务清理。
 
 服务启动顺序固定为 Builder → build → Prepared → start → Running → run。各步消费前一个对象，不能重复初始化、重复启动或跳过初始化。初始化成功仍为 Starting；只有 Prepared::start 将主任务交给监督并推进 Ready，Running::run 不隐式改变就绪。若启动前已收到停止通知，阶段保持 Stopping，主任务仍获得协作清理机会。句柄查询阶段统一由服务启动标记及任务范围状态计算，用户不能直接修改阶段。
 
@@ -278,3 +278,15 @@ JetStream、离线加载、全局去重、通用扇出中继、热配置、生�
 ## RPC 协议适配分层校正（2026-10-21）
 
 通用 tok-rpc 保留 RpcClients / RpcEndpoint / Server，通过泛型请求和 Tower 接入任意协议；正常依赖移除 tok-player / tok-events / tok-proto。新增 tok-game-rpc 承载游戏 CallContext、Handler / HandlerRegistry、玩家与普通业务协议客户端、绑定槽、通知编码及 timer / 事件 / 请求锁适配。门面从 game_rpc 访问游戏协议，rpc 访问通用设施；移除通用 CallHandler 上的事件契约，不提供旧路径兼容别名。Application 的普通自定义 protobuf 绑定继续使用通用端点，游戏 register_rpc_factory 使用新协议适配。客户端 Frame、内部 protobuf、事件 topic、timer、租约和无自动重试语义保持原有约束；事件与 timer 入口仍仅供可信服务端。
+
+## 调用执行与生命周期分库（2026-10-21）
+
+原 tok-service 拆为 tok-execution 与 tok-lifecycle。tok-execution 保留 Context / StopReason、Request、Tower Layer / Service、Call 和 SyncHandler；tok-lifecycle 根导出 Factory / Init / InitFuture、Builder / Prepared / Running、Handle / Phase / Error，task 模块保留 Supervisor / Handle / Reservation / Task 等通用监督能力。两库共同依赖 tok-core，彼此无依赖；tok-lifecycle 不依赖 Tower、RPC、事件或玩家协议。门面路径改为 tok::execution / tok::lifecycle，不提供旧 tok-service 或 tok::service 兼容路径。
+
+应用、RPC、事件、网关、示例及指南使用新路径；服务启动就绪、任务容量、预算取消、退出等待及线协议语义不变。本轮不做 release 构建。
+
+## 执行上下文移除固定来源（2026-10-21）
+
+Context 移除 source 字段、Source 枚举和构造/child 的来源参数。执行核心只管理服务、操作、期限、取消、追踪和 Extensions。RPC、事件与网关在入口提供类型化扩展：复用游戏 CallContext、EventId / Topic / Arc<Message>、TimerTrigger，仅网关新增无正文的 ClientRequest 关联标识。RPC 关联信息与事件元信息可以共存，不再将传输方式、触发原因和客户端入口混成互斥枚举。
+
+事件 Registry 的本地与远端分发提供相同事件头，派生子上下文覆盖当前事件头，不修改父扩展；本地派生仍清除继承的原始编码。客户端无法发布事件、请求与 timer 分表、会话身份校验、预算和取消约束保持不变；Extensions 元信息不作为认证证明。调用方和指南已迁移，不保留 Source 兼容类型。

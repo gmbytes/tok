@@ -1,11 +1,11 @@
 use crate::CallContext;
 use prost::Message;
 use std::{collections::BTreeMap, future::Future, pin::Pin, sync::Arc, time::Duration};
-use tok_core::{TimerTrigger, service::Identity};
+use tok_core::service::Identity;
+use tok_execution::{Request as ExecutionRequest, StopReason};
+use tok_player::TimerTrigger;
 use tok_player::{SessionIdentity, TimerUpdate};
 use tok_proto::internal::v1::{self as proto, CallRequest, CallResponse, Payload};
-use tok_service::Request as ExecutionRequest;
-use tok_service::{Source, StopReason};
 use tonic::{Request, Response, Status};
 use tower::{Layer as _, Service, ServiceExt};
 
@@ -159,7 +159,7 @@ impl HandlerRegistry {
                     let input = Req::decode(body.as_slice())
                         .map_err(|_| Status::invalid_argument("游戏消息解码失败"))?;
                     let id = call.request_id;
-                    let response = tok_service::Layer
+                    let response = tok_execution::Layer
                         .layer(service)
                         .oneshot(ExecutionRequest::new(request.context, (call, input)))
                         .await
@@ -256,7 +256,7 @@ impl HandlerRegistry {
                     let input = Req::decode(body.as_slice())
                         .map_err(|_| Status::invalid_argument("计时参数解码失败"))?;
                     let id = call.request_id;
-                    let timers = tok_service::Layer
+                    let timers = tok_execution::Layer
                         .layer(service)
                         .oneshot(ExecutionRequest::new(request.context, (call, input)))
                         .await
@@ -284,9 +284,11 @@ impl Handler for HandlerRegistry {
                 return Err(Status::invalid_argument("timer 不能进入事件入口"));
             }
             let id = call.request_id;
+            let mut context = request.context;
+            context.extensions_mut().insert(call.clone());
             let effects = self
                 .events
-                .receive(&mut call, ExecutionRequest::new(request.context, event))
+                .receive(&mut call, ExecutionRequest::new(context, event))
                 .await
                 .map_err(event_status)?;
             Ok(proto::EventResponse {
@@ -299,21 +301,24 @@ impl Handler for HandlerRegistry {
     fn call(&self, request: ExecutionRequest<(CallContext, Payload)>) -> CallTask<'_> {
         Box::pin(async move {
             let (call, payload) = request.input;
+            let mut request_context = request.context;
+            request_context.extensions_mut().insert(call.clone());
+            if let Some(trigger) = &call.timer {
+                request_context.extensions_mut().insert(trigger.clone());
+            } else {
+                drop(request_context.extensions_mut().remove::<TimerTrigger>());
+            }
             let timer = call.timer.is_some();
             let table = if timer { &self.timers } else { &self.handlers };
             let handler = table
                 .get(&payload.message_id)
                 .ok_or_else(|| Status::unimplemented("游戏消息尚未注册"))?;
-            let context = request
-                .context
-                .child(
-                    format!(
-                        "{}/{}",
-                        if timer { "timer" } else { "rpc" },
-                        payload.message_id
-                    ),
-                    request.context.source().clone(),
-                )
+            let context = request_context
+                .child(format!(
+                    "{}/{}",
+                    if timer { "timer" } else { "rpc" },
+                    payload.message_id
+                ))
                 .map_err(|_| Status::invalid_argument("调用执行上下文无效"))?;
             handler(ExecutionRequest::new(context, (call, payload.body))).await
         })
@@ -322,11 +327,11 @@ impl Handler for HandlerRegistry {
 fn configuration(error: tok_events::Error) -> crate::Error {
     crate::Error::Configuration(error.to_string())
 }
-fn execution_status(error: tok_service::Error<Status>) -> Status {
+fn execution_status(error: tok_execution::Error<Status>) -> Status {
     match error {
-        tok_service::Error::Inner(error) => error,
-        tok_service::Error::Stopped(StopReason::Cancelled) => Status::cancelled("调用已取消"),
-        tok_service::Error::Stopped(StopReason::DeadlineExceeded) => {
+        tok_execution::Error::Inner(error) => error,
+        tok_execution::Error::Stopped(StopReason::Cancelled) => Status::cancelled("调用已取消"),
+        tok_execution::Error::Stopped(StopReason::DeadlineExceeded) => {
             Status::deadline_exceeded("调用预算已耗尽")
         }
     }
@@ -337,7 +342,7 @@ fn event_status(error: tok_events::DispatchError<Status>) -> Status {
         tok_events::DispatchError::Invalid(error) => Status::invalid_argument(error.to_string()),
         tok_events::DispatchError::Unknown => Status::unimplemented("事件尚未注册"),
         tok_events::DispatchError::Stopped(reason) => {
-            execution_status(tok_service::Error::Stopped(reason))
+            execution_status(tok_execution::Error::Stopped(reason))
         }
     }
 }
@@ -531,10 +536,6 @@ impl RpcService {
             return Err(Status::invalid_argument("消息 ID 无效"));
         }
         let request_id = context.request_id;
-        let source = context
-            .timer
-            .clone()
-            .map_or(Source::Rpc { request_id }, Source::Timer);
         let operation = format!(
             "{}/{}",
             if context.timer.is_some() {
@@ -544,8 +545,11 @@ impl RpcService {
             },
             payload.message_id
         );
-        let mut execution = self.server.context(&metadata, source, operation)?;
+        let mut execution = self.server.context(&metadata, operation)?;
         execution.extensions_mut().insert(context.clone());
+        if let Some(trigger) = &context.timer {
+            execution.extensions_mut().insert(trigger.clone());
+        }
         let handler = Arc::clone(&self.handler);
         let mut response = self
             .server
@@ -589,19 +593,19 @@ impl proto::player_rpc_server::PlayerRpc for RpcService {
             .validate(1_048_576)
             .map_err(|_| Status::invalid_argument("事件参数无效"))?;
         let request_id = context.request_id;
-        let mut execution = self.server.context(
-            &metadata,
-            Source::Event {
-                event_id: event.event_id.to_string(),
-            },
-            format!("event/{}", event.event_type),
-        )?;
+        let mut execution = self
+            .server
+            .context(&metadata, format!("event/{}", event.event_type))?;
         execution.extensions_mut().insert(context.clone());
+        execution.extensions_mut().insert(event.event_id.clone());
+        execution.extensions_mut().insert(event.topic.clone());
+        let event = Arc::new(event);
+        execution.extensions_mut().insert(Arc::clone(&event));
         let handler = Arc::clone(&self.handler);
         let mut response = self
             .server
             .execute(
-                ExecutionRequest::new(execution, (context, Arc::new(event))),
+                ExecutionRequest::new(execution, (context, event)),
                 tower::service_fn(move |request| {
                     let handler = Arc::clone(&handler);
                     async move { handler.event(request).await }

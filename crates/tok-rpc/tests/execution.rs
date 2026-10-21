@@ -1,8 +1,8 @@
 //! 通用设施可接入任意输入、结果及借用，不依赖游戏协议。
 use std::time::Duration;
 use tok_core::{Extensions, Identity, ServiceDescriptor};
+use tok_execution::Request;
 use tok_rpc::{RpcClients, Server};
-use tok_service::{Request, Source};
 use tokio_util::sync::CancellationToken;
 use tonic::{Code, metadata::MetadataMap};
 
@@ -19,10 +19,8 @@ fn server(stop: CancellationToken) -> Server {
 async fn arbitrary_borrowed_input_and_result_use_the_common_execution_chain() {
     let server = server(CancellationToken::new());
     let mut value = String::from("custom");
-    let context = server
-        .context(&MetadataMap::new(), Source::Internal, "append")
-        .unwrap();
-    let service = tok_service::sync_handler(|request: Request<&mut String>| {
+    let context = server.context(&MetadataMap::new(), "append").unwrap();
+    let service = tok_execution::sync_handler(|request: Request<&mut String>| {
         request.input.push_str(" protocol");
         Ok::<_, tonic::Status>(request.input.len())
     });
@@ -41,29 +39,20 @@ async fn remote_budget_only_shortens_local_budget_and_stop_prevents_execution() 
     let server = server(stop.clone());
     let mut metadata = MetadataMap::new();
     metadata.insert("grpc-timeout", "1H".parse().unwrap());
-    let context = server.context(&metadata, Source::Internal, "test").unwrap();
+    let context = server.context(&metadata, "test").unwrap();
     assert!(context.remaining() <= Duration::from_secs(1));
     metadata.insert("grpc-timeout", "1m".parse().unwrap());
-    assert!(
-        server
-            .context(&metadata, Source::Internal, "test")
-            .unwrap()
-            .remaining()
-            <= Duration::from_millis(1)
-    );
+    assert!(server.context(&metadata, "test").unwrap().remaining() <= Duration::from_millis(1));
     metadata.insert("grpc-timeout", "invalid".parse().unwrap());
     assert_eq!(
-        server
-            .context(&metadata, Source::Internal, "test")
-            .unwrap_err()
-            .code(),
+        server.context(&metadata, "test").unwrap_err().code(),
         Code::InvalidArgument
     );
     stop.cancel();
     let result = server
         .execute(
             Request::new(context, ()),
-            tok_service::sync_handler(|_: Request<()>| -> Result<(), tonic::Status> {
+            tok_execution::sync_handler(|_: Request<()>| -> Result<(), tonic::Status> {
                 panic!("cancelled handler was polled")
             }),
         )

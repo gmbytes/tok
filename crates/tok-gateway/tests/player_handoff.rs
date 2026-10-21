@@ -114,7 +114,7 @@ impl Default for Execution {
 impl Executor for Execution {
     fn execute_event(
         &self,
-        input: tok_service::Request<tok_gateway::player::EventInput>,
+        input: tok_execution::Request<tok_gateway::player::EventInput>,
     ) -> tok_gateway::player::EventTask<'_> {
         let tok_gateway::player::EventInput {
             identity: _,
@@ -129,7 +129,7 @@ impl Executor for Execution {
 
     fn execute_request(
         &self,
-        input: tok_service::Request<tok_gateway::player::RequestInput>,
+        input: tok_execution::Request<tok_gateway::player::RequestInput>,
     ) -> Task<'_> {
         let tok_gateway::player::RequestInput {
             identity: _,
@@ -169,7 +169,7 @@ impl Executor for Execution {
     }
     fn execute_timer(
         &self,
-        input: tok_service::Request<tok_gateway::player::TimerInput>,
+        input: tok_execution::Request<tok_gateway::player::TimerInput>,
     ) -> Task<'_> {
         let tok_gateway::player::TimerInput {
             identity: _,
@@ -1054,7 +1054,7 @@ impl tok_gateway::player::session::extension::Factory for SessionExtension {
     }
     fn initialize(
         &self,
-        request: tok_service::Request<tok_player::SessionIdentity>,
+        request: tok_execution::Request<tok_player::SessionIdentity>,
     ) -> tok_gateway::Result<tok_core::Extensions> {
         let mut extensions = tok_core::Extensions::default();
         extensions.insert(ExtensionData {
@@ -1066,7 +1066,7 @@ impl tok_gateway::player::session::extension::Factory for SessionExtension {
     }
     fn snapshot(
         &self,
-        request: tok_service::Request<tok_gateway::player::SessionHandle>,
+        request: tok_execution::Request<tok_gateway::player::SessionHandle>,
     ) -> tok_gateway::Result<Vec<u8>> {
         if matches!(self.mode, ExtensionMode::TooLarge) {
             return Ok(vec![0; 65_537]);
@@ -1090,7 +1090,7 @@ impl tok_gateway::player::session::extension::Factory for SessionExtension {
     }
     fn restore(
         &self,
-        request: tok_service::Request<(tok_player::SessionIdentity, &[u8])>,
+        request: tok_execution::Request<(tok_player::SessionIdentity, &[u8])>,
     ) -> tok_gateway::Result<tok_core::Extensions> {
         self.validate(request.input.1)?;
         if matches!(self.mode, ExtensionMode::RejectRestore) {
@@ -1108,7 +1108,7 @@ impl tok_gateway::player::session::extension::Factory for SessionExtension {
     }
     fn on_change(
         &self,
-        request: tok_service::Request<tok_gateway::player::session::extension::Change>,
+        request: tok_execution::Request<tok_gateway::player::session::extension::Change>,
     ) {
         self.changes.lock().unwrap().push(request.input);
     }

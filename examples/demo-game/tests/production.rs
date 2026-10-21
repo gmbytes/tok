@@ -8,11 +8,11 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 use tok::{
-    core::TimerTrigger,
     game_rpc::{
         CallContext, Handler, protocol::internal::v1::Payload, timer::decode_update, tonic::Code,
     },
     infra::discovery::MemoryDirectory,
+    player::TimerTrigger,
     player::{SessionIdentity, TimerUpdate},
 };
 
@@ -229,17 +229,16 @@ async fn local_production_error_reaches_the_original_call_without_partial_state_
     assert_eq!(pending[0].due_at_ms, due);
 }
 
-fn execution<T>(input: T) -> tok::service::Request<T> {
-    let context = tok::service::Context::new(
+fn execution<T>(input: T) -> tok::execution::Request<T> {
+    let context = tok::execution::Context::new(
         tok::core::service::Identity {
             node_id: "node".into(),
             service_name: "player".into(),
         },
         "test",
-        tok::service::Source::Rpc { request_id: 1 },
         std::time::Duration::from_secs(5),
         tokio_util::sync::CancellationToken::new(),
     )
     .unwrap();
-    tok::service::Request::new(context, input)
+    tok::execution::Request::new(context, input)
 }

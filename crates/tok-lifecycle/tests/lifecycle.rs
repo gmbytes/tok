@@ -8,10 +8,7 @@ use std::{
     time::Duration,
 };
 use tok_core::{Extensions, service::Identity};
-use tok_service::{
-    lifecycle::{Builder, Error, Factory, Init, InitFuture, Phase},
-    task::Task,
-};
+use tok_lifecycle::{Builder, Error, Factory, Init, InitFuture, Phase, task::Task};
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
@@ -335,7 +332,7 @@ async fn service_completion_includes_component_cleanup_after_child_task_scope_en
     let factory: Arc<dyn Factory> = Arc::new(move |init: Init| -> InitFuture {
         let (ended, finished) = signals.lock().unwrap().take().unwrap();
         Box::pin(async move {
-            let child = tok_service::task::Supervisor::child(1, &init.service.tasks())?;
+            let child = tok_lifecycle::task::Supervisor::child(1, &init.service.tasks())?;
             Ok(Box::pin(async move {
                 init.service.cancellation().cancelled().await;
                 child.shutdown(None).await?;

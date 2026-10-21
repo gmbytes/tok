@@ -22,7 +22,7 @@ struct Capture(Arc<Mutex<Option<opentelemetry::trace::TraceId>>>);
 impl Handler for Capture {
     fn event(
         &self,
-        request: tok_service::Request<(CallContext, Arc<tok_events::Message>)>,
+        request: tok_execution::Request<(CallContext, Arc<tok_events::Message>)>,
     ) -> tok_game_rpc::EventTask<'_> {
         let context = request.input.0;
         Box::pin(async move {
@@ -40,7 +40,7 @@ impl Handler for Capture {
         })
     }
 
-    fn call(&self, request: tok_service::Request<(CallContext, Payload)>) -> CallTask<'_> {
+    fn call(&self, request: tok_execution::Request<(CallContext, Payload)>) -> CallTask<'_> {
         let (context, payload) = request.input;
         Box::pin(async move {
             *self.0.lock().unwrap() = Some(

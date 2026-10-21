@@ -33,7 +33,7 @@ impl Handler for Capture {
     fn event_types(&self) -> Vec<&str> {
         vec![Changed::NAME]
     }
-    fn handle(&self, request: tok_service::Request<Arc<Message>>) -> Task<'_> {
+    fn handle(&self, request: tok_execution::Request<Arc<Message>>) -> Task<'_> {
         Box::pin(async move {
             self.0.lock().unwrap().push(request.input);
             Ok(Outcome::Handled)
@@ -46,7 +46,7 @@ impl Handler for Interest {
     fn event_types(&self) -> Vec<&str> {
         vec![self.0]
     }
-    fn handle(&self, request: tok_service::Request<Arc<Message>>) -> Task<'_> {
+    fn handle(&self, request: tok_execution::Request<Arc<Message>>) -> Task<'_> {
         self.1.handle(request)
     }
 }

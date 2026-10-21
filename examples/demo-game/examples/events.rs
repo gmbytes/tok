@@ -3,7 +3,7 @@ use std::{sync::Arc, time::Duration};
 use tok::{
     core::service::Identity,
     events::{Envelope, Event, EventId, Message, Outcome, Registry},
-    service::{Context, Request, Source},
+    execution::{Context, Request},
 };
 use tokio_util::sync::CancellationToken;
 #[derive(Clone, PartialEq, prost::Message)]
@@ -21,7 +21,6 @@ fn context() -> Result<Context, tok::core::Error> {
             service_name: "counter".into(),
         },
         "counter",
-        Source::Rpc { request_id: 1 },
         Duration::from_secs(1),
         CancellationToken::new(),
     )

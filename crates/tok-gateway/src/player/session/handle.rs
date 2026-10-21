@@ -44,22 +44,24 @@ impl BoundSession {
             .channel
             .admit_request(&self.binding, request.request_id, || Ok(()))?;
         let original = (request.kind, request.request_id, request.message_id);
-        let context = self.session.context_with_cancellation(
+        let mut context = self.session.context_with_cancellation(
             format!("player/admission/{}", request.message_id),
-            tok_service::Source::Client {
-                request_id: request.request_id,
-                message_id: request.message_id,
-            },
             self.binding.cancellation.child_token(),
         )?;
+        context
+            .extensions_mut()
+            .insert(crate::player::ClientRequest {
+                request_id: request.request_id,
+                message_id: request.message_id,
+            });
         let pipeline = Arc::clone(&self.session.0.pipeline);
         use tower::{Layer as _, ServiceExt};
-        let request = tok_service::Layer
+        let request = tok_execution::Layer
             .layer(tower::service_fn(move |request| {
                 let pipeline = Arc::clone(&pipeline);
                 async move { pipeline.admit(request).await }
             }))
-            .oneshot(tok_service::Request::new(context, request))
+            .oneshot(tok_execution::Request::new(context, request))
             .await
             .map_err(super::worker::execution_error)?;
         if (request.kind, request.request_id, request.message_id) != original
@@ -227,16 +229,13 @@ impl SessionHandle {
         }
     }
     pub(super) fn changed(&self, change: super::extension::Change) {
-        let Ok(context) = self.context(
-            "player/session/change".into(),
-            tok_service::Source::Internal,
-        ) else {
+        let Ok(context) = self.context("player/session/change".into()) else {
             return;
         };
         if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             self.0
                 .extension
-                .on_change(tok_service::Request::new(context, change))
+                .on_change(tok_execution::Request::new(context, change))
         }))
         .is_err()
         {
@@ -249,38 +248,28 @@ impl SessionHandle {
     pub fn extensions(&self) -> &tok_core::Extensions {
         &self.0.extensions
     }
-    pub(super) fn context(
-        &self,
-        operation: String,
-        source: tok_service::Source,
-    ) -> Result<tok_service::Context> {
-        self.context_with_cancellation(operation, source, self.0.cancel.child_token())
+    pub(super) fn context(&self, operation: String) -> Result<tok_execution::Context> {
+        self.context_with_cancellation(operation, self.0.cancel.child_token())
     }
     // 停止新业务后仍按原预算收束在途执行；会话取消信号通过 SessionHandle 单独提供。
-    pub(super) fn execution_context(
-        &self,
-        operation: String,
-        source: tok_service::Source,
-    ) -> Result<tok_service::Context> {
+    pub(super) fn execution_context(&self, operation: String) -> Result<tok_execution::Context> {
         if self.0.cancel.is_cancelled() {
             return Err(ErrorCode::SessionClosed.into());
         }
-        self.context_with_cancellation(operation, source, CancellationToken::new())
+        self.context_with_cancellation(operation, CancellationToken::new())
     }
     fn context_with_cancellation(
         &self,
         operation: String,
-        source: tok_service::Source,
         cancellation: CancellationToken,
-    ) -> Result<tok_service::Context> {
+    ) -> Result<tok_execution::Context> {
         let owner = &self.0.ownership.owner;
-        let mut context = tok_service::Context::new(
+        let mut context = tok_execution::Context::new(
             tok_core::service::Identity {
                 node_id: owner.node_id.clone(),
                 service_name: owner.service_name.clone(),
             },
             operation,
-            source,
             self.0.execution_budget,
             cancellation,
         )
@@ -444,12 +433,11 @@ impl SessionHandle {
         );
         let context = self.context_with_cancellation(
             format!("player/downlink/{}", message.message_id),
-            tok_service::Source::Internal,
             cancellation,
         )?;
         let session = self.clone();
         use tower::{Layer as _, ServiceExt};
-        let service = tower::service_fn(move |request: tok_service::Request<LogicalMessage>| {
+        let service = tower::service_fn(move |request: tok_execution::Request<LogicalMessage>| {
             let session = session.clone();
             let binding = binding.clone();
             let event_target = event_target.clone();
@@ -481,9 +469,9 @@ impl SessionHandle {
                 }
             }
         });
-        tok_service::Layer
+        tok_execution::Layer
             .layer(service)
-            .oneshot(tok_service::Request::new(context, message))
+            .oneshot(tok_execution::Request::new(context, message))
             .await
             .map_err(super::worker::execution_error)
     }

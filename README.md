@@ -4,7 +4,7 @@
 
 框架以“服务 + 处理链”为核心：Factory 初始化状态、入口和中间件，运行设施监督主任务与后台工作。RPC、事件、timer 和网关业务共用 Request / Tower 执行协议；tok-gateway 是增加连接/session 能力的内置扩展。Application 按配置组装服务，纯事件服务可以不绑定网络端点。
 
-通用基础契约位于 tok-core，执行与生命周期位于 tok-service；玩家会话、消息、计时需求和所有权契约独立为 tok-player，网关和游戏协议适配复用它。tok-rpc 提供通用连接、端点与执行设施；tok-game-rpc 承载游戏消息、玩家事件和 timer 协议，门面分别从 rpc / game_rpc 导入，通用 RPC 和服务层不依赖玩家契约。
+通用基础契约位于 tok-core，调用执行位于 tok-execution，服务构建与生命周期位于 tok-lifecycle；玩家会话、消息、计时需求和所有权契约独立为 tok-player，网关和游戏协议适配复用它。tok-rpc 提供通用连接、端点与执行设施；tok-game-rpc 承载游戏消息、玩家事件和 timer 协议，门面分别从 rpc / game_rpc 导入，通用 RPC 和服务层不依赖玩家契约。
 
 ## 文档入口
 

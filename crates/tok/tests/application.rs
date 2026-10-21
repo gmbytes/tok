@@ -13,10 +13,7 @@ use tok::{
     AppConfig,
     application::{self, Application},
     core::ServiceDirectory,
-    service::{
-        lifecycle::{self, Init, InitFuture},
-        task::Task,
-    },
+    lifecycle::{self, Init, InitFuture, task::Task},
 };
 
 enum Behavior {
@@ -360,7 +357,7 @@ async fn startup_failure_also_reclaims_uncooperative_service_children() {
                 .await?;
             assert_eq!(
                 init.service.tasks().reserve().err().unwrap(),
-                tok_service::task::SubmitError::CapacityExceeded
+                tok_lifecycle::task::SubmitError::CapacityExceeded
             );
             Ok(Box::pin(async move {
                 init.service.cancellation().cancelled().await;

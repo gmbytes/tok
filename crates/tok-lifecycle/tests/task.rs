@@ -7,7 +7,7 @@ use std::{
     },
     time::Duration,
 };
-use tok_service::task::{Error, State, Supervisor, Task};
+use tok_lifecycle::task::{Error, State, Supervisor, Task};
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 const LIMIT: Duration = Duration::from_secs(2);
@@ -28,7 +28,7 @@ async fn reserved_queued_and_running_tasks_share_one_capacity() {
     assert_eq!(handle.used_capacity(), 1);
     assert_eq!(
         handle.reserve().err().unwrap(),
-        tok_service::task::SubmitError::CapacityExceeded
+        tok_lifecycle::task::SubmitError::CapacityExceeded
     );
     drop(reservation);
     let (done, completion) = oneshot::channel();
@@ -214,7 +214,7 @@ async fn shutdown_timeout_reclaims_owned_tasks_but_reports_retained_external_wor
 
 #[tokio::test]
 async fn rejected_submissions_report_the_reason_and_release_capacity() {
-    use tok_service::task::SubmitError;
+    use tok_lifecycle::task::SubmitError;
     let scope = scope(1);
     let handle = scope.handle();
     for name in [" ".to_owned(), "中".repeat(86)] {

@@ -1,4 +1,4 @@
-use crate::{Envelope, Error, Event, Message, validate_name};
+use crate::{Envelope, Error, Event, EventId, Message, Topic, validate_name};
 use std::{
     any::{Any, TypeId},
     collections::BTreeMap,
@@ -7,8 +7,7 @@ use std::{
     sync::Arc,
     task::{Context as TaskContext, Poll},
 };
-use tok_service::Request;
-use tok_service::{Context, Source, StopReason};
+use tok_execution::{Context, Request, StopReason};
 use tower::{Layer as _, ServiceExt};
 
 /// 当前处理阶段的结果；转发完成不代表后续 session 业务已完成。
@@ -84,11 +83,11 @@ pub enum DispatchError<F> {
     #[error("事件处理失败：{0}")]
     Handler(F),
 }
-impl<F> From<tok_service::Error<F>> for DispatchError<F> {
-    fn from(error: tok_service::Error<F>) -> Self {
+impl<F> From<tok_execution::Error<F>> for DispatchError<F> {
+    fn from(error: tok_execution::Error<F>) -> Self {
         match error {
-            tok_service::Error::Stopped(reason) => Self::Stopped(reason),
-            tok_service::Error::Inner(error) => Self::Handler(error),
+            tok_execution::Error::Stopped(reason) => Self::Stopped(reason),
+            tok_execution::Error::Inner(error) => Self::Handler(error),
         }
     }
 }
@@ -125,7 +124,7 @@ where
                 .ok_or(DispatchError::Invalid(Error::InvalidInput(
                     "事件 Rust 类型与注册不匹配",
                 )))?;
-            tok_service::Layer
+            tok_execution::Layer
                 .layer(self.service.clone())
                 .oneshot(Request::new(context, Input { state, event }))
                 .await
@@ -237,8 +236,12 @@ impl<C: Send, O, F> Registry<C, O, F> {
         request: Request<&Envelope<E>>,
     ) -> Result<Vec<O>, DispatchError<F>> {
         request.input.validate().map_err(DispatchError::Invalid)?;
-        let mut context =
-            event_context(&request.context, E::NAME, request.input.event_id.as_str())?;
+        let mut context = event_context(
+            &request.context,
+            E::NAME,
+            &request.input.event_id,
+            &request.input.topic,
+        )?;
         drop(context.extensions_mut().remove::<Arc<Message>>());
         let Some(entry) = self.entries.get(E::NAME) else {
             context.check().map_err(DispatchError::Stopped)?;
@@ -264,7 +267,8 @@ impl<C: Send, O, F> Registry<C, O, F> {
         let mut context = event_context(
             &request.context,
             &request.input.event_type,
-            request.input.event_id.as_str(),
+            &request.input.event_id,
+            &request.input.topic,
         )?;
         context.check().map_err(DispatchError::Stopped)?;
         let entry = self
@@ -289,15 +293,18 @@ impl<C: Send, O, F> Registry<C, O, F> {
         Ok(results)
     }
 }
-fn event_context<F>(parent: &Context, name: &str, id: &str) -> Result<Context, DispatchError<F>> {
-    parent
-        .child(
-            format!("event/{name}"),
-            Source::Event {
-                event_id: id.into(),
-            },
-        )
-        .map_err(|_| DispatchError::Invalid(Error::InvalidInput("事件执行上下文无效")))
+fn event_context<F>(
+    parent: &Context,
+    name: &str,
+    id: &EventId,
+    topic: &Topic,
+) -> Result<Context, DispatchError<F>> {
+    let mut context = parent
+        .child(format!("event/{name}"))
+        .map_err(|_| DispatchError::Invalid(Error::InvalidInput("事件执行上下文无效")))?;
+    context.extensions_mut().insert(id.clone());
+    context.extensions_mut().insert(topic.clone());
+    Ok(context)
 }
 impl Handler for Registry {
     fn event_types(&self) -> Vec<&str> {

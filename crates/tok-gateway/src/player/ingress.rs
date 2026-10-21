@@ -28,7 +28,7 @@ impl Ingress {
     /// 回调必须短小且不阻塞；交接保留原主题，不重新应用新登录策略。
     pub fn with_topic_policy<F>(mut self, policy: F) -> Self
     where
-        F: Fn(tok_service::Request<tok_player::SessionIdentity>) -> Result<Vec<String>>
+        F: Fn(tok_execution::Request<tok_player::SessionIdentity>) -> Result<Vec<String>>
             + Send
             + Sync
             + 'static,

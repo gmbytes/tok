@@ -17,8 +17,8 @@ impl Event for Completed {
 
 pub(super) fn dispatcher() -> Result<Registry<PlayerState, (), Status>, tok::events::Error> {
     let mut dispatcher = Registry::new(1)?;
-    dispatcher.register_service::<Completed, _>(tok::service::sync_handler(
-        |request: tok::service::Request<Input<'_, PlayerState, Completed>>| {
+    dispatcher.register_service::<Completed, _>(tok::execution::sync_handler(
+        |request: tok::execution::Request<Input<'_, PlayerState, Completed>>| {
             let stored = request.input.state;
             let event = &request.input.event.payload;
             if stored.production_due != Some(event.scheduled_at_ms) {

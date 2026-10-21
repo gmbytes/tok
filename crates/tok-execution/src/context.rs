@@ -1,32 +1,6 @@
 use std::time::{Duration, Instant};
-use tok_core::{Error, Extensions, Result, TimerTrigger, service::Identity};
+use tok_core::{Error, Extensions, Result, service::Identity};
 use tokio_util::sync::CancellationToken;
-
-/// 由可信入口创建的调用来源；不是客户端正文可选择的分发类型。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Source {
-    /// 可信服务端内部操作，例如生命周期变化或主动下行。
-    Internal,
-    /// 服务间请求；序号只关联当前请求与回应。
-    Rpc {
-        /// RPC 请求关联序号。
-        request_id: u64,
-    },
-    /// 已通过接入校验的客户端业务请求。
-    Client {
-        /// 客户端请求关联序号。
-        request_id: u64,
-        /// 已注册的业务消息 ID。
-        message_id: u32,
-    },
-    /// 服务器事件；本地派生与远程接收使用相同的业务执行来源。
-    Event {
-        /// 原事件的稳定 ID；转发和派生执行不能重新生成。
-        event_id: String,
-    },
-    /// 可信调度器产生的内部计时触发。
-    Timer(TimerTrigger),
-}
 
 /// 当前调用不得继续发起或接受执行结果的原因；不表示副作用已回滚。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -43,12 +17,12 @@ pub enum StopReason {
 ///
 /// 入口适配器负责认证、来源与关联字段校验。本结构不构成调用者认证，
 /// 不能直接反序列化不可信正文作为上下文。跨进程只传播允许的元数据。
-/// 业务实体身份、路由输入和选定端点不属于固定字段，应以各自的类型传入正文或扩展。
+/// 业务实体身份、入口元信息、路由输入和选定端点不属于固定字段，应以各自的类型传入正文或扩展。
+/// RPC 关联信息、事件标识和计时触发可以同时存在，不以互斥来源枚举表示。
 #[derive(Debug, Clone)]
 pub struct Context {
     service: Identity,
     operation: String,
-    source: Source,
     deadline: Instant,
     cancellation: CancellationToken,
     span: tracing::Span,
@@ -59,7 +33,6 @@ impl Context {
     pub fn new(
         service: Identity,
         operation: impl Into<String>,
-        source: Source,
         budget: Duration,
         cancellation: CancellationToken,
     ) -> Result<Self> {
@@ -74,7 +47,6 @@ impl Context {
         Ok(Self {
             service,
             operation,
-            source,
             deadline,
             cancellation,
             span: tracing::Span::current(),
@@ -85,13 +57,12 @@ impl Context {
     ///
     /// 子取消不取消父调用；本方法不会重新分配一份预算或自动进入队列。
     /// 此方法保持当前执行服务身份，不负责构建出站 RPC 的路由目标或跨服务上下文。
-    pub fn child(&self, operation: impl Into<String>, source: Source) -> Result<Self> {
+    pub fn child(&self, operation: impl Into<String>) -> Result<Self> {
         let operation = operation.into();
         Self::validate_operation(&operation)?;
         Ok(Self {
             service: self.service.clone(),
             operation,
-            source,
             deadline: self.deadline,
             cancellation: self.cancellation.child_token(),
             span: self.span.clone(),
@@ -113,10 +84,6 @@ impl Context {
     /// 构造时只检查非空和长度，标识与注册入口的一致性由适配器保证。
     pub fn operation(&self) -> &str {
         &self.operation
-    }
-    /// 可信入口声明的来源与对应关联信息。
-    pub fn source(&self) -> &Source {
-        &self.source
     }
     /// 本进程的单调时钟截止点；不作为网络协议直接传输。
     pub fn deadline(&self) -> Instant {

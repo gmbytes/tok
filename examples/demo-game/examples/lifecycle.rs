@@ -11,10 +11,10 @@ use std::{
 use tok::{
     application::CancellationToken,
     core::{Extensions, service::Identity},
+    execution::{Context as ExecutionContext, Layer as ExecutionLayer, Request},
     gateway::{Gateway, GatewayConfig, GatewayIngress, GatewayTask},
-    service::{
-        Context as ExecutionContext, Layer as ExecutionLayer, Request, Source,
-        lifecycle::{Builder, Factory, Init, InitFuture},
+    lifecycle::{
+        Builder, Factory, Init, InitFuture,
         task::{BoxError, Task},
     },
 };
@@ -63,7 +63,6 @@ fn counter(init: Init) -> InitFuture {
         let parent = ExecutionContext::new(
             init.identity.clone(),
             "counter.read",
-            Source::Rpc { request_id: 1 },
             TIMEOUT,
             init.service.cancellation(),
         )?;
@@ -80,12 +79,7 @@ fn counter(init: Init) -> InitFuture {
             .await?;
         Ok(Box::pin(async move {
             let value = rpc.oneshot(Request::new(parent.clone(), 41)).await?;
-            let event = parent.child(
-                "counter.added",
-                Source::Event {
-                    event_id: "example:1".into(),
-                },
-            )?;
+            let event = parent.child("counter.added")?;
             ExecutionLayer
                 .layer(service_fn(add))
                 .oneshot(Request::new(event, (&mut state, value)))

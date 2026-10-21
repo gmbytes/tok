@@ -3,11 +3,9 @@ use crate::CallContext;
 use crate::{CallTask, EventTask, Handler};
 use std::sync::{Arc, OnceLock};
 use tok_core::{Extensions, service::Identity};
+use tok_execution::Request;
+use tok_lifecycle::{Handle, Init};
 use tok_proto::internal::v1::Payload;
-use tok_service::{
-    Request,
-    lifecycle::{Handle, Init},
-};
 use tonic::Status;
 
 struct Installed {

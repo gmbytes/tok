@@ -289,11 +289,9 @@ impl SessionManager {
                 execution: Some(execution),
                 extension: Some(proto::ExtensionSnapshot {
                     kind: session.extension.kind().to_owned(),
-                    body: session.extension.snapshot(tok_service::Request::new(
-                        SessionHandle(Arc::clone(&session)).context(
-                            "player/session/snapshot".into(),
-                            tok_service::Source::Internal,
-                        )?,
+                    body: session.extension.snapshot(tok_execution::Request::new(
+                        SessionHandle(Arc::clone(&session))
+                            .context("player/session/snapshot".into())?,
                         SessionHandle(Arc::clone(&session)),
                     ))?,
                 }),
@@ -604,7 +602,7 @@ pub(super) async fn receive(
             .await;
             return Err(ErrorCode::Timeout.into());
         }
-        let extensions = match manager.inner.extension.restore(tok_service::Request::new(
+        let extensions = match manager.inner.extension.restore(tok_execution::Request::new(
             manager.extension_context("player/session/restore")?,
             (acquired.identity.clone(), extension.body.as_slice()),
         )) {

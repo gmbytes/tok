@@ -9,13 +9,12 @@ use std::{
 };
 use tok_core::service::Identity;
 use tok_events::{Envelope, Event, EventId, Input};
+use tok_execution::{Context, Request};
 use tok_game_rpc::CallContext;
 use tok_game_rpc::{
     Handler, HandlerRegistry, HandlerReply, RpcService,
     protocol::internal::v1::{self as proto, Payload},
 };
-use tok_service::Request;
-use tok_service::{Context, Source};
 use tokio_util::sync::CancellationToken;
 use tower::{Layer, Service};
 #[derive(Clone, PartialEq, prost::Message)]
@@ -66,14 +65,13 @@ fn call() -> CallContext {
         timer: None,
     }
 }
-fn context(source: Source) -> Context {
+fn context() -> Context {
     let mut context = Context::new(
         Identity {
             node_id: "node".into(),
             service_name: "test".into(),
         },
         "test",
-        source,
         Duration::from_secs(5),
         CancellationToken::new(),
     )
@@ -108,7 +106,13 @@ async fn one_layer_and_one_event_registration_serve_rpc_timer_local_and_encoded_
             audit.layer(tower::service_fn(
                 |request: Request<(CallContext, Value)>| async move {
                     assert_eq!(request.context.operation(), "timer/1");
-                    assert!(matches!(request.context.source(), Source::Timer(_)));
+                    assert!(
+                        request
+                            .context
+                            .extensions()
+                            .get::<tok_player::TimerTrigger>()
+                            .is_some()
+                    );
                     Ok(None)
                 },
             )),
@@ -134,14 +138,11 @@ async fn one_layer_and_one_event_registration_serve_rpc_timer_local_and_encoded_
         body: Value { value: 7 }.encode_to_vec(),
     };
     let response = registry
-        .call(Request::new(
-            context(Source::Rpc { request_id: 1 }),
-            (call(), payload.clone()),
-        ))
+        .call(Request::new(context(), (call(), payload.clone())))
         .await
         .unwrap();
     assert_eq!(response.payload.unwrap().message_id, 2);
-    let timer = tok_core::TimerTrigger {
+    let timer = tok_player::TimerTrigger {
         timer_id: "tick".into(),
         scheduled_at_ms: 1,
         fired_at_ms: 2,
@@ -149,31 +150,20 @@ async fn one_layer_and_one_event_registration_serve_rpc_timer_local_and_encoded_
     let mut timer_call = call();
     timer_call.timer = Some(timer.clone());
     let response = registry
-        .call(Request::new(
-            context(Source::Timer(timer)),
-            (timer_call, payload),
-        ))
+        .call(Request::new(context(), (timer_call, payload)))
         .await
         .unwrap();
     assert!(response.payload.is_none());
     let envelope = Envelope::new(EventId::new("same-event").unwrap(), Value { value: 7 }).unwrap();
     let result = registry
         .events()
-        .dispatch(
-            &mut call(),
-            Request::new(context(Source::Rpc { request_id: 1 }), &envelope),
-        )
+        .dispatch(&mut call(), Request::new(context(), &envelope))
         .await
         .unwrap();
     assert_eq!(result.len(), 1);
     let event = Arc::new(tok_events::Message::new(&envelope).unwrap());
     let response = registry
-        .event(Request::new(
-            context(Source::Event {
-                event_id: "same-event".into(),
-            }),
-            (call(), event),
-        ))
+        .event(Request::new(context(), (call(), event)))
         .await
         .unwrap();
     assert!(response.timers.is_none());
@@ -247,7 +237,7 @@ async fn rpc_budget_and_malformed_timeout_are_enforced_before_accepting_results(
 }
 #[tokio::test]
 async fn deferred_rpc_is_initialized_once_by_its_own_factory_and_stops_with_service() {
-    use tok_service::lifecycle::{Builder, Init, InitFuture};
+    use tok_lifecycle::{Builder, Init, InitFuture};
     let (rpc, binding) = RpcService::deferred("node", "test").unwrap();
     assert_eq!(
         proto::business_rpc_server::BusinessRpc::call(&rpc, wire_request(None))
@@ -293,7 +283,7 @@ async fn deferred_rpc_is_initialized_once_by_its_own_factory_and_stops_with_serv
             Ok(Box::pin(async move {
                 init.service.cancellation().cancelled().await;
                 Ok(())
-            }) as tok_service::task::Task)
+            }) as tok_lifecycle::task::Task)
         })
     };
     let prepared = builder
@@ -325,14 +315,13 @@ fn initialization_binding_is_not_retained_in_its_own_execution_extensions() {
         service_name: "test".into(),
     };
     let builder =
-        tok_service::lifecycle::Builder::new(identity.clone(), 1, CancellationToken::new())
-            .unwrap();
+        tok_lifecycle::Builder::new(identity.clone(), 1, CancellationToken::new()).unwrap();
     let marker = Arc::new(AtomicUsize::new(0));
     let weak = Arc::downgrade(&marker);
     let mut extensions = tok_core::Extensions::default();
     extensions.insert(marker);
     extensions.insert(binding.clone());
-    let init = tok_service::lifecycle::Init {
+    let init = tok_lifecycle::Init {
         identity,
         service: builder.handle(),
         extensions,

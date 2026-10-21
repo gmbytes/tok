@@ -7,7 +7,7 @@ use std::{
     sync::{Mutex, MutexGuard},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use tok_core::TimerTrigger;
+use tok_player::TimerTrigger;
 use tok_player::{TimerSpec, TimerUpdate};
 use tokio::{
     sync::{Notify, mpsc},

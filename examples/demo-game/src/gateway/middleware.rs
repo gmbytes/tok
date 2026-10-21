@@ -6,9 +6,8 @@ use std::{
     task::{Context, Poll},
 };
 use tok::game_rpc::tower::{Layer, Service, ServiceExt};
-use tok::observability::tracing;
+use tok::{core::Extensions, execution::Request};
 use tok::{
-    core::Extensions,
     gateway::{
         ErrorCode, GatewayError, Result,
         player::{
@@ -16,8 +15,8 @@ use tok::{
             session::extension::{self, Change},
         },
     },
+    observability::tracing,
     player::SessionIdentity,
-    service::Request,
 };
 
 #[derive(Default)]

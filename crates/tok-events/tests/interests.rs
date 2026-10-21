@@ -10,7 +10,7 @@ use tok_events::{
     Error, Handler, Message, Outcome, Subscriber, Task, Topic, TopicFilter,
     interest::{self, Pool, Transport},
 };
-use tok_service::task::Supervisor;
+use tok_lifecycle::task::Supervisor;
 use tokio::sync::{Notify, Semaphore};
 use tokio_util::sync::CancellationToken;
 struct Ignore;
@@ -18,7 +18,7 @@ impl Handler for Ignore {
     fn event_types(&self) -> Vec<&str> {
         vec!["test.changed"]
     }
-    fn handle(&self, _: tok_service::Request<Arc<Message>>) -> Task<'_> {
+    fn handle(&self, _: tok_execution::Request<Arc<Message>>) -> Task<'_> {
         Box::pin(async { Ok(Outcome::Ignored) })
     }
 }

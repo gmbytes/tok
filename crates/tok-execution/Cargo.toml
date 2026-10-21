@@ -1,6 +1,6 @@
 [package]
-name = "tok-service"
-description = "tok 通用服务执行与处理链设施"
+name = "tok-execution"
+description = "tok 类型化调用上下文与处理链执行设施"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

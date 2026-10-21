@@ -19,8 +19,8 @@ use std::{
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
+use tok_lifecycle::task;
 use tok_player::ownership::{Owner as SessionOwner, Store as OwnershipStore};
-use tok_service::task;
 use tokio::sync::{Notify, mpsc};
 use tokio_util::sync::CancellationToken;
 
@@ -38,8 +38,9 @@ struct Registry {
     process_instance_id: u128,
 }
 
-type TopicPolicy =
-    dyn Fn(tok_service::Request<tok_player::SessionIdentity>) -> Result<Vec<String>> + Send + Sync;
+type TopicPolicy = dyn Fn(tok_execution::Request<tok_player::SessionIdentity>) -> Result<Vec<String>>
+    + Send
+    + Sync;
 
 /// 有界的玩家会话目录，由 Ingress 构造并通过 sessions 获取。
 ///
@@ -113,7 +114,7 @@ impl SessionManager {
 
     pub(in crate::player) fn with_topic_policy<F>(mut self, policy: F) -> Self
     where
-        F: Fn(tok_service::Request<tok_player::SessionIdentity>) -> Result<Vec<String>>
+        F: Fn(tok_execution::Request<tok_player::SessionIdentity>) -> Result<Vec<String>>
             + Send
             + Sync
             + 'static,
@@ -213,11 +214,10 @@ impl SessionManager {
         Arc::make_mut(&mut self.inner).extension = extension;
         Ok(self)
     }
-    pub(super) fn extension_context(&self, operation: &str) -> Result<tok_service::Context> {
-        let mut context = tok_service::Context::new(
+    pub(super) fn extension_context(&self, operation: &str) -> Result<tok_execution::Context> {
+        let mut context = tok_execution::Context::new(
             self.inner.gateway.identity().clone(),
             operation,
-            tok_service::Source::Internal,
             Duration::from_millis(self.inner.config.rpc_timeout_ms),
             self.inner.shutdown.child_token(),
         )
@@ -584,7 +584,7 @@ impl SessionManager {
                 return Err(ErrorCode::Internal.into());
             }
         };
-        let extensions = match self.inner.extension.initialize(tok_service::Request::new(
+        let extensions = match self.inner.extension.initialize(tok_execution::Request::new(
             self.extension_context("player/session/initialize")?,
             ownership.identity.clone(),
         )) {
@@ -673,11 +673,8 @@ impl SessionManager {
         let handle = SessionHandle(Arc::clone(&session_state));
         if let Some(policy) = &self.inner.topic_policy {
             let result = tokio::time::timeout(timeout, async {
-                let topics = policy(tok_service::Request::new(
-                    handle.context(
-                        "player/session/topics".into(),
-                        tok_service::Source::Internal,
-                    )?,
+                let topics = policy(tok_execution::Request::new(
+                    handle.context("player/session/topics".into())?,
                     handle.identity().clone(),
                 ))?;
                 if topics.len() > self.inner.config.max_topics {

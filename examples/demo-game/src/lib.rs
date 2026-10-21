@@ -17,12 +17,9 @@ use tok::{
     application::Application,
     core::ServiceDirectory,
     game_rpc::{CallContext, RpcClients, RpcService, protocol::internal::v1::Payload},
+    lifecycle::{Init, InitFuture, task::Task},
     observability::Error,
     player::SessionIdentity,
-    service::{
-        lifecycle::{Init, InitFuture},
-        task::Task,
-    },
 };
 
 /// 组装 TCP 网关与内部 RPC；所有权按配置选择，公会请求锁默认使用 Memory。

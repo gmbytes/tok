@@ -16,5 +16,7 @@ pub use tok_observability as observability;
 pub use tok_player as player;
 pub use tok_rpc as rpc;
 
-/// 通用服务执行、工厂与生命周期设施；RPC、事件及网关扩展复用共同处理协议。
-pub use tok_service as service;
+/// 类型化调用上下文、请求与处理链执行设施。
+pub use tok_execution as execution;
+/// 服务构建、生命周期与有界任务监督。
+pub use tok_lifecycle as lifecycle;

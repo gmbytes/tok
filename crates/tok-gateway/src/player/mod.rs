@@ -14,8 +14,8 @@ pub mod session;
 pub use auth::{AuthenticatedIdentity, AuthenticationTask, Authenticator};
 pub use config::Config;
 pub use executor::{
-    DefaultRpcErrorMapper, EventInput, EventTask, Executor, Reply, RequestInput, RpcErrorMapper,
-    RpcExecutor, Task, TimerInput,
+    ClientRequest, DefaultRpcErrorMapper, EventInput, EventTask, Executor, Reply, RequestInput,
+    RpcErrorMapper, RpcExecutor, Task, TimerInput,
 };
 pub use ingress::{Ingress, MAX_CREDENTIAL_BYTES};
 pub(crate) use session::HandoffAction;

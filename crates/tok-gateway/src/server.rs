@@ -4,7 +4,7 @@ use crate::Handle;
 use crate::{ErrorCode, Result, transport::GatewayTransport};
 use std::{future::Future, pin::Pin, sync::Arc};
 use tok_core::{Extensions, service::Identity};
-use tok_service::{lifecycle::Init, task::Supervisor};
+use tok_lifecycle::{Init, task::Supervisor};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
@@ -131,7 +131,7 @@ impl<I: GatewayIngress> Gateway<I> {
     }
 
     /// 获取通用任务监督入口；游戏组装层可预留容量并安装事件等后台任务。
-    pub fn tasks(&self) -> tok_service::task::Handle {
+    pub fn tasks(&self) -> tok_lifecycle::task::Handle {
         self.supervisor.handle()
     }
 

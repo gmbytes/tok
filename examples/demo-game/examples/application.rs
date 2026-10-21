@@ -17,14 +17,13 @@ use tok::{
     AppConfig,
     application::Application,
     events::{self, Envelope, Event, EventId, Outcome, Registry},
+    execution::{Context, Request, sync_handler},
     game_rpc::{
         CallContext, HandlerRegistry, HandlerReply, RpcClients, RpcService,
         protocol::internal::v1::Payload, tonic::Status,
     },
-    service::{
-        Context, Request, Source,
-        lifecycle::{Init, InitFuture},
-        sync_handler,
+    lifecycle::{
+        Init, InitFuture,
         task::{BoxError, Task},
     },
 };
@@ -98,7 +97,7 @@ async fn main() -> Result<(), BoxError> {
                         () = stop.cancelled() => return Ok(()),
                         event = receiver.recv() => {
                             let event = event.ok_or_else(|| std::io::Error::other("事件入口提前结束"))?;
-                            let context = Context::new(init.identity.clone(), "audit", Source::Internal, Duration::from_secs(2), stop.child_token())?;
+                            let context = Context::new(init.identity.clone(), "audit", Duration::from_secs(2), stop.child_token())?;
                             handlers.dispatch(&mut state, Request::new(context, &event)).await?;
                             processed.send_replace(state.len());
                         }

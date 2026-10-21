@@ -4,13 +4,16 @@
 use std::{io, sync::Arc, time::Duration};
 use tok::{
     application::CancellationToken,
-    core::{TimerTrigger, service::Identity},
+    core::service::Identity,
+    execution::{Context, Layer as ExecutionLayer, Request},
     gateway::{Gateway, player},
     infra::ownership::MemoryOwnership,
+    lifecycle::task,
     player::ownership::Owner as SessionOwner,
-    service::{Context, Layer as ExecutionLayer, Request, Source, task},
 };
 use tower::{Layer, ServiceExt, service_fn};
+
+struct Tick;
 
 #[derive(Default)]
 struct State {
@@ -23,7 +26,7 @@ struct ReadOnly;
 impl player::Executor for ReadOnly {
     fn execute_request(
         &self,
-        input: tok::service::Request<tok::gateway::player::RequestInput>,
+        input: tok::execution::Request<tok::gateway::player::RequestInput>,
     ) -> player::Task<'_> {
         let tok::gateway::player::RequestInput {
             identity: _identity,
@@ -34,14 +37,13 @@ impl player::Executor for ReadOnly {
         )))
     }
 }
-fn context(service: &str, operation: &str, source: Source) -> tok::core::Result<Context> {
+fn context(service: &str, operation: &str) -> tok::core::Result<Context> {
     Context::new(
         Identity {
             node_id: "local".into(),
             service_name: service.into(),
         },
         operation,
-        source,
         Duration::from_secs(2),
         CancellationToken::new(),
     )
@@ -58,7 +60,7 @@ async fn add(request: Request<(&mut State, &Added)>) -> io::Result<()> {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // 普通服务不依赖 session；请求、事件及 timer 的结果保留自己的类型。
-    let parent = context("counter", "counter.read", Source::Rpc { request_id: 1 })?;
+    let parent = context("counter", "counter.read")?;
     let rpc = ExecutionLayer.layer(service_fn(|request: Request<u64>| {
         std::future::ready(
             request
@@ -70,30 +72,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let response = rpc.oneshot(Request::new(parent.clone(), 41)).await?;
     let mut state = State::default();
     let event = Added { amount: response };
-    let event_context = parent.child(
-        "counter.added",
-        Source::Event {
-            event_id: "example:1".into(),
-        },
-    )?;
+    let event_context = parent.child("counter.added")?;
     ExecutionLayer
         .layer(service_fn(add))
         .oneshot(Request::new(event_context, (&mut state, &event)))
         .await?;
-    let timer = parent.child(
-        "counter.tick",
-        Source::Timer(TimerTrigger {
-            timer_id: "example".into(),
-            scheduled_at_ms: 1,
-            fired_at_ms: 2,
-        }),
-    )?;
+    let mut timer = parent.child("counter.tick")?;
+    timer.extensions_mut().insert(Tick);
     let tick = ExecutionLayer
         .layer(service_fn(|request: Request<()>| {
-            std::future::ready(Ok::<_, io::Error>(matches!(
-                request.context.source(),
-                Source::Timer(_)
-            )))
+            std::future::ready(Ok::<_, io::Error>(
+                request.context.extensions().get::<Tick>().is_some(),
+            ))
         }))
         .oneshot(Request::new(timer, ()))
         .await?;
@@ -113,13 +103,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             Arc::new(ReadOnly),
         )
     })?;
-    let mut gateway_context = context(
-        "gateway",
-        "gateway.sessions",
-        Source::Event {
-            event_id: "example:query".into(),
-        },
-    )?;
+    let mut gateway_context = context("gateway", "gateway.sessions")?;
     drop(gateway_context.extensions_mut().insert(gateway.tasks()));
     drop(
         gateway_context

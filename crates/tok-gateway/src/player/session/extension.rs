@@ -2,8 +2,8 @@
 use super::SessionHandle;
 use crate::{ErrorCode, Result};
 use tok_core::Extensions;
+use tok_execution::Request;
 use tok_player::SessionIdentity;
-use tok_service::Request;
 
 /// 已完成的会话生命周期变化；连接代次供游戏过滤迟到观察。
 #[derive(Clone, Debug, PartialEq, Eq)]

@@ -151,15 +151,34 @@ async fn typed_handler_receives_the_original_shared_encoding_without_reencoding(
 async fn local_and_remote_execute_same_handlers_and_wire_metadata_does_not_leak_into_local_children()
  {
     let mut registry = Registry::<u32, Outcome, tok_events::Error>::new(2).unwrap();
-    registry.register::<GuildChanged,_>(|request| Box::pin(async move {
-        assert_eq!(request.context.deadline(),*request.context.extensions().get::<std::time::Instant>().unwrap());
-        assert!(matches!(request.context.source(),tok_service::Source::Event{event_id} if event_id==request.input.event.event_id.as_str()));
-        if let Some(message)=request.context.extensions().get::<Arc<Message>>() {
-            assert_eq!(message.event_id,request.input.event.event_id);
-        }
-        tokio::task::yield_now().await;
-        *request.input.state+=request.input.event.payload.amount;Ok(Outcome::Handled)
-    })).unwrap();
+    registry
+        .register::<GuildChanged, _>(|request| {
+            Box::pin(async move {
+                assert_eq!(
+                    request.context.deadline(),
+                    *request
+                        .context
+                        .extensions()
+                        .get::<std::time::Instant>()
+                        .unwrap()
+                );
+                assert_eq!(
+                    request.context.extensions().get::<tok_events::EventId>(),
+                    Some(&request.input.event.event_id)
+                );
+                assert_eq!(
+                    request.context.extensions().get::<tok_events::Topic>(),
+                    Some(&request.input.event.topic)
+                );
+                if let Some(message) = request.context.extensions().get::<Arc<Message>>() {
+                    assert_eq!(message.event_id, request.input.event.event_id);
+                }
+                tokio::task::yield_now().await;
+                *request.input.state += request.input.event.payload.amount;
+                Ok(Outcome::Handled)
+            })
+        })
+        .unwrap();
     registry
         .register::<GuildChanged, _>(|request| {
             Box::pin(async move {
@@ -178,7 +197,7 @@ async fn local_and_remote_execute_same_handlers_and_wire_metadata_does_not_leak_
         registry
             .receive(
                 &mut state,
-                tok_service::Request::new(context.clone(), Arc::clone(&message))
+                tok_execution::Request::new(context.clone(), Arc::clone(&message))
             )
             .await,
         Err(tok_events::DispatchError::Unknown)
@@ -187,11 +206,15 @@ async fn local_and_remote_execute_same_handlers_and_wire_metadata_does_not_leak_
     let inherited =
         Arc::new(Message::new(&Envelope::new(EventId::generate(), MailSent {}).unwrap()).unwrap());
     context.extensions_mut().insert(Arc::clone(&inherited));
+    context.extensions_mut().insert(inherited.event_id.clone());
+    context
+        .extensions_mut()
+        .insert(tok_events::Topic::named("parent").unwrap());
     assert_eq!(
         registry
             .dispatch(
                 &mut state,
-                tok_service::Request::new(context.clone(), &envelope)
+                tok_execution::Request::new(context.clone(), &envelope)
             )
             .await
             .unwrap()
@@ -203,8 +226,20 @@ async fn local_and_remote_execute_same_handlers_and_wire_metadata_does_not_leak_
         &inherited
     ));
     assert_eq!(
+        context.extensions().get::<EventId>(),
+        Some(&inherited.event_id)
+    );
+    assert_eq!(
+        context
+            .extensions()
+            .get::<tok_events::Topic>()
+            .unwrap()
+            .as_str(),
+        Some("parent")
+    );
+    assert_eq!(
         registry
-            .receive(&mut state, tok_service::Request::new(context, message))
+            .receive(&mut state, tok_execution::Request::new(context, message))
             .await
             .unwrap()
             .len(),
@@ -343,7 +378,7 @@ async fn local_and_remote_paths_expose_the_same_topic_without_inheriting_parent_
     let mut context = support::context();
     context.extensions_mut().insert(message);
     handlers
-        .dispatch(&mut seen, tok_service::Request::new(context, &child))
+        .dispatch(&mut seen, tok_execution::Request::new(context, &child))
         .await
         .unwrap();
     assert_eq!(

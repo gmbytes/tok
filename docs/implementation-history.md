@@ -517,3 +517,21 @@ AGENTS.md 记录项目采用的 Rust 公开 API 组织规则及官方依据：�
 以 `437ad4d` 为基线新增 tok-game-rpc，迁移游戏 CallContext、HandlerRegistry、玩家/普通业务客户端、事件/timer/请求锁及初始化绑定；tok-rpc 仅提供连接、共享端点和泛型 Server / execute。原 CallHandler 不再作为通用 RPC 入口，其游戏契约改名为上层 Handler；门面导入分为 rpc / game_rpc。内部 protobuf 与客户端 Frame 不变，不提供旧 Rust 路径兼容别名。
 
 Windows 工作区测试 255 项通过、31 项外部专项跳过，Clippy、rustdoc、application / lifecycle smoke、格式与 UTF-8/LF 检查通过。未做 release 构建、Linux 或真实 Redis/NATS 专项。本轮随本次提交交付。
+
+## 调用执行与服务生命周期分库（2026-10-21）
+
+以 `a7b3108` 为基线，将 tok-service 分为 tok-execution 与 tok-lifecycle，门面改为 execution / lifecycle。调用上下文、Request 和 Tower 执行留在执行库；Factory、消费式服务阶段与有界任务监督迁入生命周期库，主要生命周期类型根导出、task 保留功能命名空间。两库共同依赖 core，彼此无依赖，生命周期库不依赖 Tower；不提供旧 Rust 路径兼容别名，不改变协议及执行、退出语义。
+
+本轮 Windows 验收：工作区 255 项测试通过，31 项外部专项按约定跳过，包含 12 项指南示例及 2 项消费式生命周期编译失败文档测试；全目标 Clippy、workspace rustdoc、lifecycle / execution smoke、格式、200 个文本文件 UTF-8/LF 及 82 处内部文档链接检查通过。依赖树确认两库无相互依赖、tok-lifecycle 无 Tower 依赖。未运行真实 Redis/NATS 专项、Linux 或 release 构建；本轮随本次提交交付。
+
+## 执行上下文去除互斥来源（2026-10-21）
+
+在同批 execution / lifecycle 分库基础上移除 Source 和 Context.source，构造与 child 不再接收来源。事件入口与 Registry 复用 EventId / Topic / Arc<Message>，游戏 RPC 复用 CallContext，timer 复用 TimerTrigger，网关提供无正文 ClientRequest。协议入口与分发表仍负责边界校验，执行核心不按元信息决定权限或分发。
+
+本轮 Windows 验收：工作区 255 项测试通过、31 项外部专项跳过；回归覆盖 RPC 与事件元信息共存、当前事件头覆盖继承值但不修改父上下文、原始消息保留和客户端请求标识。全目标 Clippy、workspace rustdoc、execution / application smoke、格式、UTF-8/LF 与内部链接检查通过。未做 release 构建，未运行真实 Redis/NATS 或 Linux；本轮随本次提交交付。
+
+## 玩家计时触发契约归属（2026-10-21）
+
+在同批分库及 Source 移除基础上，将 TimerTrigger 从 core 移入 player，与 TimerSpec / TimerUpdate 归集；core 删除 timer 模块和根导出，不保留兼容别名。通用执行测试与示例使用本地扩展类型，调用者、指南及当前架构说明同步迁移。结构字段和线协议不变。
+
+本轮 Windows 验收：受影响的 core / execution / player / game-rpc / gateway 共 132 项测试通过、2 项外部专项跳过；demo 生产测试 2 项、指南示例 12 项通过。全目标编译与 Clippy、workspace rustdoc、execution smoke、格式、199 个文本文件 UTF-8/LF 与内部文档链接检查通过。未重复无关外部专项或完整工作区测试；未做 release 构建或 Linux 验证，本轮随本次提交交付。

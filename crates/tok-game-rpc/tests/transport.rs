@@ -187,7 +187,7 @@ struct Slow {
     calls: Arc<AtomicUsize>,
 }
 impl Handler for Slow {
-    fn call(&self, request: tok_service::Request<(CallContext, Payload)>) -> CallTask<'_> {
+    fn call(&self, request: tok_execution::Request<(CallContext, Payload)>) -> CallTask<'_> {
         let context = request.input.0;
         Box::pin(async move {
             self.calls.fetch_add(1, Ordering::SeqCst);
@@ -276,7 +276,7 @@ async fn user_tower_concurrency_limit_is_preserved_across_handler_clones() {
     let service = tok_game_rpc::tower::ServiceBuilder::new()
         .concurrency_limit(1)
         .service(tok_game_rpc::tower::service_fn(
-            move |request: tok_service::Request<(CallContext, Payload)>| {
+            move |request: tok_execution::Request<(CallContext, Payload)>| {
                 let (context, payload) = request.input;
                 let active = Arc::clone(&active);
                 let peak = Arc::clone(&tracked_peak);

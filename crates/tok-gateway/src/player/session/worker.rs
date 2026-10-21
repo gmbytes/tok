@@ -10,9 +10,8 @@ use std::{
     sync::{Arc, atomic::Ordering},
     time::Duration,
 };
+use tok_execution::Request;
 use tok_player::{LogicalMessage, MessageKind, ownership::Store as OwnershipStore};
-use tok_service::Request;
-use tok_service::Source;
 use tokio::sync::{mpsc, oneshot};
 use tower::{Layer as _, ServiceExt};
 
@@ -266,14 +265,14 @@ pub(super) async fn renew_ownership(
 }
 
 pub(super) fn execution_error(
-    error: tok_service::Error<crate::GatewayError>,
+    error: tok_execution::Error<crate::GatewayError>,
 ) -> crate::GatewayError {
     match error {
-        tok_service::Error::Inner(error) => error,
-        tok_service::Error::Stopped(tok_service::StopReason::Cancelled) => {
+        tok_execution::Error::Inner(error) => error,
+        tok_execution::Error::Stopped(tok_execution::StopReason::Cancelled) => {
             ErrorCode::SessionClosed.into()
         }
-        tok_service::Error::Stopped(tok_service::StopReason::DeadlineExceeded) => {
+        tok_execution::Error::Stopped(tok_execution::StopReason::DeadlineExceeded) => {
             ErrorCode::Timeout.into()
         }
     }
@@ -284,16 +283,16 @@ async fn execute_request(
     message: LogicalMessage,
     span: tracing::Span,
 ) -> Result<Reply> {
-    let context = SessionHandle(Arc::clone(state))
-        .execution_context(
-            format!("player/request/{}", message.message_id),
-            Source::Client {
-                request_id: message.request_id,
-                message_id: message.message_id,
-            },
-        )?
+    let mut context = SessionHandle(Arc::clone(state))
+        .execution_context(format!("player/request/{}", message.message_id))?
         .with_span(span);
-    tok_service::Layer
+    context
+        .extensions_mut()
+        .insert(crate::player::ClientRequest {
+            request_id: message.request_id,
+            message_id: message.message_id,
+        });
+    tok_execution::Layer
         .layer(tower::service_fn(|request| {
             executor.execute_request(request)
         }))
@@ -314,15 +313,13 @@ async fn execute_event(
     event: Arc<tok_events::Message>,
     span: tracing::Span,
 ) -> Result<Option<tok_player::TimerUpdate>> {
-    let context = SessionHandle(Arc::clone(state))
-        .execution_context(
-            format!("player/event/{}", event.event_type),
-            Source::Event {
-                event_id: event.event_id.to_string(),
-            },
-        )?
+    let mut context = SessionHandle(Arc::clone(state))
+        .execution_context(format!("player/event/{}", event.event_type))?
         .with_span(span);
-    tok_service::Layer
+    context.extensions_mut().insert(event.event_id.clone());
+    context.extensions_mut().insert(event.topic.clone());
+    context.extensions_mut().insert(Arc::clone(&event));
+    tok_execution::Layer
         .layer(tower::service_fn(|request| executor.execute_event(request)))
         .oneshot(Request::new(
             context,
@@ -340,16 +337,14 @@ async fn execute_timer(
     executor: &dyn Executor,
     request_id: u64,
     spec: tok_player::TimerSpec,
-    trigger: tok_core::TimerTrigger,
+    trigger: tok_player::TimerTrigger,
     span: tracing::Span,
 ) -> Result<Reply> {
-    let context = SessionHandle(Arc::clone(state))
-        .execution_context(
-            format!("player/timer/{}", spec.message_id),
-            Source::Timer(trigger.clone()),
-        )?
+    let mut context = SessionHandle(Arc::clone(state))
+        .execution_context(format!("player/timer/{}", spec.message_id))?
         .with_span(span);
-    tok_service::Layer
+    context.extensions_mut().insert(trigger.clone());
+    tok_execution::Layer
         .layer(tower::service_fn(|request| executor.execute_timer(request)))
         .oneshot(Request::new(
             context,

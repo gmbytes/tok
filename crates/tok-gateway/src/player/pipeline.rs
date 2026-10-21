@@ -2,8 +2,8 @@
 use super::{EventInput, EventTask, Executor, Reply, RequestInput, Task, TimerInput};
 use crate::{GatewayError, Result};
 use std::sync::Arc;
+use tok_execution::Request;
 use tok_player::{LogicalMessage, TimerUpdate};
-use tok_service::Request;
 use tower::{Layer, Service, ServiceExt, util::BoxCloneSyncService};
 type Chain<I, O> = BoxCloneSyncService<Request<I>, O, GatewayError>;
 

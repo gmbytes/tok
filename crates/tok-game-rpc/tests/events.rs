@@ -32,6 +32,25 @@ async fn event_handlers_are_inaccessible_to_requests_and_timers_and_require_sess
     let mut registry = HandlerRegistry::new();
     registry
         .register_event::<Update, _>(move |request| {
+            // RPC 关联信息与事件元信息可同时存在，不再互斥选择来源。
+            assert_eq!(
+                request.context.extensions().get::<CallContext>(),
+                Some(&*request.input.state)
+            );
+            assert_eq!(
+                request.context.extensions().get::<EventId>(),
+                Some(&request.input.event.event_id)
+            );
+            assert_eq!(
+                request.context.extensions().get::<tok_events::Topic>(),
+                Some(&request.input.event.topic)
+            );
+            let original = request
+                .context
+                .extensions()
+                .get::<Arc<tok_events::Message>>()
+                .unwrap();
+            assert_eq!(original.event_id, request.input.event.event_id);
             let context = request.input.state;
             let id = &request.input.event.event_id;
             assert_eq!(request.input.event.topic.as_str(), Some("realm:42"));
@@ -107,7 +126,7 @@ async fn event_handlers_are_inaccessible_to_requests_and_timers_and_require_sess
         tonic::Code::Unimplemented
     );
     let mut timer = context.clone();
-    timer.timer = Some(tok_core::TimerTrigger {
+    timer.timer = Some(tok_player::TimerTrigger {
         timer_id: "t".into(),
         scheduled_at_ms: 1,
         fired_at_ms: 1,
@@ -231,15 +250,12 @@ async fn ordered_event_handlers_compose_timer_effects_without_client_payloads() 
             )
             .unwrap(),
         );
-        let execution = tok_service::Context::new(
+        let execution = tok_execution::Context::new(
             tok_core::service::Identity {
                 node_id: "node".into(),
                 service_name: "player".into(),
             },
             "event",
-            tok_service::Source::Event {
-                event_id: id.to_string(),
-            },
             Duration::from_secs(1),
             CancellationToken::new(),
         )
@@ -254,7 +270,7 @@ async fn ordered_event_handlers_compose_timer_effects_without_client_payloads() 
         };
         let response = tok_game_rpc::Handler::event(
             &registry,
-            tok_service::Request::new(execution, (call, event)),
+            tok_execution::Request::new(execution, (call, event)),
         )
         .await
         .unwrap();

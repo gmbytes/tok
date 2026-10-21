@@ -6,7 +6,7 @@ use std::sync::{
 };
 use tok_gateway::transport::{AcceptTask, GatewayTransport};
 use tok_gateway::{Gateway, GatewayConfig, GatewayIngress, GatewayTask};
-use tok_service::task;
+use tok_lifecycle::task;
 use tokio::{sync::mpsc, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
 
@@ -188,12 +188,12 @@ async fn custom_ingress_uses_task_capacity_and_clean_shutdown() {
             .launch("test-background", Box::pin(async { Ok(()) }))
             .await
             .unwrap_err(),
-        tok_service::task::SubmitError::CapacityExceeded
+        tok_lifecycle::task::SubmitError::CapacityExceeded
     );
     fixture.stop.cancel();
     fixture.result().await.unwrap();
     fixture.tasks.wait_finished().await;
-    assert_eq!(fixture.tasks.state(), tok_service::task::State::Stopped);
+    assert_eq!(fixture.tasks.state(), tok_lifecycle::task::State::Stopped);
     assert!(fixture.stopped.load(Ordering::SeqCst) > 0);
     assert!(fixture.finished.load(Ordering::SeqCst));
     assert!(fixture.tasks.cancellation().is_cancelled());

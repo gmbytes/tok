@@ -98,10 +98,10 @@ pub struct Service<S> {
     inner: S,
     layer: Layer,
 }
-impl<S> tower::Service<tok_service::Request<(CallContext, Payload)>> for Service<S>
+impl<S> tower::Service<tok_execution::Request<(CallContext, Payload)>> for Service<S>
 where
     S: tower::Service<
-            tok_service::Request<(CallContext, Payload)>,
+            tok_execution::Request<(CallContext, Payload)>,
             Response = CallResponse,
             Error = Status,
         > + Clone
@@ -116,7 +116,7 @@ where
         // 不预占租约；内部 readiness 由 call 中的 oneshot 驱动，受执行预算约束。
         Poll::Ready(Ok(()))
     }
-    fn call(&mut self, request: tok_service::Request<(CallContext, Payload)>) -> Self::Future {
+    fn call(&mut self, request: tok_execution::Request<(CallContext, Payload)>) -> Self::Future {
         let execution = request.context;
         let (context, payload) = request.input;
         let layer = self.layer.clone();
@@ -159,7 +159,7 @@ where
                 let execution_started = Instant::now();
                 let result = timeout(
                     config.execution_timeout,
-                    inner.oneshot(tok_service::Request::new(execution, (context, payload))),
+                    inner.oneshot(tok_execution::Request::new(execution, (context, payload))),
                 )
                 .await
                 .unwrap_or_else(|_| Err(Status::deadline_exceeded("持锁业务执行超时")));

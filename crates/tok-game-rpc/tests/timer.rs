@@ -8,13 +8,14 @@ use std::{
     },
     time::Duration,
 };
-use tok_core::{ServiceDescriptor, TimerTrigger};
+use tok_core::ServiceDescriptor;
 use tok_game_rpc::CallContext;
 use tok_game_rpc::{
     HandlerRegistry, HandlerReply, RpcClients, RpcEndpoint, RpcService,
     protocol::internal::v1::{self as proto, Payload},
     timer::{decode_update, encode_update},
 };
+use tok_player::TimerTrigger;
 use tok_player::{SessionIdentity, TimerSpec, TimerUpdate};
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;

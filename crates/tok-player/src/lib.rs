@@ -13,4 +13,4 @@ mod timer;
 pub use error::{Error, Result};
 pub use message::{LogicalMessage, MessageKind};
 pub use session::SessionIdentity;
-pub use timer::{TimerSpec, TimerUpdate};
+pub use timer::{TimerSpec, TimerTrigger, TimerUpdate};
