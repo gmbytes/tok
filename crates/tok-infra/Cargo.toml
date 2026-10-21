@@ -8,6 +8,7 @@ license.workspace = true
 
 [dependencies]
 tok-core.workspace = true
+tok-player.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 redis.workspace = true

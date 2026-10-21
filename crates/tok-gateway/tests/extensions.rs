@@ -11,12 +11,7 @@ use std::{
     task::{Context as TaskContext, Poll},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use tok_core::{
-    LogicalMessage, MessageKind, TimerSpec, TimerUpdate,
-    coordination::{OwnershipStore, SessionOwner},
-    execution::Extensions,
-    service::Identity,
-};
+use tok_core::{execution::Extensions, service::Identity};
 use tok_gateway::{
     ErrorCode, Gateway, GatewayError, Result,
     codec::{FrameCodec, VERSION},
@@ -31,6 +26,10 @@ use tok_gateway::{
     protocol::{self, Frame, frame::Content},
 };
 use tok_infra::ownership::MemoryOwnership;
+use tok_player::{
+    LogicalMessage, MessageKind, TimerSpec, TimerUpdate,
+    ownership::{Owner as SessionOwner, Store as OwnershipStore},
+};
 use tok_service::{
     Request,
     lifecycle::{Builder, Init, InitTask},
@@ -66,7 +65,7 @@ impl extension::Factory for StateFactory {
     fn kind(&self) -> &str {
         "test.state.v1"
     }
-    fn initialize(&self, request: Request<tok_core::SessionIdentity>) -> Result<Extensions> {
+    fn initialize(&self, request: Request<tok_player::SessionIdentity>) -> Result<Extensions> {
         assert!(
             request
                 .context
@@ -102,7 +101,10 @@ impl extension::Factory for StateFactory {
             Err(ErrorCode::ResumeUnavailable.into())
         }
     }
-    fn restore(&self, request: Request<(tok_core::SessionIdentity, &[u8])>) -> Result<Extensions> {
+    fn restore(
+        &self,
+        request: Request<(tok_player::SessionIdentity, &[u8])>,
+    ) -> Result<Extensions> {
         self.validate(request.input.1)?;
         let mut bytes = [0; 8];
         bytes.copy_from_slice(request.input.1);

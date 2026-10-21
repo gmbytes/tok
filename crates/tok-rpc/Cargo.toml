@@ -10,6 +10,7 @@ license.workspace = true
 tok-service.workspace = true
 tok-events.workspace = true
 tok-core.workspace = true
+tok-player.workspace = true
 tok-proto.workspace = true
 tonic.workspace = true
 tower.workspace = true

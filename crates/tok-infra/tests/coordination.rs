@@ -1,17 +1,15 @@
 //! bid 路由和内存所有权竞争、接管与过期的集成测试。
 
 use std::time::Duration;
-use tok_core::{
-    Error, ServiceDescriptor, ServiceDirectory,
-    coordination::{OwnershipStore, SessionOwner},
-};
+use tok_core::{Error, ServiceDescriptor, ServiceDirectory};
 use tok_infra::{ownership::MemoryOwnership, routing::route};
+use tok_player::ownership::{Owner as SessionOwner, Store as OwnershipStore};
 
 struct Directory(Vec<ServiceDescriptor>);
 
 #[tokio::test]
 async fn latest_login_blocks_old_credentials_after_release_but_survives_transfer() {
-    use tok_core::credentials::ResumeClaims;
+    use tok_player::credentials::ResumeClaims;
     let store = MemoryOwnership::new(2).unwrap();
     let ttl = Duration::from_secs(2);
     let first = store
@@ -33,7 +31,7 @@ async fn latest_login_blocks_old_credentials_after_release_but_survives_transfer
         store
             .acquire_for_relogin(claims("s1"), "stale".into(), owner("a"), None, ttl)
             .await,
-        Err(Error::OwnershipConflict)
+        Err(tok_player::Error::OwnershipConflict)
     ));
     let fresh = store
         .acquire_for_relogin(claims("s2"), "s3".into(), owner("a"), None, ttl)
@@ -143,7 +141,7 @@ async fn ownership_competition_takeover_and_release_are_conditional() {
         store
             .acquire("43".into(), "other".into(), owner("c"), None, ttl)
             .await,
-        Err(Error::CoordinationUnavailable(_))
+        Err(tok_player::Error::Core(Error::CoordinationUnavailable(_)))
     ));
     let next = store
         .acquire(
@@ -158,7 +156,7 @@ async fn ownership_competition_takeover_and_release_are_conditional() {
     assert!(next.identity.epoch > first.identity.epoch);
     assert!(matches!(
         store.renew(first.clone(), ttl).await,
-        Err(Error::OwnershipConflict)
+        Err(tok_player::Error::OwnershipConflict)
     ));
     assert!(!store.release(first).await.unwrap());
     assert_eq!(store.lookup("42").await.unwrap(), Some(next.clone()));
@@ -188,7 +186,7 @@ async fn expired_ownership_cannot_be_renewed_and_capacity_is_reclaimed() {
     tokio::time::sleep(Duration::from_millis(20)).await;
     assert!(matches!(
         store.renew(lease.clone(), Duration::from_secs(1)).await,
-        Err(Error::OwnershipConflict)
+        Err(tok_player::Error::OwnershipConflict)
     ));
     assert!(store.lookup("42").await.unwrap().is_none());
     let fresh = store
@@ -206,6 +204,6 @@ async fn expired_ownership_cannot_be_renewed_and_capacity_is_reclaimed() {
         store
             .acquire("44".into(), "bad".into(), owner("b"), None, Duration::ZERO)
             .await,
-        Err(Error::InvalidInput(_))
+        Err(tok_player::Error::Core(Error::InvalidInput(_)))
     ));
 }

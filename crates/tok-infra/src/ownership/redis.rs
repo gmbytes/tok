@@ -3,9 +3,13 @@
 use redis::{Client, Script, aio::MultiplexedConnection};
 use serde::Deserialize;
 use std::{future::Future, time::Duration};
-use tok_core::{
-    Error, Result, SessionIdentity,
-    coordination::{CoordinationTask, OwnershipStore, SessionOwner, SessionOwnership},
+use tok_player::{Error, Result};
+use tok_player::{
+    SessionIdentity,
+    ownership::{
+        Owner as SessionOwner, Record as SessionOwnership, Store as OwnershipStore,
+        Task as OwnershipTask,
+    },
 };
 
 // epoch 必须按十进制字符串比较和返回，不能经过 Lua number（超过 2^53 会失真）。
@@ -76,7 +80,7 @@ impl std::fmt::Debug for RedisOwnershipConfig {
 }
 impl RedisOwnershipConfig {
     /// 验证环境名、连接格式和有限期限，不连接 Redis。
-    pub fn validate(&self) -> Result<()> {
+    pub fn validate(&self) -> tok_core::Result<()> {
         if self.namespace.is_empty()
             || self.namespace.len() > 64
             || !self
@@ -87,7 +91,7 @@ impl RedisOwnershipConfig {
             || self.operation_timeout_ms > 60_000
             || Client::open(self.url.as_str()).is_err()
         {
-            return Err(Error::InvalidConfig(
+            return Err(tok_core::Error::InvalidConfig(
                 "Redis 所有权配置或操作期限无效".into(),
             ));
         }
@@ -123,7 +127,7 @@ impl RedisOwnership {
         expected_epoch: Option<u64>,
         expected_session_id: Option<String>,
         ttl: Duration,
-    ) -> CoordinationTask<'_, SessionOwnership> {
+    ) -> OwnershipTask<'_, SessionOwnership> {
         Box::pin(async move {
             identity(&session_id, 1024)?;
             identity(&owner.node_id, 256)?;
@@ -210,17 +214,23 @@ impl RedisOwnership {
     }
 }
 fn unavailable() -> Error {
-    Error::CoordinationUnavailable("Redis 所有权操作失败或超时".into())
+    Error::Core(tok_core::Error::CoordinationUnavailable(
+        "Redis 所有权操作失败或超时".into(),
+    ))
 }
 fn identity(value: &str, limit: usize) -> Result<()> {
     if value.trim().is_empty() || value.len() > limit {
-        return Err(Error::InvalidInput("所有权身份长度无效".into()));
+        return Err(Error::Core(tok_core::Error::InvalidInput(
+            "所有权身份长度无效".into(),
+        )));
     }
     Ok(())
 }
 fn ttl_millis(ttl: Duration) -> Result<u64> {
     if ttl < Duration::from_millis(1) || ttl > Duration::from_secs(86_400) {
-        return Err(Error::InvalidInput("所有权租期必须为 1 毫秒至 1 天".into()));
+        return Err(Error::Core(tok_core::Error::InvalidInput(
+            "所有权租期必须为 1 毫秒至 1 天".into(),
+        )));
     }
     Ok(ttl.as_millis() as u64)
 }
@@ -241,7 +251,7 @@ impl OwnershipStore for RedisOwnership {
         expected: SessionOwnership,
         target: SessionOwner,
         ttl: Duration,
-    ) -> CoordinationTask<'_, SessionOwnership> {
+    ) -> OwnershipTask<'_, SessionOwnership> {
         Box::pin(async move {
             validate(&expected)?;
             identity(&target.node_id, 256)?;
@@ -279,7 +289,7 @@ impl OwnershipStore for RedisOwnership {
             .await
         })
     }
-    fn lookup(&self, player_id: &str) -> CoordinationTask<'_, Option<SessionOwnership>> {
+    fn lookup(&self, player_id: &str) -> OwnershipTask<'_, Option<SessionOwnership>> {
         let player_id = player_id.to_owned();
         Box::pin(async move {
             let (lease, _, _) = self.keys(&player_id)?;
@@ -330,17 +340,17 @@ impl OwnershipStore for RedisOwnership {
         owner: SessionOwner,
         expected_epoch: Option<u64>,
         ttl: Duration,
-    ) -> CoordinationTask<'_, SessionOwnership> {
+    ) -> OwnershipTask<'_, SessionOwnership> {
         self.acquire_checked(player_id, session_id, owner, expected_epoch, None, ttl)
     }
     fn acquire_for_relogin(
         &self,
-        previous: tok_core::credentials::ResumeClaims,
+        previous: tok_player::credentials::ResumeClaims,
         session_id: String,
         owner: SessionOwner,
         expected_epoch: Option<u64>,
         ttl: Duration,
-    ) -> CoordinationTask<'_, SessionOwnership> {
+    ) -> OwnershipTask<'_, SessionOwnership> {
         self.acquire_checked(
             previous.player_id,
             session_id,
@@ -350,7 +360,7 @@ impl OwnershipStore for RedisOwnership {
             ttl,
         )
     }
-    fn renew(&self, ownership: SessionOwnership, ttl: Duration) -> CoordinationTask<'_, ()> {
+    fn renew(&self, ownership: SessionOwnership, ttl: Duration) -> OwnershipTask<'_, ()> {
         Box::pin(async move {
             validate(&ownership)?;
             let milliseconds = ttl_millis(ttl)?;
@@ -378,7 +388,7 @@ impl OwnershipStore for RedisOwnership {
             .await
         })
     }
-    fn release(&self, ownership: SessionOwnership) -> CoordinationTask<'_, bool> {
+    fn release(&self, ownership: SessionOwnership) -> OwnershipTask<'_, bool> {
         Box::pin(async move {
             validate(&ownership)?;
             let (lease, _, _) = self.keys(&ownership.identity.player_id)?;

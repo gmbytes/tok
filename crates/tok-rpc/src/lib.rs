@@ -11,6 +11,7 @@ mod binding;
 pub mod business;
 mod call;
 mod client;
+mod context;
 mod endpoint;
 mod handler;
 pub mod lock;
@@ -20,6 +21,7 @@ pub mod timer;
 
 pub use binding::Binding;
 pub use client::RpcClients;
+pub use context::CallContext;
 pub use endpoint::{RpcEndpoint, RpcReadiness, RpcServerTask};
 pub use handler::{
     CallHandler, CallTask, EventTask, HandlerRegistry, HandlerReply, RpcService, TowerHandler,
@@ -35,12 +37,12 @@ pub use tower;
 pub fn notification<M: prost::Message>(
     message_id: u32,
     message: &M,
-) -> Result<tok_core::LogicalMessage, Error> {
+) -> Result<tok_player::LogicalMessage, Error> {
     if message_id == 0 {
         return Err(Error::Configuration("通知消息 ID 必须非零".into()));
     }
-    Ok(tok_core::LogicalMessage {
-        kind: tok_core::MessageKind::Notify,
+    Ok(tok_player::LogicalMessage {
+        kind: tok_player::MessageKind::Notify,
         message_id,
         request_id: 0,
         server_seq: None,

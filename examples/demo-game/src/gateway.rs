@@ -4,9 +4,9 @@ mod middleware;
 use std::{sync::Arc, time::Duration};
 use tok::{
     application::Binding,
-    core::coordination::{OwnershipStore, SessionOwner},
     gateway::{ErrorCode, Gateway, player},
     infra::routing::RendezvousRouter,
+    player::ownership::{Owner as SessionOwner, Store as OwnershipStore},
     rpc::RpcClients,
     service::{
         lifecycle::{Factory, Init, InitTask},
@@ -36,7 +36,7 @@ pub struct PlayerIngressFactory {
     events: Option<tok::events::nats::Config>,
     config: player::Config,
     ownership: Arc<dyn OwnershipStore>,
-    tokens: Option<Arc<dyn tok::core::credentials::ResumeTokenCodec>>,
+    tokens: Option<Arc<dyn tok::player::credentials::ResumeTokenCodec>>,
     gateway_rpc: Option<tok::gateway::rpc::GatewayRpcService>,
 }
 impl PlayerIngressFactory {
@@ -58,7 +58,7 @@ impl PlayerIngressFactory {
     /// 注入本地恢复凭证组件。
     pub fn with_resume_token_codec(
         mut self,
-        tokens: Arc<dyn tok::core::credentials::ResumeTokenCodec>,
+        tokens: Arc<dyn tok::player::credentials::ResumeTokenCodec>,
     ) -> Self {
         self.tokens = Some(tokens);
         self

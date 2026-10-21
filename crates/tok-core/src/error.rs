@@ -3,18 +3,12 @@
 /// 框架内部错误；客户端 ErrorCode 映射由网关协议层提供。
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    /// 本地凭证密钥或系统时钟不可用，不包含密钥及 token。
-    #[error("本地凭证组件不可用")]
-    CredentialUnavailable,
     /// 调用参数不符合组件契约，附带原因。
     #[error("调用参数无效：{0}")]
     InvalidInput(String),
     /// 目标业务服务没有可用节点，附带服务名。
     #[error("没有可用的服务节点：{0}")]
     NoAvailableService(String),
-    /// 所有权已过期或与当前 epoch、会话、所有者不匹配。
-    #[error("session 所有权已变化或过期")]
-    OwnershipConflict,
     /// 协调后端无法完成操作，附带原因。
     #[error("协调后端不可用：{0}")]
     CoordinationUnavailable(String),

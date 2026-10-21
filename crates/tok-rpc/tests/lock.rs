@@ -6,11 +6,9 @@ use std::{
     },
     time::Duration,
 };
-use tok_core::{
-    CallContext,
-    coordination::{CoordinationTask, LockBackend, LockKey, LockLease},
-};
+use tok_core::coordination::{CoordinationTask, LockBackend, LockKey, LockLease};
 use tok_proto::internal::v1::{CallResponse, Payload};
+use tok_rpc::CallContext;
 use tok_rpc::{
     lock::{Config, Layer},
     tower::{self, Layer as _, ServiceExt},

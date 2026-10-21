@@ -6,7 +6,7 @@ use crate::{
     player::{Authenticator, Config, Executor, SessionManager},
 };
 use std::{sync::Arc, time::Duration};
-use tok_core::coordination::{OwnershipStore, SessionOwner};
+use tok_player::ownership::{Owner as SessionOwner, Store as OwnershipStore};
 
 use tokio::net::TcpStream;
 use tokio_util::sync::CancellationToken;
@@ -28,7 +28,7 @@ impl Ingress {
     /// 回调必须短小且不阻塞；交接保留原主题，不重新应用新登录策略。
     pub fn with_topic_policy<F>(mut self, policy: F) -> Self
     where
-        F: Fn(tok_service::Request<tok_core::SessionIdentity>) -> Result<Vec<String>>
+        F: Fn(tok_service::Request<tok_player::SessionIdentity>) -> Result<Vec<String>>
             + Send
             + Sync
             + 'static,
@@ -80,7 +80,7 @@ impl Ingress {
     /// 组装纯本地签名凭证组件，验证不访问网络。
     pub fn with_resume_token_codec(
         mut self,
-        store: Arc<dyn tok_core::credentials::ResumeTokenCodec>,
+        store: Arc<dyn tok_player::credentials::ResumeTokenCodec>,
     ) -> Self {
         self.sessions = self.sessions.with_resume_token_codec(store);
         self

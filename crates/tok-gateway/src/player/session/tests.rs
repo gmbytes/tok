@@ -16,11 +16,12 @@ use std::{
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use tok_core::{
-    LogicalMessage, MessageKind, TimerSpec, TimerTrigger, TimerUpdate,
-    coordination::{OwnershipStore, SessionOwner},
-};
+use tok_core::TimerTrigger;
 use tok_infra::ownership::MemoryOwnership;
+use tok_player::{
+    LogicalMessage, MessageKind, TimerSpec, TimerUpdate,
+    ownership::{Owner as SessionOwner, Store as OwnershipStore},
+};
 use tokio::sync::{Notify, Semaphore, mpsc};
 use tokio_util::sync::CancellationToken;
 

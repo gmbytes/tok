@@ -6,12 +6,12 @@ use tok::{
     application::CancellationToken,
     core::{
         TimerTrigger,
-        coordination::SessionOwner,
         execution::{Context, Source},
         service::Identity,
     },
     gateway::{Gateway, player},
     infra::ownership::MemoryOwnership,
+    player::ownership::Owner as SessionOwner,
     service::{Layer as ExecutionLayer, Request, task},
 };
 use tower::{Layer, ServiceExt, service_fn};

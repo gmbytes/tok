@@ -9,11 +9,7 @@ use std::{
     },
     time::Duration,
 };
-use tok_core::{
-    LogicalMessage, MessageKind, ServiceDescriptor,
-    coordination::{OwnershipStore, SessionOwner},
-    credentials::ResumeTokenCodec,
-};
+use tok_core::ServiceDescriptor;
 use tok_gateway::{
     Gateway,
     codec::{FrameCodec, VERSION},
@@ -25,6 +21,11 @@ use tok_gateway::{
     rpc::GatewayRpcService,
 };
 use tok_infra::{discovery::MemoryDirectory, ownership::MemoryOwnership};
+use tok_player::{
+    LogicalMessage, MessageKind,
+    credentials::ResumeTokenCodec,
+    ownership::{Owner as SessionOwner, Store as OwnershipStore},
+};
 use tok_rpc::{RpcEndpoint, protocol::internal::v1 as proto};
 use tokio::{
     net::{TcpListener, TcpStream},
@@ -41,10 +42,7 @@ impl OwnershipStore for TransferFault {
     fn lookup(
         &self,
         player: &str,
-    ) -> tok_core::coordination::CoordinationTask<
-        '_,
-        Option<tok_core::coordination::SessionOwnership>,
-    > {
+    ) -> tok_player::ownership::Task<'_, Option<tok_player::ownership::Record>> {
         self.inner.lookup(player)
     }
     fn acquire(
@@ -54,37 +52,36 @@ impl OwnershipStore for TransferFault {
         owner: SessionOwner,
         expected: Option<u64>,
         ttl: Duration,
-    ) -> tok_core::coordination::CoordinationTask<'_, tok_core::coordination::SessionOwnership>
-    {
+    ) -> tok_player::ownership::Task<'_, tok_player::ownership::Record> {
         self.inner.acquire(player, session, owner, expected, ttl)
     }
     fn renew(
         &self,
-        value: tok_core::coordination::SessionOwnership,
+        value: tok_player::ownership::Record,
         ttl: Duration,
-    ) -> tok_core::coordination::CoordinationTask<'_, ()> {
+    ) -> tok_player::ownership::Task<'_, ()> {
         self.inner.renew(value, ttl)
     }
     fn release(
         &self,
-        value: tok_core::coordination::SessionOwnership,
-    ) -> tok_core::coordination::CoordinationTask<'_, bool> {
+        value: tok_player::ownership::Record,
+    ) -> tok_player::ownership::Task<'_, bool> {
         self.inner.release(value)
     }
     fn transfer(
         &self,
-        value: tok_core::coordination::SessionOwnership,
+        value: tok_player::ownership::Record,
         target: SessionOwner,
         ttl: Duration,
-    ) -> tok_core::coordination::CoordinationTask<'_, tok_core::coordination::SessionOwnership>
-    {
+    ) -> tok_player::ownership::Task<'_, tok_player::ownership::Record> {
         Box::pin(async move {
             if self.committed_error {
                 self.inner.transfer(value, target, ttl).await?;
             }
-            Err(tok_core::Error::CoordinationUnavailable(
-                "injected transfer result loss".into(),
-            ))
+            Err(
+                tok_core::Error::CoordinationUnavailable("injected transfer result loss".into())
+                    .into(),
+            )
         })
     }
 }
@@ -144,7 +141,7 @@ impl Executor for Execution {
                 self.permits.acquire().await.unwrap().forget();
             }
             let timers = (request.message_id == 2).then(|| {
-                tok_core::TimerUpdate::ReplaceAll(vec![tok_core::TimerSpec {
+                tok_player::TimerUpdate::ReplaceAll(vec![tok_player::TimerSpec {
                     timer_id: "production".into(),
                     message_id: 9,
                     body: vec![],
@@ -1056,7 +1053,7 @@ impl tok_gateway::player::session::extension::Factory for SessionExtension {
     }
     fn initialize(
         &self,
-        request: tok_service::Request<tok_core::SessionIdentity>,
+        request: tok_service::Request<tok_player::SessionIdentity>,
     ) -> tok_gateway::Result<tok_core::execution::Extensions> {
         let mut extensions = tok_core::execution::Extensions::default();
         extensions.insert(ExtensionData {
@@ -1092,7 +1089,7 @@ impl tok_gateway::player::session::extension::Factory for SessionExtension {
     }
     fn restore(
         &self,
-        request: tok_service::Request<(tok_core::SessionIdentity, &[u8])>,
+        request: tok_service::Request<(tok_player::SessionIdentity, &[u8])>,
     ) -> tok_gateway::Result<tok_core::execution::Extensions> {
         self.validate(request.input.1)?;
         if matches!(self.mode, ExtensionMode::RejectRestore) {

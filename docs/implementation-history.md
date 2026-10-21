@@ -467,3 +467,9 @@ P4 已提交为 `e8dda17`。未运行 release 构建或 Linux 本地验证。下
 release 示例构建通过；release 二进制对全部 8 份示例配置校验通过，RPC 与 TCP 客户端 smoke 通过。UTF-8/LF、仓库内 81 处 Markdown 链接及锚点、git diff 空白检查通过。CI 加入应用组合、Redis 请求锁及真实 NATS 专项；未在本地运行 Linux，不将 CI 配置视为已通过结果。
 
 P1–P7 方向校正完成本轮验收，P7 随本次提交交付。后续功能仍按明确边界另行设计，当前不提供吞吐或延迟压测结论。
+
+## 玩家运行契约独立分库（2026-10-21 Windows）
+
+以 P7 提交 `017a9ea` 为基线，新增 tok-player，拆出会话身份、逻辑消息、玩家计时需求、所有权及恢复凭证契约。通用请求锁和计时来源保留在 core，RPC 专用 CallContext 归 tok-rpc；玩家专用错误随契约迁移，通用错误保留原类型。tok-service 的执行、生命周期和任务监督不依赖玩家库。网关、RPC、infra、demo 和指南迁移至新路径，不提供旧路径兼容别名，线协议和租约语义不变。
+
+本轮 Windows 验收：`just verify docs` 通过，含 249 项工作区测试（12 项指南示例、2 项编译失败文档测试）、全目标 Clippy、格式检查和 rustdoc。application、execution、lifecycle、events、RPC、TCP 客户端及 NATS 七个 smoke 通过；真实 Redis 所有权 5 项及共享所有权/三进程交接 2 项外部专项通过。Cargo 依赖核对确认 tok-core 不依赖玩家契约，tok-service 与 tok-player 均只引用 tok-core 这一工作区基础库，tok-events 不依赖 tok-player。UTF-8/LF、内部文档链接及空白检查通过。按用户要求未做 release 构建；未运行 Linux、完整 NATS 专项或与迁移无关的发现/请求锁外部专项。本轮随本次提交交付。

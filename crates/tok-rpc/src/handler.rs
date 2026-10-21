@@ -1,10 +1,12 @@
+use crate::CallContext;
 use prost::Message;
 use std::{collections::BTreeMap, future::Future, pin::Pin, sync::Arc, time::Duration};
 use tok_core::{
-    CallContext, SessionIdentity, TimerTrigger, TimerUpdate,
+    TimerTrigger,
     execution::{Context, Source, StopReason},
     service::Identity,
 };
+use tok_player::{SessionIdentity, TimerUpdate};
 use tok_proto::internal::v1::{self as proto, CallRequest, CallResponse, Payload};
 use tok_service::Request as ExecutionRequest;
 use tonic::{Request, Response, Status};

@@ -19,7 +19,7 @@ use std::{
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use tok_core::coordination::{OwnershipStore, SessionOwner};
+use tok_player::ownership::{Owner as SessionOwner, Store as OwnershipStore};
 use tok_service::task;
 use tokio::sync::{Notify, mpsc};
 use tokio_util::sync::CancellationToken;
@@ -39,7 +39,7 @@ struct Registry {
 }
 
 type TopicPolicy =
-    dyn Fn(tok_service::Request<tok_core::SessionIdentity>) -> Result<Vec<String>> + Send + Sync;
+    dyn Fn(tok_service::Request<tok_player::SessionIdentity>) -> Result<Vec<String>> + Send + Sync;
 
 /// 有界的玩家会话目录，由 Ingress 构造并通过 sessions 获取。
 ///
@@ -67,7 +67,7 @@ pub(super) struct ManagerState {
     pub(super) tasks: task::Handle,
     pub(super) gateway: crate::Handle,
     pub(super) shutdown: CancellationToken,
-    resume_token_codec: Arc<dyn tok_core::credentials::ResumeTokenCodec>,
+    resume_token_codec: Arc<dyn tok_player::credentials::ResumeTokenCodec>,
 }
 
 impl SessionManager {
@@ -113,7 +113,7 @@ impl SessionManager {
 
     pub(in crate::player) fn with_topic_policy<F>(mut self, policy: F) -> Self
     where
-        F: Fn(tok_service::Request<tok_core::SessionIdentity>) -> Result<Vec<String>>
+        F: Fn(tok_service::Request<tok_player::SessionIdentity>) -> Result<Vec<String>>
             + Send
             + Sync
             + 'static,
@@ -145,11 +145,11 @@ impl SessionManager {
     pub(in crate::player) fn authenticate_resume_token(
         &self,
         token: &str,
-    ) -> Result<tok_core::credentials::ResumeClaims> {
+    ) -> Result<tok_player::credentials::ResumeClaims> {
         self.verify_resume_token(token)
     }
 
-    fn verify_resume_token(&self, token: &str) -> Result<tok_core::credentials::ResumeClaims> {
+    fn verify_resume_token(&self, token: &str) -> Result<tok_player::credentials::ResumeClaims> {
         self.inner
             .resume_token_codec
             .verify(token)
@@ -160,7 +160,7 @@ impl SessionManager {
     /// 注入纯本地签发与验证组件，启动接入前完成组装。
     pub fn with_resume_token_codec(
         mut self,
-        codec: Arc<dyn tok_core::credentials::ResumeTokenCodec>,
+        codec: Arc<dyn tok_player::credentials::ResumeTokenCodec>,
     ) -> Self {
         Arc::make_mut(&mut self.inner).resume_token_codec = codec;
         self
@@ -500,7 +500,7 @@ impl SessionManager {
         &self,
         player_id: String,
         sender: OutboundSender,
-        previous: Option<tok_core::credentials::ResumeClaims>,
+        previous: Option<tok_player::credentials::ResumeClaims>,
     ) -> Result<SessionHandle> {
         let _activity = self.activity()?;
         if player_id.trim().is_empty() || self.inner.shutdown.is_cancelled() {
@@ -571,7 +571,7 @@ impl SessionManager {
             .await
             .map_err(|_| ErrorCode::Timeout)?
             .map_err(|error| match error {
-                tok_core::Error::OwnershipConflict => ErrorCode::SessionReplaced,
+                tok_player::Error::OwnershipConflict => ErrorCode::SessionReplaced,
                 _ => ErrorCode::Unavailable,
             })?;
         let resume_token = match self.inner.resume_token_codec.issue(

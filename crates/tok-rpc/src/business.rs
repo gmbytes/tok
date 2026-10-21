@@ -1,7 +1,8 @@
 //! 普通 BusinessRpc 客户端适配；不要求会话，不自动加锁。
+use crate::CallContext;
 use crate::{RpcClients, call};
 use std::sync::Arc;
-use tok_core::{CallContext, ServiceDescriptor};
+use tok_core::ServiceDescriptor;
 use tok_proto::internal::v1::{self as proto, CallResponse, Payload};
 use tonic::Status;
 

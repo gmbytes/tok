@@ -18,7 +18,7 @@
 
 本批统一工作的根本目标是建立框架通用的“服务 + 处理链”基础设施。tok-gateway 是复用该设施的内置扩展实例，面向通用游戏运行时提供连接和 session 等能力；不是要求其他服务继承或依赖的核心基类。普通 RPC/事件服务、gateway 和游戏自定义服务使用相同的构建、上下文、中间件和生命周期扩展契约。
 
-当前 tok crate 承担统一导出与 Application 组装，已经依赖 tok-gateway。共同设施必须位于二者可共同依赖的下层：基础契约归 tok-core，通用执行、构建和运行设施由 tok-service 承载。禁止通过 gateway 依赖 tok 门面形成循环，也不在 gateway 内复制共同执行器来绕过分层。完整职责表见[框架核心与扩展分层](design.md#框架核心与扩展分层)。
+当前 tok crate 承担统一导出与 Application 组装，已经依赖 tok-gateway。共同设施必须位于二者可共同依赖的下层：通用基础契约归 tok-core，执行、构建和运行设施由 tok-service 承载；玩家会话、消息、计时需求、所有权与恢复凭证独立归 tok-player。tok-player 只依赖 tok-core，tok-service 和 tok-events 不依赖玩家契约。禁止通过 gateway 依赖 tok 门面形成循环，也不在 gateway 内复制共同执行器来绕过分层。完整职责表见[框架核心与扩展分层](design.md#框架核心与扩展分层)。
 
 构建时以普通服务和 gateway 两个最小样例验证：共同设施不导入 player/scene 或网关线协议；gateway 通过组合增加连接和会话能力；游戏从 tok 门面取得便捷组装入口，无需理解内部拆分。通用任务监督和生命周期由基础设施复用，各接入状态机继续承担自己的职责。
 
@@ -78,7 +78,7 @@ RPC 调用产生对应回应，事件产生当前 handler 的执行结果或允�
 
 架构中的 ExecutionContext 在当前 Rust 原型中使用 `tok_core::execution::Context`，采用模块限定名；同模块提供 Source、Extensions 和 StopReason。服务身份使用 `tok_core::service::Identity`，不携带网络地址。
 
-实际执行设施放在新增 tok-service，使用既有 Tower 协议，不增加平行 Handler trait：Request<T> 可携带 owned 输入或局部借用，Layer 返回 Service<S>，调用 future 保留真实输入生命周期。执行核心只依赖基础契约、Tokio、Tower、tracing 等通用设施，不依赖 gateway、RPC、事件或 NATS。tok 门面统一导出；gateway 能力在游戏示例的组装层注入，不形成反向依赖。
+实际执行设施放在 tok-service，使用既有 Tower 协议，不增加平行 Handler trait：Request<T> 可携带 owned 输入或局部借用，Layer 返回 Service<S>，调用 future 保留真实输入生命周期。执行核心只依赖基础契约、Tokio、Tower、tracing 等通用设施，不依赖 gateway、RPC、事件或 NATS。tok 门面统一导出；gateway 能力在游戏示例的组装层注入，不形成反向依赖。
 
 就绪等待放在预算 Layer 的调用 future 内；外层 poll_ready 只表示可以开始受保护的等待。原期限在派生调用中保留，取消在等待及执行期间唤醒并丢弃内层 future，非协作式处理者迟到返回也不能作为按时成功接受。此机制不回滚副作用，不等于进程级抢占或远端取消。
 

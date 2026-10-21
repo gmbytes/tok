@@ -35,6 +35,22 @@ tok-gateway 是这套基础设施的内置扩展，增加连接、认证、sessi
 
 本 crate 是统一导出与应用组装门面。共同契约和运行能力应由下层提供，gateway 不反向依赖本 crate；使用端可以继续从 tok 取得便捷接口。Application 与 Gateway 复用公共工厂和任务生命周期；RPC、事件、timer 及网关消息链使用共同执行协议。
 
+## crate 职责与导入路径
+
+| 使用入口 | 职责 |
+| --- | --- |
+| [`core`] / tok-core | 服务身份、执行上下文、发现、路由和通用请求锁契约 |
+| [`service`] / tok-service | Request、Tower 执行、服务工厂、生命周期和有界任务监督 |
+| [`player`] / tok-player | SessionIdentity、LogicalMessage、TimerSpec / TimerUpdate、所有权与恢复凭证契约 |
+| [`rpc`] / tok-rpc | CallContext、RPC 编解码、客户端和处理链适配 |
+| [`gateway`] / tok-gateway | 连接、session FIFO、计时调度、下行和恢复的运行实现 |
+
+通用服务层不依赖 tok-player。tok-player 只依赖 tok-core，供 RPC、网关和基础设施后端共同使用，不能反向依赖 gateway 或门面。[`core::TimerTrigger`] 只表达通用调度来源；玩家具体调用哪个消息、携带什么正文以及如何更新计时集合，由 player 的计时需求表达。
+
+所有权使用 [`player::ownership::Store`]、[`player::ownership::Owner`]、[`player::ownership::Record`]；恢复凭证使用 [`player::credentials::ResumeTokenCodec`]。它们的结果为 [`player::Result`]，所有权冲突与本地凭证不可用属于 [`player::Error`]；通用参数或后端错误保留在 Error::Core 中。请求锁仍使用 core::coordination，不要求玩家会话。
+
+迁移时将旧 core 下的玩家类型改从 player 导入，将 CallContext 改从 rpc 导入；不保留旧路径兼容别名。rpc::player 是 PlayerRpc 客户端适配，gateway::player 是会话运行实现，顶层 player 是共享契约，职责不同。
+
 ## 通用执行与处理链
 
 使用 [`core::execution::Context`]、类型化 [`service::Request`] 与共同的 [`service::Layer`]。
@@ -333,7 +349,7 @@ Application::register_rpc_factory 按配置的 factory（默认服务名）建�
 构造时分别传入同一个 `Arc<RpcClients>`，协议适配器共享连接但保持各自的调用约束。
 自定义 protobuf 客户端可以使用 RpcClients::channel 取得 Channel，结合 timeout 设置自己的调用预算和协议适配。
 Channel 缓存有界，节点和地址相同的服务复用连接；节点变更时调用 `invalidate` 撤销该节点缓存。
-请求携带 [`core::CallContext`]，player 调用还需匹配的 [`core::SessionIdentity`]。
+请求携带 [`rpc::CallContext`]，player 调用还需匹配的 [`player::SessionIdentity`]。
 上下文校验检查目标和字段一致性，不能代替内部调用身份认证或全局 session 所有权校验。
 
 每次调用配置期限且不自动重试。超时不表示远端业务已回滚；未知结果由游戏处理。
@@ -417,13 +433,13 @@ let rpc = RpcService::new("node-a", "guild", Arc::new(TowerHandler(layer.layer(s
 [`application::Application::directory`] 返回本进程的内存注册目录。
 
 [`infra::ownership::MemoryOwnership`] 是有界的单进程所有权后端，实现
-[`core::coordination::OwnershipStore`] 的条件获取、续租与释放。
+[`player::ownership::Store`] 的条件获取、续租与释放。
 接管必须匹配旧 epoch，旧持有者不能续租或释放新所有权。
 其 epoch 仅在后端存活期间有效，不能用于跨进程或进程重启后的协调；跨网关共享所有权使用下面的 Redis 后端。
 
 ## Redis session 所有权与超时边界
 
-[`infra::ownership::redis::RedisOwnership`] 实现 [`core::coordination::OwnershipStore`]，
+[`infra::ownership::redis::RedisOwnership`] 实现 [`player::ownership::Store`]，
 提供原子获取、显式 expected_epoch 接管、条件续租和释放。`ownership` 与 `discovery` 独立选择，默认均可使用 Memory：
 
 ```toml
@@ -613,7 +629,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 ```
 
 游戏通过 [`gateway::player::Authenticator`] 返回规范化的可信玩家 ID，同一玩家的凭据别名必须归一到相同 ID。
-`gateway::Gateway::player` 注入认证器、[`core::coordination::OwnershipStore`] 和
+`gateway::Gateway::player` 注入认证器、[`player::ownership::Store`] 和
 [`gateway::player::Executor`]；[`gateway::player::RpcExecutor`] 可组合
 [`infra::routing::RendezvousRouter`] 与 [`rpc::player::Client`] 调用 player 服务，后者复用共享 RpcClients。
 网关工厂先绑定 TCP 监听，再把监听及服务退出 token 交给 `serve` 的受监督任务。
@@ -709,7 +725,7 @@ ACK 不使用 `request_id`，不进入 player 队列，不触发 RPC。零值、
 
 成功登录的 `LoginResponse` 包含 `resume_token` 和 `resume_token_ttl_ms`。
 凭证由 HMAC-SHA256 认证，载荷包含玩家、原 session、签发和过期时刻；客户端原样保存，不假定固定长度。
-[`core::credentials::ResumeTokenCodec`] 是同步的本地签发/验签契约，不访问 Redis 或其他网络来源。
+[`player::credentials::ResumeTokenCodec`] 是同步的本地签发/验签契约，不访问 Redis 或其他网络来源。
 [`gateway::player::resume_token::SignedResumeTokens`] 使用启动时加载的共享密钥签发和验证。
 默认生成进程临时密钥，重启后旧 token 无法验证；配置相同共享密钥后各网关可独立验证，不共享凭证表。
 凭证默认有效 1 小时，宽限期默认 30 秒，两者独立；恢复、交接及验签不刷新原过期时刻。
@@ -732,7 +748,7 @@ ACK 不使用 `request_id`，不进入 player 队列，不触发 RPC。零值、
 
 
 新登录仍会失效旧入口。签名有效不代表能进入当前会话：Resume 必须匹配原 session；快速重登通过
-[`core::coordination::OwnershipStore::acquire_for_relogin`] 原子比较该玩家最新登录的 session_id，再获取新所有权。
+[`player::ownership::Store::acquire_for_relogin`] 原子比较该玩家最新登录的 session_id，再获取新所有权。
 新登录更新此标记，交接与租约释放保留，因此旧 token 不能顶回新会话，也不能在新会话下线后重新进入。
 Redis 只保存所有权与最新登录标记，不保存 token；这属于会话协调，不是验签的一部分。
 
@@ -818,14 +834,14 @@ timerSpec 由服务端业务逻辑生成，不作为客户端调度接口。客�
 耗时、执行消息、参数与产出均由服务端规则决定。
 
 业务请求通过 [`rpc::HandlerRegistry::register_with_timers`] 返回 [`rpc::HandlerReply`]，
-其 `timers` 使用 [`core::TimerUpdate`]。`None` 保持原集合，`ReplaceAll` 全量替换，空集合清空；
+其 `timers` 使用 [`player::TimerUpdate`]。`None` 保持原集合，`ReplaceAll` 全量替换，空集合清空；
 `Patch` 可增改或取消指定 ID。timer ID 必须非空且不超过 256 字节，消息 ID 非零，周期必须大于零；
 同一次更新不能重复操作同一 ID。数量和 ID、正文总字节数受 `max_timers`、`max_timer_bytes` 限制，
 默认分别为 128 和 1048576。更新先完整校验再替换；非法或超容量的更新会终止 session，避免继续驱动旧集合。
 
 ```rust
 use prost::Message;
-use tok::{core::{TimerSpec, TimerUpdate}, rpc::{HandlerRegistry, HandlerReply}};
+use tok::{player::{TimerSpec, TimerUpdate}, rpc::{HandlerRegistry, HandlerReply}};
 
 #[derive(Clone, PartialEq, Message)]
 struct StartProduction {}
@@ -858,7 +874,7 @@ handlers.register_timer(3, |context, _event: ProductionFinished| async move {
 [`rpc::HandlerRegistry::register_timer`] 独立于客户端请求分发表；`CallContext.timer` 由内部 RPC 信封传递，
 客户端不能通过填写 timer 的消息 ID 进入该处理函数。它包含 ID、预定与实际触发时刻，仍需遵循部署侧的内部调用身份约定。
 业务正文只包含游戏参数，timer 更新和触发来源不直接发送客户端。
-直接构造 [`core::CallContext`] 的普通调用需填写 `timer: None`；自定义 CallHandler 和 Tower 中间件可以读取该字段识别内部计时来源。
+直接构造 [`rpc::CallContext`] 的普通调用需填写 `timer: None`；自定义 CallHandler 和 Tower 中间件可以读取该字段识别内部计时来源。
 
 session 建立时对齐 UTC 与单调时钟，此后按同一基准等待，墙钟调整不会重放已调度的周期。
 每个 session 使用一个调度 future，与执行循环共同受网关监督，不为每个 timer 创建任务。
@@ -1222,7 +1238,7 @@ Scene 目前仅预留模块，不套用 Player 的串行与所有权语义。
 
 ```rust
 use std::sync::Arc;
-use tok::{core::LogicalMessage, gateway::player::{Executor, Pipeline, SessionHandle}, service::Request};
+use tok::{player::LogicalMessage, gateway::player::{Executor, Pipeline, SessionHandle}, service::Request};
 use tok::rpc::tower::util::MapRequestLayer;
 fn pipeline(executor: Arc<dyn Executor>) -> Pipeline {
     let downlink = MapRequestLayer::new(|mut request: Request<LogicalMessage>| {

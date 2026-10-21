@@ -3,16 +3,14 @@
 //! 在上下文校验后的 handler 上安装，不负责 RPC 建连，也不自动加入 player 或 GatewayRpc。
 //! 不续租、不重试业务；外层丢弃调用 future 后依靠后端有限 TTL 释放。
 
+use crate::CallContext;
 use crate::{CallTask, Error};
 use std::{
     sync::Arc,
     task::{Context, Poll},
     time::Duration,
 };
-use tok_core::{
-    CallContext,
-    coordination::{LockBackend, LockKey},
-};
+use tok_core::coordination::{LockBackend, LockKey};
 use tok_proto::internal::v1::{CallResponse, Payload};
 use tokio::time::{Instant, timeout};
 use tonic::Status;

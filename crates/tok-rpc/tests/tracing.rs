@@ -9,8 +9,9 @@ use std::{
     sync::{Arc, Mutex},
     time::Duration,
 };
-use tok_core::{CallContext, ServiceDescriptor};
+use tok_core::ServiceDescriptor;
 use tok_proto::internal::v1::{CallResponse, Payload};
+use tok_rpc::CallContext;
 use tok_rpc::{CallHandler, CallTask, RpcClients, RpcEndpoint, RpcService};
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
@@ -142,7 +143,7 @@ async fn trace_context_is_propagated_across_the_network_call() {
         service_name: "player".into(),
         bid: Some("42".into()),
         request_id: 1,
-        session: Some(tok_core::SessionIdentity {
+        session: Some(tok_player::SessionIdentity {
             player_id: "42".into(),
             session_id: "s".into(),
             epoch: 1,

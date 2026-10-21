@@ -30,7 +30,7 @@ pub enum Source {
         /// 原事件的稳定 ID；转发和派生执行不能重新生成。
         event_id: String,
     },
-    /// 会话调度产生的内部计时触发。
+    /// 可信调度器产生的内部计时触发。
     Timer(TimerTrigger),
 }
 

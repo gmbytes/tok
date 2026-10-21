@@ -15,9 +15,10 @@ use std::{sync::Arc, time::Duration};
 use tok::{
     AppConfig,
     application::Application,
-    core::{CallContext, ServiceDirectory, SessionIdentity},
+    core::ServiceDirectory,
     observability::Error,
-    rpc::{RpcClients, RpcService, protocol::internal::v1::Payload},
+    player::SessionIdentity,
+    rpc::{CallContext, RpcClients, RpcService, protocol::internal::v1::Payload},
     service::{
         lifecycle::{Init, InitTask},
         task::Task,
@@ -35,7 +36,7 @@ pub fn application_with_locks(
     locks: Arc<dyn tok::core::coordination::LockBackend>,
 ) -> Result<Application, Error> {
     let mut app = Application::new(config.clone())?;
-    let ownership: Arc<dyn tok::core::coordination::OwnershipStore> = match config.ownership {
+    let ownership: Arc<dyn tok::player::ownership::Store> = match config.ownership {
         tok::OwnershipBackend::Memory => Arc::new(tok::infra::ownership::MemoryOwnership::new(
             config.player_gateway.max_sessions,
         )?),
@@ -49,7 +50,7 @@ pub fn application_with_locks(
     };
     let gateway_rpc =
         tok::gateway::rpc::GatewayRpcService::new(config.player_gateway.max_handoff_bytes)?;
-    let tokens: Arc<dyn tok::core::credentials::ResumeTokenCodec> =
+    let tokens: Arc<dyn tok::player::credentials::ResumeTokenCodec> =
         Arc::new(match config.resume_token.clone() {
             Some(keys) => tok::gateway::player::resume_token::SignedResumeTokens::new(keys)?,
             None => tok::gateway::player::resume_token::SignedResumeTokens::ephemeral()?,

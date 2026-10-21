@@ -1,11 +1,11 @@
 //! Redis 所有权的真实原子竞争、代次精度与失效语义。
 
 use std::time::Duration;
-use tok_core::{
-    Error,
-    coordination::{OwnershipStore, SessionOwner, SessionOwnership},
-};
 use tok_infra::ownership::redis::{RedisOwnership, RedisOwnershipConfig};
+use tok_player::Error;
+use tok_player::ownership::{
+    Owner as SessionOwner, Record as SessionOwnership, Store as OwnershipStore,
+};
 
 fn config() -> RedisOwnershipConfig {
     RedisOwnershipConfig {
@@ -64,7 +64,7 @@ fn keys(config: &RedisOwnershipConfig) -> [String; 3] {
 #[tokio::test]
 #[ignore = "需要真实 Redis；通过 just ownership-test 显式运行"]
 async fn relogin_atomically_rejects_superseded_credentials_after_lease_release() {
-    use tok_core::credentials::ResumeClaims;
+    use tok_player::credentials::ResumeClaims;
     let config = config();
     let store = RedisOwnership::new(config.clone()).unwrap();
     let ttl = Duration::from_secs(2);
@@ -124,7 +124,7 @@ async fn acquire(
     node: &str,
     epoch: Option<u64>,
     ttl: Duration,
-) -> tok_core::Result<SessionOwnership> {
+) -> tok_player::Result<SessionOwnership> {
     store
         .acquire("p".into(), session.into(), owner(node), epoch, ttl)
         .await
@@ -239,7 +239,7 @@ async fn epochs_above_double_precision_are_exact_and_overflow_does_not_replace_l
     seed(&config, "9223372036854775807").await;
     assert!(matches!(
         acquire(&store, "c", "g3", Some(second.identity.epoch), ttl).await,
-        Err(Error::CoordinationUnavailable(_))
+        Err(Error::Core(tok_core::Error::CoordinationUnavailable(_)))
     ));
     assert_eq!(store.lookup("p").await.unwrap(), Some(second));
     cleanup(&config).await;
@@ -256,7 +256,7 @@ async fn timeout_and_invalid_ttl_are_bounded_and_do_not_expose_credentials() {
     .unwrap();
     assert!(matches!(
         acquire(&store, "s", "g", None, Duration::ZERO).await,
-        Err(Error::InvalidInput(_))
+        Err(Error::Core(tok_core::Error::InvalidInput(_)))
     ));
     let error = tokio::time::timeout(
         Duration::from_secs(1),
@@ -265,6 +265,9 @@ async fn timeout_and_invalid_ttl_are_bounded_and_do_not_expose_credentials() {
     .await
     .unwrap()
     .unwrap_err();
-    assert!(matches!(error, Error::CoordinationUnavailable(_)));
+    assert!(matches!(
+        error,
+        Error::Core(tok_core::Error::CoordinationUnavailable(_))
+    ));
     assert!(!error.to_string().contains("secret"));
 }

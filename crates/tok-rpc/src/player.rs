@@ -1,7 +1,8 @@
 //! 会话驱动的 PlayerRpc 客户端适配；与通用连接管理分离。
+use crate::CallContext;
 use crate::{RpcClients, call};
 use std::sync::Arc;
-use tok_core::{CallContext, ServiceDescriptor};
+use tok_core::ServiceDescriptor;
 use tok_proto::internal::v1::{self as proto, CallResponse, Payload};
 use tonic::{Request, Status};
 

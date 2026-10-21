@@ -15,7 +15,7 @@ use std::{
     sync::{Arc, Mutex},
     time::Duration,
 };
-use tok_core::{LogicalMessage, MessageKind};
+use tok_player::{LogicalMessage, MessageKind};
 use tokio::{
     net::TcpStream,
     sync::{mpsc, oneshot},

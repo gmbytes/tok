@@ -129,7 +129,8 @@ impl AppConfig {
                 .map_err(|error| Error::InvalidConfig(error.to_string()))?;
         }
         if let Some(keys) = &self.resume_token {
-            keys.validate()?;
+            keys.validate()
+                .map_err(|error| Error::InvalidConfig(error.to_string()))?;
         }
         if self.player_gateway.handoff_enabled
             && (self.resume_token.is_none()

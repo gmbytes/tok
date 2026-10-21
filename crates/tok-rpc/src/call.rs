@@ -1,7 +1,8 @@
 //! 协议适配器共用的上下文编码、追踪、期限和指标，不持有连接缓存。
+use crate::CallContext;
 use crate::RpcClients;
 use std::future::Future;
-use tok_core::{CallContext, ServiceDescriptor};
+use tok_core::ServiceDescriptor;
 use tok_proto::internal::v1::{self as proto, CallRequest, CallResponse, Payload};
 use tonic::{Request, Response, Status, transport::Channel};
 use tracing::Instrument;

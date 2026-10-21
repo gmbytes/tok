@@ -8,7 +8,7 @@ use std::{
 use tok::observability::tracing;
 use tok::rpc::tower::{Layer, Service, ServiceExt};
 use tok::{
-    core::{SessionIdentity, execution::Extensions},
+    core::execution::Extensions,
     gateway::{
         ErrorCode, GatewayError, Result,
         player::{
@@ -16,6 +16,7 @@ use tok::{
             session::extension::{self, Change},
         },
     },
+    player::SessionIdentity,
     service::Request,
 };
 

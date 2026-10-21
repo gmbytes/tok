@@ -12,6 +12,7 @@ license = "Apache-2.0"
 async-nats = { version = "0.50.0", default-features = false, features = ["ring", "nuid"] }
 futures-util = { version = "0.3", default-features = false, features = ["std", "async-await"] }
 tok-core = { path = "crates/tok-core", version = "0.1.0" }
+tok-player = { path = "crates/tok-player", version = "0.1.0" }
 tok-service = { path = "crates/tok-service", version = "0.1.0" }
 tok-proto = { path = "crates/tok-proto", version = "0.1.0" }
 tok-rpc = { path = "crates/tok-rpc", version = "0.1.0" }

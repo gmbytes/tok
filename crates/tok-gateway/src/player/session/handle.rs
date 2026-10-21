@@ -7,7 +7,7 @@ use super::{
 };
 use crate::{ErrorCode, Result};
 use std::{future::Future, pin::Pin, sync::Arc};
-use tok_core::{LogicalMessage, MessageKind, SessionIdentity};
+use tok_player::{LogicalMessage, MessageKind, SessionIdentity};
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 

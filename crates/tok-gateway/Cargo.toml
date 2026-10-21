@@ -8,6 +8,7 @@ license.workspace = true
 
 [dependencies]
 tok-core.workspace = true
+tok-player.workspace = true
 tok-service.workspace = true
 tower.workspace = true
 tok-events.workspace = true

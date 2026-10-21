@@ -5,9 +5,13 @@ use std::{
     sync::Mutex,
     time::{Duration, Instant},
 };
-use tok_core::{
-    Error, Result, SessionIdentity,
-    coordination::{CoordinationTask, OwnershipStore, SessionOwner, SessionOwnership},
+use tok_player::{Error, Result};
+use tok_player::{
+    SessionIdentity,
+    ownership::{
+        Owner as SessionOwner, Record as SessionOwnership, Store as OwnershipStore,
+        Task as OwnershipTask,
+    },
 };
 
 struct Record {
@@ -39,7 +43,9 @@ impl MemoryOwnership {
     /// 创建具有有限记录容量的开发后端，capacity 必须大于零。
     pub fn new(capacity: usize) -> Result<Self> {
         if capacity == 0 {
-            return Err(Error::InvalidInput("所有权容量必须大于零".into()));
+            return Err(Error::Core(tok_core::Error::InvalidInput(
+                "所有权容量必须大于零".into(),
+            )));
         }
         Ok(Self {
             capacity,
@@ -55,7 +61,7 @@ impl MemoryOwnership {
         expected_epoch: Option<u64>,
         expected_session_id: Option<String>,
         ttl: Duration,
-    ) -> CoordinationTask<'_, SessionOwnership> {
+    ) -> OwnershipTask<'_, SessionOwnership> {
         Box::pin(async move {
             if [
                 player_id.as_str(),
@@ -66,7 +72,9 @@ impl MemoryOwnership {
             .iter()
             .any(|value| value.trim().is_empty())
             {
-                return Err(Error::InvalidInput("玩家、会话和所有者身份不能为空".into()));
+                return Err(Error::Core(tok_core::Error::InvalidInput(
+                    "玩家、会话和所有者身份不能为空".into(),
+                )));
             }
             let mut state = self.state()?;
             let expires = expiration(ttl)?;
@@ -87,12 +95,15 @@ impl MemoryOwnership {
                 return Err(Error::OwnershipConflict);
             }
             if current.is_none() && state.records.len() >= self.capacity {
-                return Err(Error::CoordinationUnavailable("所有权容量已满".into()));
+                return Err(Error::Core(tok_core::Error::CoordinationUnavailable(
+                    "所有权容量已满".into(),
+                )));
             }
-            let next_epoch = state
-                .epoch
-                .checked_add(1)
-                .ok_or_else(|| Error::CoordinationUnavailable("epoch 已耗尽".into()))?;
+            let next_epoch = state.epoch.checked_add(1).ok_or_else(|| {
+                Error::Core(tok_core::Error::CoordinationUnavailable(
+                    "epoch 已耗尽".into(),
+                ))
+            })?;
             // 只缓存有限玩家的最新登录标记；回收历史后拒绝其快速重登，需普通鉴权。
             if !state.latest_sessions.contains_key(&player_id)
                 && state.latest_sessions.len() >= self.capacity
@@ -102,7 +113,11 @@ impl MemoryOwnership {
                     .keys()
                     .find(|player| !state.records.contains_key(*player))
                     .cloned()
-                    .ok_or_else(|| Error::CoordinationUnavailable("登录标记容量已满".into()))?;
+                    .ok_or_else(|| {
+                        Error::Core(tok_core::Error::CoordinationUnavailable(
+                            "登录标记容量已满".into(),
+                        ))
+                    })?;
                 state.latest_sessions.remove(&inactive);
             }
             state
@@ -129,19 +144,23 @@ impl MemoryOwnership {
     }
 
     fn state(&self) -> Result<std::sync::MutexGuard<'_, State>> {
-        self.state
-            .lock()
-            .map_err(|_| Error::CoordinationUnavailable("内存所有权锁不可用".into()))
+        self.state.lock().map_err(|_| {
+            Error::Core(tok_core::Error::CoordinationUnavailable(
+                "内存所有权锁不可用".into(),
+            ))
+        })
     }
 }
 
 fn expiration(ttl: Duration) -> Result<Instant> {
     if ttl.is_zero() {
-        return Err(Error::InvalidInput("租约期限必须大于零".into()));
+        return Err(Error::Core(tok_core::Error::InvalidInput(
+            "租约期限必须大于零".into(),
+        )));
     }
     Instant::now()
         .checked_add(ttl)
-        .ok_or_else(|| Error::InvalidInput("租约期限过大".into()))
+        .ok_or_else(|| Error::Core(tok_core::Error::InvalidInput("租约期限过大".into())))
 }
 
 impl OwnershipStore for MemoryOwnership {
@@ -150,11 +169,13 @@ impl OwnershipStore for MemoryOwnership {
         expected: SessionOwnership,
         target: SessionOwner,
         ttl: Duration,
-    ) -> CoordinationTask<'_, SessionOwnership> {
+    ) -> OwnershipTask<'_, SessionOwnership> {
         Box::pin(async move {
             let expires = expiration(ttl)?;
             if target.node_id.trim().is_empty() || target.service_name.trim().is_empty() {
-                return Err(Error::InvalidInput("目标网关身份不能为空".into()));
+                return Err(Error::Core(tok_core::Error::InvalidInput(
+                    "目标网关身份不能为空".into(),
+                )));
             }
             let mut state = self.state()?;
             let key = &expected.identity.player_id;
@@ -163,10 +184,11 @@ impl OwnershipStore for MemoryOwnership {
             }) {
                 return Err(Error::OwnershipConflict);
             }
-            state.epoch = state
-                .epoch
-                .checked_add(1)
-                .ok_or_else(|| Error::CoordinationUnavailable("epoch 已耗尽".into()))?;
+            state.epoch = state.epoch.checked_add(1).ok_or_else(|| {
+                Error::Core(tok_core::Error::CoordinationUnavailable(
+                    "epoch 已耗尽".into(),
+                ))
+            })?;
             let ownership = SessionOwnership {
                 identity: SessionIdentity {
                     epoch: state.epoch,
@@ -184,7 +206,7 @@ impl OwnershipStore for MemoryOwnership {
             Ok(ownership)
         })
     }
-    fn lookup(&self, player_id: &str) -> CoordinationTask<'_, Option<SessionOwnership>> {
+    fn lookup(&self, player_id: &str) -> OwnershipTask<'_, Option<SessionOwnership>> {
         let player_id = player_id.to_owned();
         Box::pin(async move {
             let mut state = self.state()?;
@@ -205,17 +227,17 @@ impl OwnershipStore for MemoryOwnership {
         owner: SessionOwner,
         expected_epoch: Option<u64>,
         ttl: Duration,
-    ) -> CoordinationTask<'_, SessionOwnership> {
+    ) -> OwnershipTask<'_, SessionOwnership> {
         self.acquire_checked(player_id, session_id, owner, expected_epoch, None, ttl)
     }
     fn acquire_for_relogin(
         &self,
-        previous: tok_core::credentials::ResumeClaims,
+        previous: tok_player::credentials::ResumeClaims,
         session_id: String,
         owner: SessionOwner,
         expected_epoch: Option<u64>,
         ttl: Duration,
-    ) -> CoordinationTask<'_, SessionOwnership> {
+    ) -> OwnershipTask<'_, SessionOwnership> {
         self.acquire_checked(
             previous.player_id,
             session_id,
@@ -226,7 +248,7 @@ impl OwnershipStore for MemoryOwnership {
         )
     }
 
-    fn renew(&self, ownership: SessionOwnership, ttl: Duration) -> CoordinationTask<'_, ()> {
+    fn renew(&self, ownership: SessionOwnership, ttl: Duration) -> OwnershipTask<'_, ()> {
         Box::pin(async move {
             let mut state = self.state()?;
             let expires = expiration(ttl)?;
@@ -242,7 +264,7 @@ impl OwnershipStore for MemoryOwnership {
         })
     }
 
-    fn release(&self, ownership: SessionOwnership) -> CoordinationTask<'_, bool> {
+    fn release(&self, ownership: SessionOwnership) -> OwnershipTask<'_, bool> {
         Box::pin(async move {
             let mut state = self.state()?;
             let key = &ownership.identity.player_id;

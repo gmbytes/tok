@@ -7,17 +7,17 @@ use std::{
     time::Duration,
 };
 use tok::{
-    core::{
-        ServiceDirectory,
-        coordination::{OwnershipStore, SessionOwner},
-    },
+    core::ServiceDirectory,
     gateway::{
         ErrorCode,
         codec::{FrameCodec, VERSION},
         protocol::{Frame, LoginRequest, LoginResponse, frame::Content},
     },
-    infra::discovery::redis::{RedisDirectory, RedisDiscoveryConfig},
-    infra::ownership::redis::{RedisOwnership, RedisOwnershipConfig},
+    infra::{
+        discovery::redis::{RedisDirectory, RedisDiscoveryConfig},
+        ownership::redis::{RedisOwnership, RedisOwnershipConfig},
+    },
+    player::ownership::{Owner as SessionOwner, Store as OwnershipStore},
 };
 use tokio_util::sync::CancellationToken;
 

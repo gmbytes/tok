@@ -1,7 +1,8 @@
 //! 将端点的业务入口与工厂初始化结果绑定；共享端点仍由 Application 一次监听。
+use crate::CallContext;
 use crate::{CallHandler, CallTask, EventTask};
 use std::sync::{Arc, OnceLock};
-use tok_core::{CallContext, execution::Extensions, service::Identity};
+use tok_core::{execution::Extensions, service::Identity};
 use tok_proto::internal::v1::Payload;
 use tok_service::{
     Request,

@@ -17,7 +17,7 @@ use std::{
     sync::{Arc, Mutex, OnceLock},
     time::Duration,
 };
-use tok_core::{LogicalMessage, MessageKind};
+use tok_player::{LogicalMessage, MessageKind};
 use tokio::{
     io::AsyncWrite,
     sync::{Notify, mpsc, oneshot},

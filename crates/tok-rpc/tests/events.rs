@@ -6,8 +6,10 @@ use std::{
     },
     time::Duration,
 };
-use tok_core::{CallContext, ServiceDescriptor, SessionIdentity, TimerUpdate};
+use tok_core::ServiceDescriptor;
 use tok_events::{Event, EventId};
+use tok_player::{SessionIdentity, TimerUpdate};
+use tok_rpc::CallContext;
 use tok_rpc::{
     HandlerRegistry, RpcClients, RpcEndpoint, RpcService, protocol::internal::v1::Payload,
 };
@@ -171,8 +173,8 @@ async fn event_handlers_are_inaccessible_to_requests_and_timers_and_require_sess
 
 #[tokio::test]
 async fn ordered_event_handlers_compose_timer_effects_without_client_payloads() {
-    fn spec(id: &str) -> tok_core::TimerSpec {
-        tok_core::TimerSpec {
+    fn spec(id: &str) -> tok_player::TimerSpec {
+        tok_player::TimerSpec {
             timer_id: id.into(),
             message_id: 1,
             body: vec![],

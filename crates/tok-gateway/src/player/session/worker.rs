@@ -11,7 +11,7 @@ use std::{
     time::Duration,
 };
 use tok_core::execution::Source;
-use tok_core::{LogicalMessage, MessageKind, coordination::OwnershipStore};
+use tok_player::{LogicalMessage, MessageKind, ownership::Store as OwnershipStore};
 use tok_service::Request;
 use tokio::sync::{mpsc, oneshot};
 use tower::{Layer as _, ServiceExt};
@@ -313,7 +313,7 @@ async fn execute_event(
     request_id: u64,
     event: Arc<tok_events::Message>,
     span: tracing::Span,
-) -> Result<Option<tok_core::TimerUpdate>> {
+) -> Result<Option<tok_player::TimerUpdate>> {
     let context = SessionHandle(Arc::clone(state))
         .execution_context(
             format!("player/event/{}", event.event_type),
@@ -339,7 +339,7 @@ async fn execute_timer(
     state: &Arc<SessionState>,
     executor: &dyn Executor,
     request_id: u64,
-    spec: tok_core::TimerSpec,
+    spec: tok_player::TimerSpec,
     trigger: tok_core::TimerTrigger,
     span: tracing::Span,
 ) -> Result<Reply> {

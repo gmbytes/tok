@@ -8,10 +8,12 @@ use std::{
     },
     time::Duration,
 };
-use tok_core::{CallContext, ServiceDescriptor, SessionIdentity};
+use tok_core::ServiceDescriptor;
+use tok_player::SessionIdentity;
 use tok_proto::internal::v1::{
     CallRequest, CallResponse, Payload, player_rpc_client::PlayerRpcClient,
 };
+use tok_rpc::CallContext;
 use tok_rpc::{CallHandler, CallTask, HandlerRegistry, RpcClients, RpcEndpoint, RpcService};
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;

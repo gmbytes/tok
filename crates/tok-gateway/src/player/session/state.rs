@@ -4,7 +4,7 @@ use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
 };
-use tok_core::coordination::SessionOwnership;
+use tok_player::ownership::Record as SessionOwnership;
 use tokio::sync::{Notify, mpsc};
 use tokio_util::sync::CancellationToken;
 

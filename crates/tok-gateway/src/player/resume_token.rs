@@ -6,8 +6,9 @@ use prost::Message;
 use serde::Deserialize;
 use sha2::Sha256;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tok_core::{
-    Error, Result, SessionIdentity,
+use tok_player::{Error, Result};
+use tok_player::{
+    SessionIdentity,
     credentials::{ResumeClaims, ResumeTokenCodec},
 };
 
@@ -44,14 +45,14 @@ impl Config {
 }
 fn hex_key(value: &str) -> Result<[u8; 32]> {
     if value.len() != 64 || !value.is_ascii() {
-        return Err(Error::InvalidConfig(
+        return Err(Error::Core(tok_core::Error::InvalidConfig(
             "凭证密钥必须为 32 字节十六进制编码".into(),
-        ));
+        )));
     }
     let mut bytes = [0; 32];
     for (index, byte) in bytes.iter_mut().enumerate() {
         *byte = u8::from_str_radix(&value[index * 2..index * 2 + 2], 16)
-            .map_err(|_| Error::InvalidConfig("凭证密钥编码无效".into()))?;
+            .map_err(|_| Error::Core(tok_core::Error::InvalidConfig("凭证密钥编码无效".into())))?;
     }
     Ok(bytes)
 }
@@ -82,10 +83,12 @@ impl SignedResumeTokens {
     /// 加载 32 字节共享密钥，后续签发与验证只使用本地状态。
     pub fn new(config: Config) -> Result<Self> {
         if config.clock_skew_ms > 60000 {
-            return Err(Error::InvalidConfig("凭证时钟容差无效".into()));
+            return Err(Error::Core(tok_core::Error::InvalidConfig(
+                "凭证时钟容差无效".into(),
+            )));
         }
         let mac = Hmac::<Sha256>::new_from_slice(&hex_key(&config.secret_key)?)
-            .map_err(|_| Error::InvalidConfig("凭证共享密钥无效".into()))?;
+            .map_err(|_| Error::Core(tok_core::Error::InvalidConfig("凭证共享密钥无效".into())))?;
         Ok(Self {
             mac,
             clock_skew_ms: config.clock_skew_ms,
@@ -109,7 +112,9 @@ impl SignedResumeTokens {
             || ttl < Duration::from_millis(1)
             || ttl > Duration::from_secs(86400)
         {
-            return Err(Error::InvalidInput("恢复凭证身份或有效期无效".into()));
+            return Err(Error::Core(tok_core::Error::InvalidInput(
+                "恢复凭证身份或有效期无效".into(),
+            )));
         }
         let expires = now
             .checked_add(ttl.as_millis() as u64)
@@ -131,7 +136,9 @@ impl SignedResumeTokens {
             URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes())
         );
         if token.len() > MAX_RESUME_TOKEN_BYTES {
-            return Err(Error::InvalidInput("恢复凭证过长".into()));
+            return Err(Error::Core(tok_core::Error::InvalidInput(
+                "恢复凭证过长".into(),
+            )));
         }
         Ok(token)
     }

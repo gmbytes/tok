@@ -1,6 +1,12 @@
 # 当前实现状态
 
-核对日期：2026-10-21。P6 已提交为 `06d9dd2`，P7 完成应用组装与接口清理，随本次提交交付。框架的“服务 + 处理链”方向校正已完成[七批计划](implementation-plan.md)本轮验收，历史结果见[实施历史](implementation-history.md)；本页只维护当前能力和边界。
+核对日期：2026-10-21。P6 已提交为 `06d9dd2`，P7 应用组装与接口清理已提交为 `017a9ea`。框架的“服务 + 处理链”方向校正已完成[七批计划](implementation-plan.md)本轮验收，历史结果见[实施历史](implementation-history.md)；本页只维护当前能力和边界。
+
+## crate 边界校正
+
+新增 [tok-player](../crates/tok-player/src/lib.rs)，只依赖 tok-core，集中会话身份、逻辑消息、玩家计时需求、所有权及恢复凭证契约。所有权接口为 ownership::Store / Owner / Record，专用错误归 player::Error，通用错误以 Core 保留。RPC 的 CallContext 移至 [tok-rpc](../crates/tok-rpc/src/context.rs)。tok 门面增加 player 导出，不保留旧 core 路径别名。
+
+tok-core 保留服务身份、通用执行上下文、计时触发来源、发现、路由与请求锁；tok-service 的 execution / lifecycle / task 和 tok-events 均不依赖 tok-player。gateway、RPC 与 infra 的玩家部分显式引用新契约。只调整 Rust API 归属，不更改客户端或内部 protobuf 线协议、Redis 键、租约与调用语义。本轮校正已完成验收，随本次提交交付；249 项工作区测试、Clippy、rustdoc、七个 smoke 和七项真实 Redis 专项通过。按用户要求未做 release 构建，验证范围见实施计划。
 
 ## 当前能力
 
@@ -17,7 +23,7 @@
 | gateway / session | [Gateway](../crates/tok-gateway/src/server.rs) 作为共同设施的内置扩展，提供快照、状态工厂、生命周期观察及准入/执行/新下行 Layer | 通信、FIFO、timer、ACK、恢复与交接保留各自状态机；不强制普通服务具备 session |
 | 动态成员 | 异步 join/leave 等待所选组件就绪，可信策略在登录前准备初始主题；目标交接提交前准备兴趣 | 宽限期与冻结期间保留兴趣；离线/恢复/冻结不投递即时事件，冻结窗口不补收 |
 | 发现与协调 | Memory / Redis 发现、会话所有权、请求级锁；发现缓存和路由分离 | Memory 仅单进程；租约与超时是尽力保护，不保证严格 fencing 或恰好一次 |
-| 工程与文档 | 九个框架 crate、demo、构建期 protobuf/消息 ID 生成、中文 rustdoc、workspace lint、LF、Windows/Linux CI | CI 配置不等于本地已执行 Linux 验证；真实外部服务与 release 结果分别记录 |
+| 工程与文档 | 十个框架 crate、demo、构建期 protobuf/消息 ID 生成、中文 rustdoc、workspace lint、LF、Windows/Linux CI | CI 配置不等于本地已执行 Linux 验证；真实外部服务与 release 结果分别记录 |
 
 ## 使用与失败边界
 

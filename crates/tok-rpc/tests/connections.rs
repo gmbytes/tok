@@ -4,12 +4,13 @@ use std::{
     sync::{Arc, Mutex},
     time::Duration,
 };
-use tok_core::{CallContext, ServiceDescriptor};
+use tok_core::ServiceDescriptor;
 use tok_proto::internal::v1::{
     CallRequest, CallResponse, Payload,
     business_rpc_server::{BusinessRpc, BusinessRpcServer},
     player_rpc_server::{PlayerRpc, PlayerRpcServer},
 };
+use tok_rpc::CallContext;
 use tok_rpc::{RpcClients, RpcEndpoint};
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;

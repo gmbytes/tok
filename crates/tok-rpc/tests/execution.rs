@@ -8,11 +8,11 @@ use std::{
     time::Duration,
 };
 use tok_core::{
-    CallContext,
     execution::{Context, Source},
     service::Identity,
 };
 use tok_events::{Envelope, Event, EventId, Input};
+use tok_rpc::CallContext;
 use tok_rpc::{
     CallHandler, HandlerRegistry, HandlerReply, RpcService,
     protocol::internal::v1::{self as proto, Payload},

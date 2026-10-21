@@ -9,10 +9,6 @@ use std::{
     },
     time::Duration,
 };
-use tok_core::{
-    LogicalMessage, MessageKind,
-    coordination::{CoordinationTask, OwnershipStore, SessionOwner, SessionOwnership},
-};
 use tok_gateway::{
     ErrorCode, Gateway,
     codec::{FrameCodec, VERSION},
@@ -23,6 +19,13 @@ use tok_gateway::{
     protocol::{self, Frame, frame::Content},
 };
 use tok_infra::ownership::MemoryOwnership;
+use tok_player::{
+    LogicalMessage, MessageKind,
+    ownership::{
+        Owner as SessionOwner, Record as SessionOwnership, Store as OwnershipStore,
+        Task as OwnershipTask,
+    },
+};
 use tokio::{
     io::AsyncWriteExt,
     net::{TcpListener, TcpStream},
@@ -311,7 +314,7 @@ struct DelayedRenew {
     renewals: Arc<AtomicUsize>,
 }
 impl OwnershipStore for DelayedRenew {
-    fn lookup(&self, player: &str) -> CoordinationTask<'_, Option<SessionOwnership>> {
+    fn lookup(&self, player: &str) -> OwnershipTask<'_, Option<SessionOwnership>> {
         self.memory.lookup(player)
     }
     fn acquire(
@@ -321,10 +324,10 @@ impl OwnershipStore for DelayedRenew {
         owner: SessionOwner,
         expected: Option<u64>,
         ttl: Duration,
-    ) -> CoordinationTask<'_, SessionOwnership> {
+    ) -> OwnershipTask<'_, SessionOwnership> {
         self.memory.acquire(player, session, owner, expected, ttl)
     }
-    fn renew(&self, record: SessionOwnership, ttl: Duration) -> CoordinationTask<'_, ()> {
+    fn renew(&self, record: SessionOwnership, ttl: Duration) -> OwnershipTask<'_, ()> {
         Box::pin(async move {
             self.memory.renew(record, ttl).await?;
             self.renewals.fetch_add(1, Ordering::SeqCst);
@@ -335,7 +338,7 @@ impl OwnershipStore for DelayedRenew {
             Ok(())
         })
     }
-    fn release(&self, record: SessionOwnership) -> CoordinationTask<'_, bool> {
+    fn release(&self, record: SessionOwnership) -> OwnershipTask<'_, bool> {
         self.memory.release(record)
     }
 }

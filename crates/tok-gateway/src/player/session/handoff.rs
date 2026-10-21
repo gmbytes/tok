@@ -15,9 +15,9 @@ use std::{
     sync::{Arc, Mutex, atomic::AtomicBool},
     time::Duration,
 };
-use tok_core::{
+use tok_player::{
     SessionIdentity,
-    coordination::{SessionOwner, SessionOwnership},
+    ownership::{Owner as SessionOwner, Record as SessionOwnership},
 };
 use tok_rpc::{
     protocol::internal::v1 as proto,

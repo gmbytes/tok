@@ -1,6 +1,6 @@
 //! 内部 timer 更新在共享类型与 protobuf 之间的转换。
 
-use tok_core::{TimerSpec, TimerUpdate};
+use tok_player::{TimerSpec, TimerUpdate};
 use tok_proto::internal::v1 as proto;
 use tonic::Status;
 
