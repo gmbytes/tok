@@ -209,3 +209,166 @@ async fn direct_service_preserves_policy_metadata_decode_errors_and_registration
         ))
     ));
 }
+
+#[derive(Clone, Copy)]
+enum Readiness {
+    Ready,
+    Cancel,
+    Expire,
+    Pending,
+    Reject,
+}
+struct TypedService {
+    token: CancellationToken,
+    readiness: Readiness,
+    clones: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    polls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+impl Clone for TypedService {
+    fn clone(&self) -> Self {
+        use std::sync::{Arc, atomic::Ordering};
+        self.clones.fetch_add(1, Ordering::SeqCst);
+        Self {
+            token: self.token.clone(),
+            readiness: self.readiness,
+            clones: Arc::clone(&self.clones),
+            calls: Arc::clone(&self.calls),
+            polls: Arc::clone(&self.polls),
+        }
+    }
+}
+impl tower::Service<Request<((), Value)>> for TypedService {
+    type Response = tok_execution::Response<protobuf::Reply<Value>>;
+    type Error = Denied;
+    type Future = std::future::Ready<Result<Self::Response, Self::Error>>;
+    fn poll_ready(
+        &mut self,
+        _: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), Denied>> {
+        use std::{sync::atomic::Ordering, task::Poll};
+        self.polls.fetch_add(1, Ordering::SeqCst);
+        match self.readiness {
+            Readiness::Ready => (),
+            Readiness::Cancel => self.token.cancel(),
+            Readiness::Expire => std::thread::sleep(Duration::from_millis(60)),
+            Readiness::Pending => return Poll::Pending,
+            Readiness::Reject => return Poll::Ready(Err(Denied)),
+        }
+        Poll::Ready(Ok(()))
+    }
+    fn call(&mut self, request: Request<((), Value)>) -> Self::Future {
+        use std::sync::atomic::Ordering;
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        assert_eq!(request.context.operation(), "test");
+        assert_eq!(request.extensions().get::<u64>(), Some(&42));
+        let mut response = tok_execution::Response::new(protobuf::Reply {
+            message: request.input.1,
+            output: (),
+        });
+        response.extensions_mut().insert(true);
+        std::future::ready(Ok(response))
+    }
+}
+fn typed_service(readiness: Readiness) -> TypedService {
+    TypedService {
+        token: CancellationToken::new(),
+        readiness,
+        clones: Default::default(),
+        calls: Default::default(),
+        polls: Default::default(),
+    }
+}
+fn typed_request(
+    token: CancellationToken,
+    budget: Duration,
+    body: Vec<u8>,
+) -> Request<((), protobuf::Message<u32>)> {
+    let mut request = Request::new(
+        context().with_cancellation(token).with_budget_limit(budget),
+        ((), protobuf::Message { key: 1, body }),
+    );
+    request.extensions_mut().insert(42u64);
+    request
+}
+#[tokio::test]
+async fn typed_readiness_stops_before_business_without_wrapping_stops_as_codec_errors() {
+    use std::sync::{Arc, atomic::Ordering};
+    for readiness in [Readiness::Cancel, Readiness::Expire, Readiness::Pending] {
+        let service = typed_service(readiness);
+        let token = service.token.clone();
+        let calls = Arc::clone(&service.calls);
+        let polls = Arc::clone(&service.polls);
+        let mut registry = protobuf::Registry::<u32, (), (), Denied>::new();
+        registry.register_service(1, 2, service).unwrap();
+        let (budget, expected) = match readiness {
+            Readiness::Cancel => (Duration::from_secs(1), tok_execution::StopReason::Cancelled),
+            _ => (
+                Duration::from_millis(30),
+                tok_execution::StopReason::DeadlineExceeded,
+            ),
+        };
+        let result = registry
+            .dispatch(typed_request(token, budget, vec![]))
+            .await;
+        assert!(matches!(result, Err(tok_execution::Error::Stopped(reason)) if reason == expected));
+        assert!(polls.load(Ordering::SeqCst) > 0);
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+}
+#[tokio::test]
+async fn codec_clones_the_typed_service_once_and_preserves_both_extension_paths() {
+    use std::sync::{Arc, atomic::Ordering};
+    let service = typed_service(Readiness::Ready);
+    let clones = Arc::clone(&service.clones);
+    let calls = Arc::clone(&service.calls);
+    let mut registry = protobuf::Registry::<u32, (), (), Denied>::new();
+    registry.register_service(1, 2, service).unwrap();
+    let input = |body| typed_request(CancellationToken::new(), Duration::from_secs(1), body);
+    assert!(matches!(
+        registry.dispatch(input(vec![0xff])).await,
+        Err(tok_execution::Error::Inner(DispatchError::Handler(
+            protobuf::Error::Decode(_)
+        )))
+    ));
+    assert_eq!(clones.load(Ordering::SeqCst), 0);
+    for expected in 1..=2 {
+        let response = registry
+            .dispatch(input(Value { value: 7 }.encode_to_vec()))
+            .await
+            .unwrap();
+        assert_eq!(response.output.message.key, 2);
+        assert_eq!(
+            Value::decode(response.output.message.body.as_slice())
+                .unwrap()
+                .value,
+            7
+        );
+        assert_eq!(response.extensions().get::<bool>(), Some(&true));
+        assert!(response.extensions().get::<u64>().is_none());
+        assert_eq!(clones.load(Ordering::SeqCst), expected);
+        assert_eq!(calls.load(Ordering::SeqCst), expected);
+    }
+}
+#[tokio::test]
+async fn typed_readiness_failure_preserves_the_original_handler_error() {
+    use std::sync::{Arc, atomic::Ordering};
+    let service = typed_service(Readiness::Reject);
+    let calls = Arc::clone(&service.calls);
+    let mut registry = protobuf::Registry::<u32, (), (), Denied>::new();
+    registry.register_service(1, 2, service).unwrap();
+    let result = registry
+        .dispatch(typed_request(
+            CancellationToken::new(),
+            Duration::from_secs(1),
+            vec![],
+        ))
+        .await;
+    assert!(matches!(
+        result,
+        Err(tok_execution::Error::Inner(DispatchError::Handler(
+            protobuf::Error::Handler(Denied)
+        )))
+    ));
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+}

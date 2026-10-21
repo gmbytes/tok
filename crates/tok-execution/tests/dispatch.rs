@@ -347,3 +347,30 @@ async fn erased_handler_clones_its_service_once_per_call() {
         assert_eq!(clones.load(Ordering::SeqCst), expected);
     }
 }
+
+#[tokio::test]
+async fn normalized_handler_keeps_stops_and_concrete_errors_without_an_extra_error_layer() {
+    let handler = tok_execution::registry::Handler::from_execution_service(tower::service_fn(
+        |request: Request<u32>| async move {
+            match request.input {
+                0 => Err::<Response<()>, _>(tok_execution::Error::Stopped(StopReason::Cancelled)),
+                value => Err(tok_execution::Error::Inner(Rejected(value))),
+            }
+        },
+    ));
+    let input = |value| {
+        Request::new(
+            context(Duration::from_secs(1), CancellationToken::new()),
+            value,
+        )
+    };
+    // 内层返回停止时，原 Context 仍有效；不能依赖外层再次检查来恢复其语义。
+    assert!(matches!(
+        handler.call(input(0)).await,
+        Err(tok_execution::Error::Stopped(StopReason::Cancelled))
+    ));
+    assert!(matches!(
+        handler.call(input(7)).await,
+        Err(tok_execution::Error::Inner(Rejected(7)))
+    ));
+}

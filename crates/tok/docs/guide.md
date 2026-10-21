@@ -462,7 +462,7 @@ assert_eq!(Value::decode(result.output.message.body.as_slice())?.value, 42);
 # }
 ```
 
-`registry::Handler` 擦除具体 Service 类型，每次调用仅克隆一次 Service，并通过 Call::new 保护就绪等待与执行。自定义派发须接续 Request / Response、原期限、取消和追踪；`registry::Service::new(Arc<G>, key)` 同时保护取键与整个自定义派发过程，允许 G 为 dyn Registry。注册错误保留实现自己的类型，不能通过包装静默放大预算或自动重试。
+`registry::Handler` 擦除具体 Service 类型，每次调用仅克隆一次 Service，并通过 Call::new 保护就绪等待与执行。new 接入原始业务错误；[`from_execution_service`](execution::registry::Handler::from_execution_service) 接入已返回共同执行错误的链，保留 Stopped / Inner 的单层结构。自定义派发须接续 Request / Response、原期限、取消和追踪；`registry::Service::new(Arc<G>, key)` 同时保护取键与整个自定义派发过程，允许 G 为 dyn Registry。注册错误保留实现自己的类型，不能通过包装静默放大预算或自动重试。
 
 protobuf::Registry / message::Registry 的最后一个泛型参数 G 是底层 Registry，默认值仍使用静态 Table；from_registry 注入自有实现，from_shared_registry 接受共享实现或 trait 对象。调用时不要求 G 可克隆；通过这两个适配器注册新路由时要求 G: Clone，以便在共享状态下明确按实现的克隆语义更新。普通业务 RPC 的 business::Handler 和玩家 HandlerRegistry 同样支持自定义底层注册器；自定义构造使用 business::Handler::from_registry 或 HandlerRegistry::from_registry / from_shared_registry，并显式注入 G::DispatchError 到 Status 的映射；默认 new 保留默认表的映射。timer 和服务器事件继续走各自隔离入口。
 
@@ -474,9 +474,11 @@ protobuf::Registry / message::Registry 的最后一个泛型参数 G 是底层 R
 `protobuf::Registry<K, C, O, E>` 的 C 是业务状态，O 是附加结果；Reply 包含回应消息和附加结果，`Message<K>` 包含键和编码正文。
 [`message::Registry<C, O, E>`] 在其上限定 u32 非零请求与回应编号，Message 是编号消息，Reply 仍保留泛型附加结果。以下示例使用该编号消息表；本地调用不依赖 Tonic 类型。
 
+protobuf 派发路径直接借用 Message.key 调用底层 Registry，不要求键实现 Clone；自定义底层实现和 trait 对象可以使用不可克隆的键。注册回应键与默认静态 Table 的 Clone 约束保持不变，不代表默认表也支持不可克隆的键。
+
 protobuf::Registry 和 message::Registry 的输入已含消息键，可直接作为 `Service<Request<(C, Message<K>)>>` / `Service<Request<(C, message::Message)>>` 交给 ServiceBuilder，不需要额外 service_fn。克隆共享路由快照，后续注册采用写时复制，不改变旧克隆；每条路由的可变限额仍由其 Layer 显式共享。dispatch 复用该 Service 路径。
 
-编解码和内层 Service 的就绪等待也计入原执行范围。默认表的解码错误通过 `execution::Error::Inner(registry::DispatchError::Handler(protobuf::Error::Decode(...)))` 返回，业务错误保留在 `protobuf::Error::Handler` 中；RPC 边界再映射为 Status。
+编解码和内层 Service 的就绪等待也计入原执行范围。解码后的强类型 Service 同样通过 Call::new 驱动，就绪成功后复查原取消与期限；停止直接保留在 execution::Error::Stopped，不转换为 protobuf 业务错误。编解码闭包以 Arc 共享处理器和回应键，每次有效调用只克隆一次具体 Service；解码失败不克隆该 Service。默认表的解码错误通过 `execution::Error::Inner(registry::DispatchError::Handler(protobuf::Error::Decode(...)))` 返回，业务错误保留在 `protobuf::Error::Handler` 中；RPC 边界再映射为 Status。
 
 ```rust
 use std::{sync::Arc, time::Duration};

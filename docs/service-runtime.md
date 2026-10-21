@@ -456,3 +456,7 @@ gRPC 客户端只负责准备 Channel / metadata、收紧预算、协议映射�
 锁自身获取、租期余量、持锁执行和释放期限仍使用 lock::Error 的具体变体。
 
 Channel 缓存以节点与地址为键，采用 LRU 并在命中时更新访问顺序；Client 克隆共享此顺序，invalidate 移除指定节点的全部地址，工厂替换则建立独立空缓存。注册 Handler 每次调用克隆一次内层 Service，并交给共同 Call 驱动执行。
+
+编解码外层保护不替代强类型 Service 的就绪边界检查。protobuf 适配对强类型调用复用原 Context 并通过 Call::new 执行，就绪成功后再次检查停止；Handler::from_execution_service 接入已规范化错误的链，整条链的保护保持开启，停止只位于 execution::Error::Stopped。
+
+protobuf 的 dispatch / Tower 入口直接借用消息键调用自定义 Registry，键无需 Clone；注册回应键与默认 Table 仍有 Clone 要求。直接派发不绕过共同执行保护，自定义查找、拦截和等待均计入原范围。

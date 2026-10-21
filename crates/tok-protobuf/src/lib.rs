@@ -44,6 +44,7 @@ pub type Table<K, C = (), O = (), E = std::convert::Infallible> =
 /// 编解码、内层就绪等待和业务执行均在原 Context 约束内，不创建后台任务。
 /// 可直接作为接受 `Request<(C, Message<K>)>` 的 Tower Service，供公共 Layer 包装。
 /// poll_ready 不预留目标路由容量；默认 Table 使用注册快照，自定义实现自行定义更新可见性。
+/// 派发本身不要求 K 可克隆；注册回应键及默认 Table 仍要求 Clone。
 pub struct Registry<K, C = (), O = (), E = std::convert::Infallible, G: ?Sized = Table<K, C, O, E>>
 {
     inner: Arc<G>,
@@ -123,7 +124,8 @@ where
             }),
         )
     }
-    /// 在正文编解码之间安装强类型 Tower 链，执行约束由通用分发表统一施加。
+    /// 在正文编解码之间安装强类型 Tower 链；编解码和强类型就绪等待均受原执行范围保护。
+    /// 每次调用仅克隆一次具体 Service；停止使用共同错误的外层 Stopped。
     pub fn register_service<Req, Resp, S>(
         &mut self,
         request_key: K,
@@ -140,33 +142,39 @@ where
             + 'static,
         S::Future: Send + 'static,
     {
-        Arc::make_mut(&mut self.inner).register_service(
+        let service = Arc::new(service);
+        let response_key = Arc::new(response_key);
+        let codec = tower::service_fn(move |request: Request<(C, Vec<u8>)>| {
+            let service = Arc::clone(&service);
+            let response_key = Arc::clone(&response_key);
+            async move {
+                let (context, (state, body), extensions) = request.into_parts();
+                let input = Req::decode(body.as_slice())
+                    .map_err(|error| tok_execution::Error::Inner(Error::Decode(error)))?;
+                let reply = tok_execution::Call::new(
+                    service.as_ref().clone(),
+                    Request::from_parts(context, (state, input), extensions),
+                )
+                .await
+                .map_err(|error| error.map_inner(Error::Handler))?;
+                Ok(reply.map(|reply| Reply {
+                    message: Message {
+                        key: response_key.as_ref().clone(),
+                        body: reply.message.encode_to_vec(),
+                    },
+                    output: reply.output,
+                }))
+            }
+        });
+        Arc::make_mut(&mut self.inner).register_handler(
             request_key,
-            tower::service_fn(move |request: Request<(C, Vec<u8>)>| {
-                let service = service.clone();
-                let response_key = response_key.clone();
-                async move {
-                    let (context, (state, body), extensions) = request.into_parts();
-                    let input = Req::decode(body.as_slice()).map_err(Error::Decode)?;
-                    let reply = service
-                        .oneshot(Request::from_parts(context, (state, input), extensions))
-                        .await
-                        .map_err(Error::Handler)?;
-                    Ok(reply.map(|reply| Reply {
-                        message: Message {
-                            key: response_key,
-                            body: reply.message.encode_to_vec(),
-                        },
-                        output: reply.output,
-                    }))
-                }
-            }),
+            registry::Handler::from_execution_service(codec),
         )
     }
 }
 impl<K, C, O, E, G: ?Sized> Registry<K, C, O, E, G>
 where
-    K: Clone + Send + Sync + 'static,
+    K: Send + Sync + 'static,
     C: Send + 'static,
     O: Send + 'static,
     E: Send + 'static,
@@ -178,7 +186,7 @@ where
         > + 'static,
     G::DispatchError: Send + 'static,
 {
-    /// 使用消息键分发并编解码正文，业务状态不进入线协议。
+    /// 借用消息键调用底层注册器，不要求键可克隆；业务状态不进入线协议。
     pub async fn dispatch(
         &self,
         request: Request<(C, Message<K>)>,
@@ -189,7 +197,7 @@ where
 
 impl<K, C, O, E, G: ?Sized> Service<Request<(C, Message<K>)>> for Registry<K, C, O, E, G>
 where
-    K: Clone + Send + Sync + 'static,
+    K: Send + Sync + 'static,
     C: Send + 'static,
     O: Send + 'static,
     E: Send + 'static,
@@ -213,16 +221,22 @@ where
     }
     fn call(&mut self, request: Request<(C, Message<K>)>) -> Self::Future {
         let inner = Arc::clone(&self.inner);
+        let dispatch = tower::service_fn(move |request: Request<(C, Message<K>)>| {
+            let inner = Arc::clone(&inner);
+            async move {
+                let (context, (state, message), extensions) = request.into_parts();
+                inner
+                    .dispatch(
+                        &message.key,
+                        Request::from_parts(context, (state, message.body), extensions),
+                    )
+                    .await
+            }
+        });
         Box::pin(async move {
-            let (context, (state, message), extensions) = request.into_parts();
-            let key = message.key;
-            registry::Service::new(inner, move |_: &Request<(C, Vec<u8>)>| key.clone())
-                .oneshot(Request::from_parts(
-                    context,
-                    (state, message.body),
-                    extensions,
-                ))
+            tok_execution::Call::new(dispatch, request)
                 .await
+                .map_err(tok_execution::Error::flatten)
         })
     }
 }

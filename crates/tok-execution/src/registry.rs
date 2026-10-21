@@ -55,6 +55,28 @@ impl<T: Send + 'static, R: Send + 'static, E: Send + 'static> Handler<T, R, E> {
             call: Arc::new(move |request| Box::pin(crate::Call::new(service.clone(), request))),
         }
     }
+    /// 安装已返回共同执行错误的处理链；保留外层停止与具体错误，不重复包装。
+    /// 与 new 相同，整条链的就绪等待与执行仍受原调用范围保护。
+    pub fn from_execution_service<S>(service: S) -> Self
+    where
+        S: TowerService<Request<T>, Response = Response<R>, Error = crate::Error<E>>
+            + Clone
+            + Send
+            + Sync
+            + 'static,
+        S::Future: Send + 'static,
+    {
+        Self {
+            call: Arc::new(move |request| {
+                let service = service.clone();
+                Box::pin(async move {
+                    crate::Call::new(service, request)
+                        .await
+                        .map_err(crate::Error::flatten)
+                })
+            }),
+        }
+    }
     /// 执行此链；不会重建上下文或放大预算。
     pub fn call(
         &self,

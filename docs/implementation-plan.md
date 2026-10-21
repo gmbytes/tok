@@ -554,3 +554,27 @@ registry::Handler 每次调用克隆一次 Service 后直接交给 Call::new，�
 多地址节点失效及每次处理调用的克隆次数。
 
 本轮 Windows 验收：全工作区串行测试 333 项通过、32 项外部专项默认跳过，包含 21 项指南示例；全目标 Clippy、无警告 workspace rustdoc、格式及空白检查通过。222 个文本文件 UTF-8/LF、119 处相对文档路径检查通过。未运行真实 Redis/NATS、Linux 或 release 构建。
+
+
+### protobuf 强类型处理链执行边界校正（2026-10-21）
+
+编解码适配在解码后使用 Call::new 驱动强类型 Service，原 Context、输入扩展和截止点继续传递，
+就绪期间取消或耗尽预算时不再执行业务。Handler::from_execution_service 接入返回共同执行错误的链，
+保留一层 Stopped / Inner；protobuf 注册项通过此入口安装，未将停止伪装为编解码或业务错误。
+原 Decode / Handler 分类、注册快照、自定义底层注册器与 RPC 映射不变。
+
+编解码闭包使用 Arc 共享强类型 Service 和回应键，仅在实际有效调用中克隆一次具体 Service；
+解码失败不克隆该 Service。新增回归覆盖强类型就绪取消、迟到、一直未就绪、就绪失败、
+Service 克隆次数、输入/输出扩展和统一错误接入的停止保留。
+
+本轮 Windows 验收：全工作区串行测试 337 项通过、32 项外部专项默认跳过，包含 21 项指南示例；全目标 Clippy、无警告 workspace rustdoc、格式与空白检查通过。222 个文本文件 UTF-8/LF、119 处相对文档路径检查通过。未运行真实 Redis/NATS、Linux 或 release 构建。
+
+
+### protobuf 派发键约束校正（2026-10-21）
+
+派发路径直接借用 Message.key 调用 G::dispatch，移除 K: Clone 与每次调用的取键选择器包装；
+Call::new 仍保护拆装与整个自定义派发过程，停止与原始派发错误保持单层表达。
+注册回应键和默认 Table 的 Clone 约束不变。新增自定义非 Clone 后端/键的回归，
+覆盖自有实例、共享 trait 对象、直接派发、Tower 调用、扩展、未知键与停止/超时。
+
+本轮 Windows 验收：全工作区串行测试 339 项通过、32 项外部专项默认跳过，包含 21 项指南示例；全目标 Clippy、无警告 workspace rustdoc、格式与空白检查通过。223 个文本文件 UTF-8/LF、119 处相对文档路径检查通过。未运行真实 Redis/NATS、Linux 或 release 构建。
