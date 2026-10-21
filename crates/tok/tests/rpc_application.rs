@@ -53,8 +53,8 @@ async fn redis_startup_timeout_does_not_start_or_publish_business() {
         .unwrap();
     assert!(matches!(
         result,
-        Err(application::Error::Core(
-            tok::core::Error::DiscoveryUnavailable
+        Err(application::Error::Discovery(
+            tok::core::discovery::Error::Unavailable
         ))
     ));
     assert_eq!(starts.load(Ordering::SeqCst), 0);

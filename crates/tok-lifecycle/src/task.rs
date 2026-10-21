@@ -203,6 +203,17 @@ pub struct Completion {
     pub result: Result<(), Error>,
 }
 
+/// 任务范围构造失败，不包含已启动任务的执行错误。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum CreateError {
+    /// 容量不在 1 至 65536 范围内。
+    #[error("后台任务容量须为 1 至 65536")]
+    InvalidCapacity,
+    /// 创建子范围时父范围已开始退出。
+    #[error("父任务范围正在退出")]
+    ParentStopping,
+}
+
 /// 通用任务执行与退出错误。
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -234,11 +245,9 @@ pub struct Supervisor {
 }
 impl Supervisor {
     /// 创建有界任务范围；容量须为 1 至 65536，外部跟踪工作使用调用方自己的容量约束。
-    pub fn new(max_tasks: usize, cancellation: CancellationToken) -> tok_core::Result<Self> {
+    pub fn new(max_tasks: usize, cancellation: CancellationToken) -> Result<Self, CreateError> {
         if max_tasks == 0 || max_tasks > 65_536 {
-            return Err(tok_core::Error::InvalidConfig(
-                "后台任务容量须为 1 至 65536".into(),
-            ));
+            return Err(CreateError::InvalidCapacity);
         }
         let (launches, receiver) = mpsc::channel(max_tasks);
         let (state, _) = watch::channel(State::Open);
@@ -261,10 +270,10 @@ impl Supervisor {
     }
     /// 创建独立容量的子运行范围；父取消向子传播，父结束等待包含子范围的全部任务。
     /// 子监督者仍由组件拥有并驱动，子停止不取消父范围。
-    pub fn child(max_tasks: usize, parent: &Handle) -> tok_core::Result<Self> {
+    pub fn child(max_tasks: usize, parent: &Handle) -> Result<Self, CreateError> {
         let activity = ActivityGuard::new(&parent.scope);
         if parent.cancellation.is_cancelled() || parent.scope.owner_closed.load(Ordering::SeqCst) {
-            return Err(tok_core::Error::InvalidInput("父任务范围正在退出".into()));
+            return Err(CreateError::ParentStopping);
         }
         let child = Self::new(max_tasks, parent.cancellation.child_token())?;
         *child

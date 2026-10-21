@@ -61,7 +61,7 @@ pub struct HandlerReply<M> {
 
 /// 消息与 timer 的编解码路由；服务器事件委托统一事件 Registry。
 pub struct HandlerRegistry {
-    handlers: BTreeMap<u32, Arc<RegisteredHandler>>,
+    handlers: crate::protobuf::Registry<u32, CallContext, Option<TimerUpdate>, Status>,
     timers: BTreeMap<u32, Arc<RegisteredHandler>>,
     events: tok_events::Registry<CallContext, Option<TimerUpdate>, Status>,
 }
@@ -74,7 +74,7 @@ impl HandlerRegistry {
     /// 创建空表；事件处理者总量上限为 65536，不按玩家分配注册项。
     pub fn new() -> Self {
         Self {
-            handlers: BTreeMap::new(),
+            handlers: crate::protobuf::Registry::new(),
             timers: BTreeMap::new(),
             events: tok_events::Registry::default(),
         }
@@ -145,38 +145,21 @@ impl HandlerRegistry {
             + 'static,
         S::Future: Send + 'static,
     {
-        if request_id == 0 || response_id == 0 || self.handlers.contains_key(&request_id) {
+        if request_id == 0 || response_id == 0 {
             return Err(crate::Error::Configuration(
-                "消息 ID 必须非零且请求只能注册一次".into(),
+                "请求和回应消息 ID 必须非零".into(),
             ));
         }
-        self.handlers.insert(
-            request_id,
-            Arc::new(move |request| {
-                let service = service.clone();
-                Box::pin(async move {
-                    let (call, body) = request.input;
-                    let input = Req::decode(body.as_slice())
-                        .map_err(|_| Status::invalid_argument("游戏消息解码失败"))?;
-                    let id = call.request_id;
-                    let response = tok_execution::Layer
-                        .layer(service)
-                        .oneshot(ExecutionRequest::new(request.context, (call, input)))
-                        .await
-                        .map_err(execution_status)?;
-                    Ok(CallResponse {
-                        request_id: id,
-                        payload: Some(Payload {
-                            message_id: response_id,
-                            body: response.message.encode_to_vec(),
-                        }),
-                        error: None,
-                        timers: response.timers.map(crate::timer::encode_update),
-                    })
-                })
-            }),
-        );
-        Ok(())
+        self.handlers
+            .register_service(
+                request_id,
+                response_id,
+                service.map_response(|reply: HandlerReply<Resp>| crate::protobuf::Reply {
+                    message: reply.message,
+                    output: reply.timers,
+                }),
+            )
+            .map_err(|error| crate::Error::Configuration(error.to_string()))
     }
     /// 安装服务器事件的共同注册链；多个处理者按序执行，timer 更新依次合成。
     pub fn register_event<E, H>(&mut self, handler: H) -> Result<(), crate::Error>
@@ -309,10 +292,6 @@ impl Handler for HandlerRegistry {
                 drop(request_context.extensions_mut().remove::<TimerTrigger>());
             }
             let timer = call.timer.is_some();
-            let table = if timer { &self.timers } else { &self.handlers };
-            let handler = table
-                .get(&payload.message_id)
-                .ok_or_else(|| Status::unimplemented("游戏消息尚未注册"))?;
             let context = request_context
                 .child(format!(
                     "{}/{}",
@@ -320,10 +299,56 @@ impl Handler for HandlerRegistry {
                     payload.message_id
                 ))
                 .map_err(|_| Status::invalid_argument("调用执行上下文无效"))?;
-            handler(ExecutionRequest::new(context, (call, payload.body))).await
+            if timer {
+                let handler = self
+                    .timers
+                    .get(&payload.message_id)
+                    .ok_or_else(|| Status::unimplemented("游戏消息尚未注册"))?;
+                return handler(ExecutionRequest::new(context, (call, payload.body))).await;
+            }
+            let id = call.request_id;
+            let reply = self
+                .handlers
+                .dispatch(ExecutionRequest::new(
+                    context,
+                    (
+                        call,
+                        crate::protobuf::Message {
+                            key: payload.message_id,
+                            body: payload.body,
+                        },
+                    ),
+                ))
+                .await
+                .map_err(|error| dispatch_status(error, |error| error))?;
+            Ok(CallResponse {
+                request_id: id,
+                payload: Some(Payload {
+                    message_id: reply.message.key,
+                    body: reply.message.body,
+                }),
+                error: None,
+                timers: reply.output.map(crate::timer::encode_update),
+            })
         })
     }
 }
+pub(super) fn dispatch_status<E>(
+    error: tok_execution::registry::DispatchError<u32, crate::protobuf::Error<E>>,
+    map_error: impl FnOnce(E) -> Status,
+) -> Status {
+    use crate::protobuf;
+    use tok_execution::registry::DispatchError;
+    match error {
+        DispatchError::Unknown(_) => Status::unimplemented("游戏消息尚未注册"),
+        DispatchError::Stopped(reason) => execution_status(tok_execution::Error::Stopped(reason)),
+        DispatchError::Handler(protobuf::Error::Decode(_)) => {
+            Status::invalid_argument("游戏消息解码失败")
+        }
+        DispatchError::Handler(protobuf::Error::Handler(error)) => map_error(error),
+    }
+}
+
 fn configuration(error: tok_events::Error) -> crate::Error {
     crate::Error::Configuration(error.to_string())
 }

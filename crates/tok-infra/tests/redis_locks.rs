@@ -1,9 +1,7 @@
 //! 真实 Redis 请求锁：独立客户端及跨进程竞争、过期、条件释放与失败。
 use std::{sync::Arc, time::Duration};
-use tok_core::{
-    Error,
-    lock::{Backend as LockBackend, Key as LockKey},
-};
+use tok_core::lock::Error;
+use tok_core::lock::{Backend as LockBackend, Key as LockKey};
 use tok_infra::locks::{Redis, RedisConfig};
 
 fn test_config() -> RedisConfig {
@@ -37,7 +35,7 @@ async fn independent_clients_compete_and_stale_release_preserves_new_lease() {
     let token = old.token().to_owned();
     assert!(matches!(
         second.acquire(key("guild", "1"), Duration::ZERO, TTL).await,
-        Err(Error::LockWaitTimeout)
+        Err(Error::WaitTimeout)
     ));
     let different_bid = second
         .acquire(key("guild", "2"), Duration::ZERO, TTL)
@@ -60,7 +58,7 @@ async fn independent_clients_compete_and_stale_release_preserves_new_lease() {
         first
             .acquire(key("guild", "1"), Duration::from_millis(20), TTL)
             .await,
-        Err(Error::LockWaitTimeout)
+        Err(Error::WaitTimeout)
     ));
     current.release().await.unwrap();
     first
@@ -83,9 +81,7 @@ async fn contention_has_one_winner_and_abandoned_lease_expires() {
         b.acquire(key("guild", "1"), Duration::ZERO, TTL)
     );
     let lease = match (a_result, b_result) {
-        (Ok(lease), Err(Error::LockWaitTimeout)) | (Err(Error::LockWaitTimeout), Ok(lease)) => {
-            lease
-        }
+        (Ok(lease), Err(Error::WaitTimeout)) | (Err(Error::WaitTimeout), Ok(lease)) => lease,
         _ => panic!("必须恰好一个持有者"),
     };
     lease.release().await.unwrap();
@@ -114,7 +110,7 @@ async fn unreachable_backend_and_invalid_config_are_bounded() {
         backend
             .acquire(key("guild", "1"), Duration::ZERO, TTL)
             .await,
-        Err(Error::CoordinationUnavailable(_))
+        Err(Error::Unavailable(_))
     ));
     assert!(
         Redis::new(RedisConfig {
@@ -157,10 +153,7 @@ async fn release_reports_backend_failure_instead_of_claiming_success() {
         .unwrap();
     stop.cancel();
     proxy.await.unwrap();
-    assert!(matches!(
-        lease.release().await,
-        Err(Error::CoordinationUnavailable(_))
-    ));
+    assert!(matches!(lease.release().await, Err(Error::Unavailable(_))));
     tokio::time::sleep(Duration::from_millis(120)).await;
 }
 
@@ -174,7 +167,7 @@ async fn unknown_acquisition_result_is_not_retried_and_expires_by_ttl() {
         backend
             .acquire(key("guild", "1"), Duration::ZERO, Duration::from_secs(2))
             .await,
-        Err(Error::CoordinationUnavailable(_))
+        Err(Error::Unavailable(_))
     ));
     assert_eq!(writes.load(Ordering::SeqCst), 1, "未知结果不能重试 SET");
     let client = redis::Client::open(config.url.as_str()).unwrap();
@@ -296,7 +289,7 @@ async fn separate_processes_share_the_same_lock() {
             .acquire(key("guild", "1"), Duration::from_millis(20), TTL)
             .await;
         match std::env::var("TOK_LOCK_CHILD_MODE").unwrap().as_str() {
-            "blocked" => assert!(matches!(result, Err(Error::LockWaitTimeout))),
+            "blocked" => assert!(matches!(result, Err(Error::WaitTimeout))),
             "free" => result.unwrap().release().await.unwrap(),
             _ => panic!("非法子进程测试模式"),
         }

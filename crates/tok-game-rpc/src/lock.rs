@@ -183,11 +183,12 @@ where
         })
     }
 }
-fn status(error: tok_core::Error) -> Status {
+fn status(error: tok_core::lock::Error) -> Status {
     match error {
-        tok_core::Error::InvalidInput(_) => Status::invalid_argument("请求锁参数无效"),
-        tok_core::Error::LockWaitTimeout => Status::deadline_exceeded("请求锁获取超时"),
-        tok_core::Error::LockCapacityExceeded => Status::resource_exhausted("请求锁容量已满"),
-        _ => Status::unavailable("请求锁后端不可用"),
+        tok_core::lock::Error::InvalidInput(_) => Status::invalid_argument("请求锁参数无效"),
+        tok_core::lock::Error::WaitTimeout => Status::deadline_exceeded("请求锁获取超时"),
+        tok_core::lock::Error::CapacityExceeded => Status::resource_exhausted("请求锁容量已满"),
+        tok_core::lock::Error::InvalidConfig(_) => Status::failed_precondition("请求锁配置无效"),
+        tok_core::lock::Error::Unavailable(_) => Status::unavailable("请求锁后端不可用"),
     }
 }

@@ -27,6 +27,7 @@ RPC 返回回应，事件返回当前处理阶段的结果，不自动生成客�
 | tok-core 基础契约 | 服务身份、Extensions、发现、路由及请求锁契约 | 不依赖玩家运行契约、gateway、具体 RPC 协议或 NATS |
 | tok-player 玩家运行契约 | 会话身份、逻辑消息、计时需求、所有权与恢复凭证 | 只依赖 tok-core，不实现网络、调度或存储后端 |
 | 调用执行设施 | 执行上下文、类型化请求、Tower 处理链与预算/取消约束 | tok-execution，不管理服务构建与后台任务 |
+| 按键分发模块 | 根据泛型键选择输入、结果和错误均可自定义的处理链 | tok-execution::registry，不规定编码或协议；protobuf 适配归 tok-game-rpc |
 | 服务生命周期设施 | 服务工厂、启动阶段、退出与有界任务监督 | tok-lifecycle，不依赖执行层或 Tower |
 | 通信与事件适配 | 协议、编解码、发布订阅与结果映射 | 复用共同执行核心，不各建中间件引擎 |
 | tok-gateway | 连接、认证、session、FIFO、timer、下行恢复与交接 | 通用服务的内置扩展，不是普通服务的必选基类 |
@@ -43,6 +44,7 @@ flowchart TD
     events --> lifecycle
     rpc[tok-rpc] --> execution
     game_rpc[tok-game-rpc] --> rpc
+    game_rpc --> execution
     game_rpc --> player
     game_rpc --> events
     game_rpc --> lifecycle
@@ -64,7 +66,7 @@ Application / Gateway 已复用同一 Factory 与生命周期，RPC、事件及�
 
 公开 API 按使用者概念组织，内部模块按实现需要组织，通过 pub use 解耦；规则与依据维护在 [AGENTS.md](../AGENTS.md#rust-公开-api-与模块组织)。实现文件默认不构成公开路径；需要理解、组合或扩展的功能提供公开模块，主要入口可根重导出。公开模块与根重导出可以并存，不因双路径或角色名前缀做机械重构。
 
-core 的 discovery / lock / routing / service 是功能命名空间，常用身份、发现与路由契约同时根导出。error / extensions / timer 是内部文件，Error / Result / Extensions / TimerTrigger 从根访问，错误契约表位于公开的 Error 文档。BoxFuture 也是根上的基础入口。公开 API 不要求复刻文件树，也不要求所有模块同一种可见性。
+core 的 discovery / lock / routing / service 是功能命名空间，常用身份、发现与路由契约同时根导出。extensions 是内部文件，Extensions 与 BoxFuture 从根访问；各领域 Error / Result 位于其功能模块，不提供根错误。玩家 TimerTrigger 从 tok-player 根访问。公开 API 不要求复刻文件树，也不要求所有模块同一种可见性。
 
 ## 身份、路由与作用域
 
@@ -180,3 +182,25 @@ Context 移除 source 字段、Source 枚举和构造/child 的来源参数。�
 事件 Registry 的本地与远端分发提供相同事件头，派生子上下文覆盖当前事件头，不修改父扩展；本地派生仍清除继承的原始编码。客户端无法发布事件、请求与 timer 分表、会话身份校验、预算和取消约束保持不变；Extensions 元信息不作为认证证明。调用方和指南已迁移，不保留 Source 兼容类型。
 
 RPC 客户端连接策略可通过 Client::with_endpoint_factory 扩展，服务端传输通过 Listener::from_server 复用 Tonic Server 配置。连接共享边界仍为节点与地址，同一边界采用一致传输策略；TLS 证书与域名验证由应用配置 Tonic，不放入通用服务发现契约。默认构造维持本地开发使用的明文传输。
+
+## 消息分发与游戏协议边界
+
+tok-execution::registry::Registry<K, T, R, E> 根据泛型键选择并执行处理链，不固定 u32 消息 ID、字节正文、回应结构或编码格式。K 只需 Ord + Clone，不要求 Display；键的业务有效性归调用方。tok-execution 不依赖 prost、Tonic 或生成协议。
+
+protobuf 正文编解码位于 tok-game-rpc::protobuf，基于同一个通用分发表实现。它的消息键仍是泛型；具体游戏线协议选择 u32 并在边界施加非零约束。普通业务 RPC 适配负责 CallContext 与业务状态转换、构造协议回应及错误到 Status 的映射，本地与 RPC 可共用同一业务注册器。
+
+玩家请求、timer 与服务器事件组合的后续校正仍单独推进。事件继续使用 tok-events，统一的是 Request / Tower 协议，不强行合并所有分发表；通用请求锁的取键泛化和通知归属迁移也尚未完成。不提供独立的 tok-dispatch crate 或门面别名。
+
+## 按功能域拆分基础错误（2026-10-21）
+
+服务发现、请求锁和路由契约分别使用 core::discovery::{Error, Result}、core::lock::{Error, Result}、core::routing::{Error, Result}；不提供旧领域变体兼容别名。路由的 Discovery 包装保留原发现错误与错误链，Application::Error 增加 Discovery 聚合，注册、清理和故障传播均使用该类别。后端错误按相应领域映射，不返回其他领域的变体。
+
+core 不提供根 Error / Result，参数、配置和可选能力校验由实际所属组件表达。所有权后端故障使用 player::Error::OwnershipUnavailable，冲突、配置、凭证与不可用语义保持区分。Redis 发现与锁构造/校验采用所属领域错误，整体应用配置在边界映射为 config::Error::Invalid。
+
+registry 注册错误定名为 Error<K>，运行失败定名为 DispatchError<K, E>；后者覆盖未知键、执行停止与业务处理错误，避免 HandleError 误指只有处理者内部失败。protobuf 适配与示例同步新路径，不保留 RegistrationError 旧类型。
+
+## 移除 core 根校验错误（2026-10-21）
+
+删除 tok-core/error.rs 及根 Error / Result，领域发现、锁和路由契约不变，不提供兼容类型。剩余校验能力回到所属模块：execution::ContextError 表达无效服务身份、操作名和不可表示期限；lifecycle::task::CreateError 表达无效容量和父范围退出，lifecycle::CreateError 表达服务身份及底层任务范围构造失败。构造失败与运行错误分开，组合处保留原始来源。
+
+应用配置使用 tok::config::{Error, Result}，Application 以 Configuration / Create / Discovery 聚合配置、构造和发现错误，Unsupported 表达应用尚未实现的可选能力。玩家参数、配置、可选操作、所有权和凭证错误直接归 player::Error，不再经 Core 包装；玩家接入运行参数单独使用 gateway::player::ConfigError。示例业务状态构造采用自己的标准 I/O 参数错误，不依赖框架根错误。

@@ -37,7 +37,7 @@ impl player::Executor for ReadOnly {
         )))
     }
 }
-fn context(service: &str, operation: &str) -> tok::core::Result<Context> {
+fn context(service: &str, operation: &str) -> Result<Context, tok::execution::ContextError> {
     Context::new(
         Identity {
             node_id: "local".into(),

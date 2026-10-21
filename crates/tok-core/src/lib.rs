@@ -2,20 +2,19 @@
 //!
 //! [`discovery`]、[`lock`]、[`routing`]、[`service`] 提供功能命名空间。
 //! 常用服务身份、发现与路由契约同时从根导出，便于使用者导入；双路径指向同一定义。
-//! [`Error`] / [`Result`]、[`Extensions`] 和 [`BoxFuture`] 直接作为根入口，
+//! 发现、锁和路由接口各自提供领域错误和结果类型，不聚合根错误。
+//! [`Extensions`] 和 [`BoxFuture`] 直接作为根入口，
 //! 对应实现文件不构成额外的公开命名空间。
 
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
 
 pub mod discovery;
-mod error;
 mod extensions;
 pub mod lock;
 pub mod routing;
 pub mod service;
 
 pub use discovery::{DirectoryWatch, ServiceDirectory, ServiceRegistry};
-pub use error::{Error, Result};
 pub use extensions::Extensions;
 pub use routing::ServiceRouter;
 pub use service::{Identity, ServiceDescriptor};

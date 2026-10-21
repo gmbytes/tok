@@ -1,7 +1,8 @@
 //! 与发现后端独立的业务 ID 路由。
 
 use std::sync::Arc;
-use tok_core::{Error, Result, ServiceDescriptor, ServiceDirectory};
+use tok_core::routing::{Error, Result};
+use tok_core::{ServiceDescriptor, ServiceDirectory};
 
 /// 使用注入目录快照的稳定 rendezvous 路由器。
 pub struct RendezvousRouter {

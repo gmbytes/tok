@@ -7,7 +7,7 @@ use std::{
     time::Duration,
 };
 use tok_core::service::Identity;
-use tok_execution::{Context, StopReason};
+use tok_execution::{Context, ContextError, StopReason};
 use tokio_util::sync::CancellationToken;
 
 fn context(cancellation: CancellationToken) -> Context {
@@ -73,8 +73,11 @@ fn zero_budget_is_already_expired_and_invalid_metadata_is_rejected() {
     )
     .unwrap();
     assert_eq!(expired.check(), Err(StopReason::DeadlineExceeded));
-    assert!(expired.child("").is_err());
-    assert!(
+    assert_eq!(
+        expired.child("").unwrap_err(),
+        ContextError::InvalidOperation
+    );
+    assert_eq!(
         Context::new(
             Identity {
                 node_id: String::new(),
@@ -84,6 +87,7 @@ fn zero_budget_is_already_expired_and_invalid_metadata_is_rejected() {
             Duration::from_secs(1),
             CancellationToken::new()
         )
-        .is_err()
+        .unwrap_err(),
+        ContextError::InvalidService
     );
 }

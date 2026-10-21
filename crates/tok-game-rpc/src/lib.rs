@@ -16,6 +16,7 @@ mod context;
 mod handler;
 pub mod lock;
 pub mod player;
+pub mod protobuf;
 pub mod timer;
 
 pub use binding::Binding;

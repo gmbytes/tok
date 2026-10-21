@@ -1,9 +1,7 @@
 //! 请求锁的单进程互斥、容量、期限和取消测试；使用可控时钟。
 use std::{sync::Arc, time::Duration};
-use tok_core::{
-    Error,
-    lock::{Backend as LockBackend, Key as LockKey},
-};
+use tok_core::lock::Error;
+use tok_core::lock::{Backend as LockBackend, Key as LockKey};
 use tok_infra::locks::Memory;
 use tokio::time::{advance, timeout};
 
@@ -65,14 +63,14 @@ async fn stale_release_cannot_delete_replacement_and_drop_waits_for_ttl() {
         backend
             .acquire(key("guild", "1"), Duration::ZERO, TTL)
             .await,
-        Err(Error::LockWaitTimeout)
+        Err(Error::WaitTimeout)
     ));
     drop(current);
     assert!(matches!(
         backend
             .acquire(key("guild", "1"), Duration::ZERO, TTL)
             .await,
-        Err(Error::LockWaitTimeout)
+        Err(Error::WaitTimeout)
     ));
     advance(TTL).await;
     backend
@@ -95,7 +93,7 @@ async fn wait_is_finite_and_cancelled_waiter_returns_capacity() {
         backend
             .acquire(key("guild", "2"), Duration::ZERO, TTL)
             .await,
-        Err(Error::LockCapacityExceeded)
+        Err(Error::CapacityExceeded)
     ));
     let pending = Arc::clone(&backend);
     let task = tokio::spawn(async move { pending.acquire(key("guild", "1"), TTL, TTL).await });
@@ -104,7 +102,7 @@ async fn wait_is_finite_and_cancelled_waiter_returns_capacity() {
         backend
             .acquire(key("guild", "1"), Duration::ZERO, TTL)
             .await,
-        Err(Error::LockCapacityExceeded)
+        Err(Error::CapacityExceeded)
     ));
     task.abort();
     assert!(matches!(task.await, Err(error) if error.is_cancelled()));
@@ -112,7 +110,7 @@ async fn wait_is_finite_and_cancelled_waiter_returns_capacity() {
         backend
             .acquire(key("guild", "1"), Duration::from_millis(50), TTL)
             .await,
-        Err(Error::LockWaitTimeout)
+        Err(Error::WaitTimeout)
     ));
     held.release().await.unwrap();
     let lease = timeout(

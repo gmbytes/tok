@@ -1,6 +1,20 @@
 use std::time::{Duration, Instant};
-use tok_core::{Error, Extensions, Result, service::Identity};
+use tok_core::{Extensions, service::Identity};
 use tokio_util::sync::CancellationToken;
+
+/// 执行上下文构造失败，与处理链运行错误分开。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum ContextError {
+    /// 节点或服务名为空白。
+    #[error("执行服务身份不能为空")]
+    InvalidService,
+    /// 操作名为空白或超过 256 字节。
+    #[error("执行操作名不能为空白，且不得超过 256 字节")]
+    InvalidOperation,
+    /// 预算超出本地单调时钟的可表示范围。
+    #[error("执行期限超出单调时钟范围")]
+    DeadlineOverflow,
+}
 
 /// 当前调用不得继续发起或接受执行结果的原因；不表示副作用已回滚。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -35,15 +49,15 @@ impl Context {
         operation: impl Into<String>,
         budget: Duration,
         cancellation: CancellationToken,
-    ) -> Result<Self> {
+    ) -> Result<Self, ContextError> {
         let operation = operation.into();
         if service.node_id.trim().is_empty() || service.service_name.trim().is_empty() {
-            return Err(Error::InvalidInput("执行服务身份不能为空".into()));
+            return Err(ContextError::InvalidService);
         }
         Self::validate_operation(&operation)?;
         let deadline = Instant::now()
             .checked_add(budget)
-            .ok_or_else(|| Error::InvalidInput("执行期限超出单调时钟范围".into()))?;
+            .ok_or(ContextError::DeadlineOverflow)?;
         Ok(Self {
             service,
             operation,
@@ -57,7 +71,7 @@ impl Context {
     ///
     /// 子取消不取消父调用；本方法不会重新分配一份预算或自动进入队列。
     /// 此方法保持当前执行服务身份，不负责构建出站 RPC 的路由目标或跨服务上下文。
-    pub fn child(&self, operation: impl Into<String>) -> Result<Self> {
+    pub fn child(&self, operation: impl Into<String>) -> Result<Self, ContextError> {
         let operation = operation.into();
         Self::validate_operation(&operation)?;
         Ok(Self {
@@ -119,11 +133,9 @@ impl Context {
         }
         Ok(())
     }
-    fn validate_operation(operation: &str) -> Result<()> {
+    fn validate_operation(operation: &str) -> Result<(), ContextError> {
         if operation.trim().is_empty() || operation.len() > 256 {
-            return Err(Error::InvalidInput(
-                "执行操作名不能为空白，且不得超过 256 字节".into(),
-            ));
+            return Err(ContextError::InvalidOperation);
         }
         Ok(())
     }

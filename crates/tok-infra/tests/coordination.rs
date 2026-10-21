@@ -1,7 +1,7 @@
 //! bid 路由和内存所有权竞争、接管与过期的集成测试。
 
 use std::time::Duration;
-use tok_core::{Error, ServiceDescriptor, ServiceDirectory};
+use tok_core::{ServiceDescriptor, ServiceDirectory};
 use tok_infra::{ownership::MemoryOwnership, routing::route};
 use tok_player::ownership::{Owner as SessionOwner, Store as OwnershipStore};
 
@@ -68,7 +68,7 @@ async fn memory_transfer_compares_full_identity_and_old_cleanup_preserves_target
     assert_eq!(store.lookup("p").await.unwrap(), Some(current));
 }
 impl ServiceDirectory for Directory {
-    fn snapshot(&self, _: &str) -> tok_core::Result<Vec<ServiceDescriptor>> {
+    fn snapshot(&self, _: &str) -> tok_core::discovery::Result<Vec<ServiceDescriptor>> {
         Ok(self.0.clone())
     }
 }
@@ -112,11 +112,11 @@ fn routing_ignores_snapshot_order_and_only_moves_removed_targets() {
     assert!(removed_count > 0);
     assert!(matches!(
         route(&directory, "mail", "1"),
-        Err(Error::NoAvailableService(_))
+        Err(tok_core::routing::Error::NoAvailableService(_))
     ));
     assert!(matches!(
         route(&directory, "guild", ""),
-        Err(Error::InvalidInput(_))
+        Err(tok_core::routing::Error::InvalidInput(_))
     ));
 }
 
@@ -141,7 +141,7 @@ async fn ownership_competition_takeover_and_release_are_conditional() {
         store
             .acquire("43".into(), "other".into(), owner("c"), None, ttl)
             .await,
-        Err(tok_player::Error::Core(Error::CoordinationUnavailable(_)))
+        Err(tok_player::Error::OwnershipUnavailable(_))
     ));
     let next = store
         .acquire(
@@ -204,6 +204,30 @@ async fn expired_ownership_cannot_be_renewed_and_capacity_is_reclaimed() {
         store
             .acquire("44".into(), "bad".into(), owner("b"), None, Duration::ZERO)
             .await,
-        Err(tok_player::Error::Core(Error::InvalidInput(_)))
+        Err(tok_player::Error::InvalidInput(_))
+    ));
+}
+
+#[test]
+fn routing_preserves_discovery_failure_and_default_subscription_uses_its_domain_error() {
+    struct Unavailable;
+    impl ServiceDirectory for Unavailable {
+        fn snapshot(&self, _: &str) -> tok_core::discovery::Result<Vec<ServiceDescriptor>> {
+            Err(tok_core::discovery::Error::Unavailable)
+        }
+    }
+    let error = route(&Unavailable, "guild", "42").unwrap_err();
+    assert!(matches!(
+        error,
+        tok_core::routing::Error::Discovery(tok_core::discovery::Error::Unavailable)
+    ));
+    let source = std::error::Error::source(&error).unwrap();
+    assert!(matches!(
+        source.downcast_ref::<tok_core::discovery::Error>(),
+        Some(tok_core::discovery::Error::Unavailable)
+    ));
+    assert!(matches!(
+        Unavailable.subscribe(),
+        Err(tok_core::discovery::Error::Unsupported("服务目录变更订阅"))
     ));
 }

@@ -5,10 +5,8 @@ use std::{
     time::Duration,
 };
 use tok_core::BoxFuture;
-use tok_core::{
-    Error, Result,
-    lock::{Backend as LockBackend, Key as LockKey, Lease as LockLease},
-};
+use tok_core::lock::{Backend as LockBackend, Key as LockKey, Lease as LockLease};
+use tok_core::lock::{Error, Result};
 use tokio::{sync::Semaphore, time::Instant};
 
 type Key = (String, String);
@@ -45,7 +43,7 @@ impl Memory {
             return Ok(false);
         }
         if entries.len() >= self.0.capacity {
-            return Err(Error::LockCapacityExceeded);
+            return Err(Error::CapacityExceeded);
         }
         entries.insert(
             key.clone(),
@@ -63,14 +61,14 @@ impl LockBackend for Memory {
         key: LockKey,
         wait: Duration,
         ttl: Duration,
-    ) -> BoxFuture<'_, tok_core::Result<Box<dyn LockLease>>> {
+    ) -> BoxFuture<'_, tok_core::lock::Result<Box<dyn LockLease>>> {
         Box::pin(async move {
             validate(&key, wait, ttl)?;
             let _permit = self
                 .0
                 .pending
                 .try_acquire()
-                .map_err(|_| Error::LockCapacityExceeded)?;
+                .map_err(|_| Error::CapacityExceeded)?;
             let key = (key.namespace, key.bid);
             let token = uuid::Uuid::new_v4().to_string();
             let deadline = Instant::now() + wait;
@@ -83,11 +81,11 @@ impl LockBackend for Memory {
                     }) as Box<dyn LockLease>);
                 }
                 if Instant::now() >= deadline {
-                    return Err(Error::LockWaitTimeout);
+                    return Err(Error::WaitTimeout);
                 }
                 tokio::time::sleep_until(deadline.min(Instant::now() + RETRY)).await;
                 if Instant::now() >= deadline {
-                    return Err(Error::LockWaitTimeout);
+                    return Err(Error::WaitTimeout);
                 }
             }
         })
@@ -102,7 +100,7 @@ impl LockLease for Lease {
     fn token(&self) -> &str {
         &self.token
     }
-    fn release(self: Box<Self>) -> BoxFuture<'static, tok_core::Result<()>> {
+    fn release(self: Box<Self>) -> BoxFuture<'static, tok_core::lock::Result<()>> {
         Box::pin(async move {
             let mut entries = self.shared.entries.lock().map_err(|_| unavailable())?;
             if entries

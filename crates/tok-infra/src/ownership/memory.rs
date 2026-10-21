@@ -41,9 +41,7 @@ impl MemoryOwnership {
     /// 创建具有有限记录容量的开发后端，capacity 必须大于零。
     pub fn new(capacity: usize) -> Result<Self> {
         if capacity == 0 {
-            return Err(Error::Core(tok_core::Error::InvalidInput(
-                "所有权容量必须大于零".into(),
-            )));
+            return Err(Error::InvalidInput("所有权容量必须大于零".into()));
         }
         Ok(Self {
             capacity,
@@ -70,9 +68,7 @@ impl MemoryOwnership {
             .iter()
             .any(|value| value.trim().is_empty())
             {
-                return Err(Error::Core(tok_core::Error::InvalidInput(
-                    "玩家、会话和所有者身份不能为空".into(),
-                )));
+                return Err(Error::InvalidInput("玩家、会话和所有者身份不能为空".into()));
             }
             let mut state = self.state()?;
             let expires = expiration(ttl)?;
@@ -93,15 +89,12 @@ impl MemoryOwnership {
                 return Err(Error::OwnershipConflict);
             }
             if current.is_none() && state.records.len() >= self.capacity {
-                return Err(Error::Core(tok_core::Error::CoordinationUnavailable(
-                    "所有权容量已满".into(),
-                )));
+                return Err(Error::OwnershipUnavailable("所有权容量已满".into()));
             }
-            let next_epoch = state.epoch.checked_add(1).ok_or_else(|| {
-                Error::Core(tok_core::Error::CoordinationUnavailable(
-                    "epoch 已耗尽".into(),
-                ))
-            })?;
+            let next_epoch = state
+                .epoch
+                .checked_add(1)
+                .ok_or_else(|| Error::OwnershipUnavailable("epoch 已耗尽".into()))?;
             // 只缓存有限玩家的最新登录标记；回收历史后拒绝其快速重登，需普通鉴权。
             if !state.latest_sessions.contains_key(&player_id)
                 && state.latest_sessions.len() >= self.capacity
@@ -111,11 +104,7 @@ impl MemoryOwnership {
                     .keys()
                     .find(|player| !state.records.contains_key(*player))
                     .cloned()
-                    .ok_or_else(|| {
-                        Error::Core(tok_core::Error::CoordinationUnavailable(
-                            "登录标记容量已满".into(),
-                        ))
-                    })?;
+                    .ok_or_else(|| Error::OwnershipUnavailable("登录标记容量已满".into()))?;
                 state.latest_sessions.remove(&inactive);
             }
             state
@@ -142,23 +131,19 @@ impl MemoryOwnership {
     }
 
     fn state(&self) -> Result<std::sync::MutexGuard<'_, State>> {
-        self.state.lock().map_err(|_| {
-            Error::Core(tok_core::Error::CoordinationUnavailable(
-                "内存所有权锁不可用".into(),
-            ))
-        })
+        self.state
+            .lock()
+            .map_err(|_| Error::OwnershipUnavailable("内存所有权锁不可用".into()))
     }
 }
 
 fn expiration(ttl: Duration) -> Result<Instant> {
     if ttl.is_zero() {
-        return Err(Error::Core(tok_core::Error::InvalidInput(
-            "租约期限必须大于零".into(),
-        )));
+        return Err(Error::InvalidInput("租约期限必须大于零".into()));
     }
     Instant::now()
         .checked_add(ttl)
-        .ok_or_else(|| Error::Core(tok_core::Error::InvalidInput("租约期限过大".into())))
+        .ok_or_else(|| Error::InvalidInput("租约期限过大".into()))
 }
 
 impl OwnershipStore for MemoryOwnership {
@@ -171,9 +156,7 @@ impl OwnershipStore for MemoryOwnership {
         Box::pin(async move {
             let expires = expiration(ttl)?;
             if target.node_id.trim().is_empty() || target.service_name.trim().is_empty() {
-                return Err(Error::Core(tok_core::Error::InvalidInput(
-                    "目标网关身份不能为空".into(),
-                )));
+                return Err(Error::InvalidInput("目标网关身份不能为空".into()));
             }
             let mut state = self.state()?;
             let key = &expected.identity.player_id;
@@ -182,11 +165,10 @@ impl OwnershipStore for MemoryOwnership {
             }) {
                 return Err(Error::OwnershipConflict);
             }
-            state.epoch = state.epoch.checked_add(1).ok_or_else(|| {
-                Error::Core(tok_core::Error::CoordinationUnavailable(
-                    "epoch 已耗尽".into(),
-                ))
-            })?;
+            state.epoch = state
+                .epoch
+                .checked_add(1)
+                .ok_or_else(|| Error::OwnershipUnavailable("epoch 已耗尽".into()))?;
             let ownership = SessionOwnership {
                 identity: SessionIdentity {
                     epoch: state.epoch,

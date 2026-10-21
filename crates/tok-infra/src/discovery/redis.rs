@@ -8,9 +8,8 @@ use std::{
     time::{Duration, Instant},
 };
 use tok_core::BoxFuture;
-use tok_core::{
-    DirectoryWatch, Error, Result, ServiceDescriptor, ServiceDirectory, discovery::ServiceRegistry,
-};
+use tok_core::discovery::{Error, Result};
+use tok_core::{DirectoryWatch, ServiceDescriptor, ServiceDirectory, discovery::ServiceRegistry};
 use tokio::sync::{Mutex, watch};
 use tokio_util::sync::CancellationToken;
 
@@ -141,7 +140,7 @@ impl RedisDirectory {
         if node_id.trim().is_empty() || node_id.len() > 256 {
             return Err(Error::InvalidConfig("Redis 发现 node_id 长度无效".into()));
         }
-        let client = Client::open(config.url.as_str()).map_err(|_| Error::DiscoveryUnavailable)?;
+        let client = Client::open(config.url.as_str()).map_err(|_| Error::Unavailable)?;
         let encoded: String = node_id.bytes().map(|b| format!("{b:02x}")).collect();
         Ok(Arc::new(Self {
             key: format!("tok:discovery:{{{}}}:node:{encoded}", config.namespace),
@@ -173,7 +172,7 @@ impl RedisDirectory {
         acquired: bool,
     ) -> Result<()> {
         let data = serde_json::to_string(&services.values().collect::<Vec<_>>())
-            .map_err(|_| Error::DiscoveryUnavailable)?;
+            .map_err(|_| Error::Unavailable)?;
         if data.len() > 65_536 {
             return Err(Error::InvalidInput("节点发现信息超过 64 KiB".into()));
         }
@@ -182,7 +181,7 @@ impl RedisDirectory {
                 .client
                 .get_multiplexed_async_connection()
                 .await
-                .map_err(|_| Error::DiscoveryUnavailable)?;
+                .map_err(|_| Error::Unavailable)?;
             let success: i64 = Script::new(WRITE)
                 .key(&self.key)
                 .arg(&self.token)
@@ -191,11 +190,11 @@ impl RedisDirectory {
                 .arg(if acquired { "renew" } else { "claim" })
                 .invoke_async(&mut connection)
                 .await
-                .map_err(|_| Error::DiscoveryUnavailable)?;
+                .map_err(|_| Error::Unavailable)?;
             if success != 1 {
                 return Err(if acquired {
                     // 续租被拒绝表示原注册租约已失效，不是新的注册身份冲突。
-                    Error::DiscoveryUnavailable
+                    Error::Unavailable
                 } else {
                     Error::RegistrationConflict(format!("节点 {} 已被其他实例注册", self.node_id))
                 });
@@ -203,7 +202,7 @@ impl RedisDirectory {
             Ok(())
         })
         .await
-        .map_err(|_| Error::DiscoveryUnavailable)?
+        .map_err(|_| Error::Unavailable)?
     }
 
     async fn remove(&self) -> Result<bool> {
@@ -212,17 +211,17 @@ impl RedisDirectory {
                 .client
                 .get_multiplexed_async_connection()
                 .await
-                .map_err(|_| Error::DiscoveryUnavailable)?;
+                .map_err(|_| Error::Unavailable)?;
             let removed: i64 = Script::new(REMOVE)
                 .key(&self.key)
                 .arg(&self.token)
                 .invoke_async(&mut connection)
                 .await
-                .map_err(|_| Error::DiscoveryUnavailable)?;
+                .map_err(|_| Error::Unavailable)?;
             Ok(removed == 1)
         })
         .await
-        .map_err(|_| Error::DiscoveryUnavailable)?
+        .map_err(|_| Error::Unavailable)?
     }
 
     /// 条件撤销本实例的全部服务；旧实例不能删除新实例记录。
@@ -250,17 +249,17 @@ impl RedisDirectory {
                 .arg(128)
                 .query_async(connection)
                 .await
-                .map_err(|_| Error::DiscoveryUnavailable)?;
+                .map_err(|_| Error::Unavailable)?;
             pages += 1;
             if pages > 4096 {
-                return Err(Error::DiscoveryUnavailable);
+                return Err(Error::Unavailable);
             }
             for key in page {
                 if !keys.insert(key.clone()) {
                     continue;
                 }
                 if keys.len() > self.config.max_nodes {
-                    return Err(Error::DiscoveryUnavailable);
+                    return Err(Error::Unavailable);
                 }
                 let (data, ttl): (Option<String>, i64) = redis::pipe()
                     .cmd("HGET")
@@ -270,14 +269,14 @@ impl RedisDirectory {
                     .arg(&key)
                     .query_async(connection)
                     .await
-                    .map_err(|_| Error::DiscoveryUnavailable)?;
+                    .map_err(|_| Error::Unavailable)?;
                 let Some(data) = data.filter(|data| data.len() <= 65_536 && ttl > 0) else {
                     continue;
                 };
                 let entries: Vec<ServiceDescriptor> =
-                    serde_json::from_str(&data).map_err(|_| Error::DiscoveryUnavailable)?;
+                    serde_json::from_str(&data).map_err(|_| Error::Unavailable)?;
                 if entries.len() > 64 {
-                    return Err(Error::DiscoveryUnavailable);
+                    return Err(Error::Unavailable);
                 }
                 for service in entries {
                     if service.node_id.is_empty()
@@ -292,7 +291,7 @@ impl RedisDirectory {
                             )
                             .is_some()
                     {
-                        return Err(Error::DiscoveryUnavailable);
+                        return Err(Error::Unavailable);
                     }
                 }
             }
@@ -309,16 +308,13 @@ impl RedisDirectory {
                 .client
                 .get_multiplexed_async_connection()
                 .await
-                .map_err(|_| Error::DiscoveryUnavailable)?;
+                .map_err(|_| Error::Unavailable)?;
             self.read_snapshot(&mut connection).await
         })
         .await
-        .map_err(|_| Error::DiscoveryUnavailable)?;
+        .map_err(|_| Error::Unavailable)?;
         let services = result?;
-        let mut cache = self
-            .cache
-            .write()
-            .map_err(|_| Error::DirectoryStateUnavailable)?;
+        let mut cache = self.cache.write().map_err(|_| Error::StateUnavailable)?;
         let changed = cache.refreshed.is_none() || cache.services != services;
         cache.services = services;
         cache.refreshed = Some(Instant::now());
@@ -366,7 +362,10 @@ impl RedisDirectory {
 }
 
 impl ServiceRegistry for RedisDirectory {
-    fn register(&self, service: ServiceDescriptor) -> BoxFuture<'_, tok_core::Result<()>> {
+    fn register(
+        &self,
+        service: ServiceDescriptor,
+    ) -> BoxFuture<'_, tok_core::discovery::Result<()>> {
         Box::pin(async move {
             if service.node_id != self.node_id
                 || service.address.ip().is_unspecified()
@@ -384,7 +383,7 @@ impl ServiceRegistry for RedisDirectory {
                 )));
             }
             if owned.services.len() >= 64 {
-                return Err(Error::RegistrationCapacityExceeded);
+                return Err(Error::CapacityExceeded);
             }
             let mut next = owned.services.clone();
             next.insert(service.service_name.clone(), service);
@@ -398,7 +397,7 @@ impl ServiceRegistry for RedisDirectory {
         &'a self,
         node_id: &'a str,
         service_name: &'a str,
-    ) -> BoxFuture<'a, tok_core::Result<bool>> {
+    ) -> BoxFuture<'a, tok_core::discovery::Result<bool>> {
         Box::pin(async move {
             let mut owned = self.owned.lock().await;
             if node_id != self.node_id || !owned.services.contains_key(service_name) {
@@ -419,25 +418,17 @@ impl ServiceRegistry for RedisDirectory {
 }
 struct Changes(watch::Receiver<u64>);
 impl DirectoryWatch for Changes {
-    fn changed(&mut self) -> BoxFuture<'_, tok_core::Result<()>> {
-        Box::pin(async move {
-            self.0
-                .changed()
-                .await
-                .map_err(|_| Error::DiscoveryUnavailable)
-        })
+    fn changed(&mut self) -> BoxFuture<'_, tok_core::discovery::Result<()>> {
+        Box::pin(async move { self.0.changed().await.map_err(|_| Error::Unavailable) })
     }
 }
 impl ServiceDirectory for RedisDirectory {
     fn snapshot(&self, service_name: &str) -> Result<Vec<ServiceDescriptor>> {
-        let cache = self
-            .cache
-            .read()
-            .map_err(|_| Error::DirectoryStateUnavailable)?;
+        let cache = self.cache.read().map_err(|_| Error::StateUnavailable)?;
         if !cache.refreshed.is_some_and(|updated| {
             updated.elapsed() < Duration::from_millis(self.config.lease_ttl_ms)
         }) {
-            return Err(Error::DiscoveryUnavailable);
+            return Err(Error::Unavailable);
         }
         Ok(cache
             .services

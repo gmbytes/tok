@@ -1,5 +1,6 @@
 //! 有限租期的请求级锁；取消后依靠 TTL 兜底，不保证异常路径绝对互斥。
 
+use tok_core::lock::{Error, Result};
 mod memory;
 mod redis;
 
@@ -7,7 +8,7 @@ pub use memory::Memory;
 pub use redis::{Redis, RedisConfig};
 
 use std::time::Duration;
-use tok_core::{Error, Result, lock::Key as LockKey};
+use tok_core::lock::Key as LockKey;
 
 const RETRY: Duration = Duration::from_millis(10);
 const MAX_DURATION: Duration = Duration::from_secs(86_400);
@@ -26,5 +27,5 @@ fn validate(key: &LockKey, wait: Duration, ttl: Duration) -> Result<()> {
     Ok(())
 }
 fn unavailable() -> Error {
-    Error::CoordinationUnavailable("请求级锁操作失败或超时".into())
+    Error::Unavailable("请求级锁操作失败或超时".into())
 }

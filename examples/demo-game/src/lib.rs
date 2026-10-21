@@ -40,7 +40,7 @@ pub fn application_with_locks(
         tok::OwnershipBackend::Redis => {
             Arc::new(tok::infra::ownership::redis::RedisOwnership::new(
                 config.redis_ownership.clone().ok_or_else(|| {
-                    tok::core::Error::InvalidConfig("Redis 所有权缺少 redis_ownership 配置".into())
+                    tok::config::Error::Invalid("Redis 所有权缺少 redis_ownership 配置".into())
                 })?,
             )?)
         }
@@ -62,10 +62,9 @@ pub fn application_with_locks(
                 })
         })
     {
-        return Err(tok::core::Error::InvalidConfig(
-            "跨网关交接需要配置内部 gateway-rpc 服务".into(),
-        )
-        .into());
+        return Err(
+            tok::config::Error::Invalid("跨网关交接需要配置内部 gateway-rpc 服务".into()).into(),
+        );
     }
     for service in &config.services {
         let endpoint = config
@@ -73,7 +72,7 @@ pub fn application_with_locks(
             .iter()
             .find(|entry| service.endpoint.as_deref() == Some(entry.name.as_str()))
             .ok_or_else(|| {
-                tok::core::Error::InvalidConfig(format!(
+                tok::config::Error::Invalid(format!(
                     "示例服务缺少网络端点：{}",
                     service.service_name
                 ))
@@ -88,25 +87,24 @@ pub fn application_with_locks(
                         .count()
                         != 1
                 {
-                    return Err(tok::core::Error::InvalidConfig(
+                    return Err(tok::config::Error::Invalid(
                         "Player 接入组件要求独占 TCP 端点".into(),
                     )
                     .into());
                 }
             }
             "scene-ingress" => {
-                return Err(tok::core::Error::Unsupported("Scene 网关接入组件").into());
+                return Err(tok::application::Error::Unsupported("Scene 网关接入组件").into());
             }
             "player" | "guild" | "gateway-rpc" => {
                 if endpoint.protocol != "grpc" {
-                    return Err(tok::core::Error::InvalidConfig(
-                        "示例业务组件要求 grpc 端点".into(),
-                    )
-                    .into());
+                    return Err(
+                        tok::config::Error::Invalid("示例业务组件要求 grpc 端点".into()).into(),
+                    );
                 }
             }
             factory => {
-                return Err(tok::core::Error::InvalidConfig(format!(
+                return Err(tok::config::Error::Invalid(format!(
                     "示例未注册初始化工厂：{factory}"
                 ))
                 .into());

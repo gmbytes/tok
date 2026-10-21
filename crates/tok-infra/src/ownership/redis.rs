@@ -78,7 +78,7 @@ impl std::fmt::Debug for RedisOwnershipConfig {
 }
 impl RedisOwnershipConfig {
     /// 验证环境名、连接格式和有限期限，不连接 Redis。
-    pub fn validate(&self) -> tok_core::Result<()> {
+    pub fn validate(&self) -> Result<()> {
         if self.namespace.is_empty()
             || self.namespace.len() > 64
             || !self
@@ -89,7 +89,7 @@ impl RedisOwnershipConfig {
             || self.operation_timeout_ms > 60_000
             || Client::open(self.url.as_str()).is_err()
         {
-            return Err(tok_core::Error::InvalidConfig(
+            return Err(Error::InvalidConfig(
                 "Redis 所有权配置或操作期限无效".into(),
             ));
         }
@@ -212,23 +212,17 @@ impl RedisOwnership {
     }
 }
 fn unavailable() -> Error {
-    Error::Core(tok_core::Error::CoordinationUnavailable(
-        "Redis 所有权操作失败或超时".into(),
-    ))
+    Error::OwnershipUnavailable("Redis 所有权操作失败或超时".into())
 }
 fn identity(value: &str, limit: usize) -> Result<()> {
     if value.trim().is_empty() || value.len() > limit {
-        return Err(Error::Core(tok_core::Error::InvalidInput(
-            "所有权身份长度无效".into(),
-        )));
+        return Err(Error::InvalidInput("所有权身份长度无效".into()));
     }
     Ok(())
 }
 fn ttl_millis(ttl: Duration) -> Result<u64> {
     if ttl < Duration::from_millis(1) || ttl > Duration::from_secs(86_400) {
-        return Err(Error::Core(tok_core::Error::InvalidInput(
-            "所有权租期必须为 1 毫秒至 1 天".into(),
-        )));
+        return Err(Error::InvalidInput("所有权租期必须为 1 毫秒至 1 天".into()));
     }
     Ok(ttl.as_millis() as u64)
 }

@@ -59,6 +59,17 @@ impl Handle {
     }
 }
 
+/// 服务构建器创建失败，不包含工厂初始化或运行错误。
+#[derive(Debug, thiserror::Error)]
+pub enum CreateError {
+    /// 节点或服务名为空白。
+    #[error("服务身份不能为空")]
+    InvalidIdentity,
+    /// 无法创建服务所需的任务范围，保留原始错误。
+    #[error("服务任务范围创建失败：{0}")]
+    Tasks(#[from] task::CreateError),
+}
+
 /// 服务初始化、主任务及退出错误；任务执行错误保留原始来源。
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -122,9 +133,9 @@ impl Builder {
         identity: Identity,
         max_tasks: usize,
         cancellation: CancellationToken,
-    ) -> tok_core::Result<Self> {
+    ) -> Result<Self, CreateError> {
         if identity.node_id.trim().is_empty() || identity.service_name.trim().is_empty() {
-            return Err(tok_core::Error::InvalidConfig("服务身份不能为空".into()));
+            return Err(CreateError::InvalidIdentity);
         }
         let supervisor = task::Supervisor::new(max_tasks, cancellation)?;
         let service = Handle {

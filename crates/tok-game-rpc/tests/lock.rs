@@ -86,12 +86,12 @@ impl LockLease for Lease {
     fn token(&self) -> &str {
         "test"
     }
-    fn release(self: Box<Self>) -> BoxFuture<'static, tok_core::Result<()>> {
+    fn release(self: Box<Self>) -> BoxFuture<'static, tok_core::lock::Result<()>> {
         Box::pin(async move {
             self.released.fetch_add(1, Ordering::SeqCst);
             tokio::time::sleep(self.delay).await;
             if self.fail {
-                Err(tok_core::Error::CoordinationUnavailable("test".into()))
+                Err(tok_core::lock::Error::Unavailable("test".into()))
             } else {
                 Ok(())
             }
@@ -104,7 +104,7 @@ impl LockBackend for Backend {
         _: LockKey,
         _: Duration,
         _: Duration,
-    ) -> BoxFuture<'_, tok_core::Result<Box<dyn LockLease>>> {
+    ) -> BoxFuture<'_, tok_core::lock::Result<Box<dyn LockLease>>> {
         Box::pin(async move {
             tokio::time::sleep(self.acquire_delay).await;
             Ok(Box::new(Lease {
@@ -470,7 +470,7 @@ impl LockBackend for LateBackend {
         _: LockKey,
         _: Duration,
         _: Duration,
-    ) -> BoxFuture<'_, tok_core::Result<Box<dyn LockLease>>> {
+    ) -> BoxFuture<'_, tok_core::lock::Result<Box<dyn LockLease>>> {
         Box::pin(async move {
             // 模拟后端 future 在一次 poll 内阻塞，直到期限后才返回成功。
             std::thread::sleep(Duration::from_millis(20));

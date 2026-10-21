@@ -31,9 +31,18 @@ pub struct Binding {
 /// 服务与端点启动、运行监督及退出清理过程的错误。
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    /// 配置校验或本地目录操作失败。
+    /// 应用配置解析或校验失败。
     #[error(transparent)]
-    Core(#[from] tok_core::Error),
+    Configuration(#[from] crate::config::Error),
+    /// 服务构建器创建失败，保留来源。
+    #[error(transparent)]
+    Create(#[from] lifecycle::CreateError),
+    /// 应用选择的可选后端或组装能力尚不支持。
+    #[error("应用不支持此能力：{0}")]
+    Unsupported(&'static str),
+    /// 服务发现的组装、注册或本地目录操作失败。
+    #[error(transparent)]
+    Discovery(#[from] tok_core::discovery::Error),
     /// RPC 入口的组装错误。
     #[error(transparent)]
     Rpc(#[from] tok_rpc::Error),
@@ -128,13 +137,13 @@ impl Application {
     pub fn new(config: AppConfig) -> Result<Self, Error> {
         config.validate()?;
         if config.discovery == DiscoveryBackend::Kubernetes {
-            return Err(tok_core::Error::Unsupported("Kubernetes 服务发现").into());
+            return Err(Error::Unsupported("Kubernetes 服务发现"));
         }
         let directory = MemoryDirectory::default();
         let redis = if config.discovery == DiscoveryBackend::Redis {
             Some(RedisDirectory::new(
                 config.redis_discovery.clone().ok_or_else(|| {
-                    tok_core::Error::InvalidConfig("Redis 发现缺少 redis_discovery 配置".into())
+                    crate::config::Error::Invalid("Redis 发现缺少 redis_discovery 配置".into())
                 })?,
                 &config.node_id,
             )?)
@@ -210,7 +219,7 @@ impl Application {
             .iter()
             .find(|entry| entry.name == endpoint_name)
             .ok_or_else(|| {
-                tok_core::Error::InvalidConfig(format!("RPC 端点未配置：{endpoint_name}"))
+                crate::config::Error::Invalid(format!("RPC 端点未配置：{endpoint_name}"))
             })?;
         let expected: std::collections::BTreeSet<_> = self
             .config
@@ -229,7 +238,7 @@ impl Application {
                 .iter()
                 .any(|entry| entry.endpoint == endpoint_name)
         {
-            return Err(tok_core::Error::InvalidConfig(format!(
+            return Err(crate::config::Error::Invalid(format!(
                 "RPC 端点协议、业务绑定无效或重复：{endpoint_name}"
             ))
             .into());
@@ -242,7 +251,7 @@ impl Application {
     pub fn with_task_capacity(mut self, max_tasks: usize) -> Result<Self, Error> {
         if max_tasks == 0 || max_tasks > 65_536 {
             return Err(
-                tok_core::Error::InvalidConfig("服务后台任务容量须为 1 至 65536".into()).into(),
+                crate::config::Error::Invalid("服务后台任务容量须为 1 至 65536".into()).into(),
             );
         }
         self.max_service_tasks = max_tasks;
@@ -296,7 +305,7 @@ impl Application {
                 let readiness = endpoint.readiness();
                 registered.rpc_readiness.push(readiness);
                 let address = self.config.endpoints.iter().find(|entry| entry.name == name)
-                    .ok_or_else(|| tok_core::Error::InvalidConfig(format!("RPC 端点未配置：{name}")))?.address;
+                    .ok_or_else(|| crate::config::Error::Invalid(format!("RPC 端点未配置：{name}")))?.address;
                 let endpoint_name = format!("rpc-endpoint:{name}");
                 let task = tokio::select! {
                     biased;
@@ -318,7 +327,7 @@ impl Application {
                 let mut extensions = Extensions::default();
                 if let Some(service) = network {
                     let listen_address = self.config.endpoints.iter().find(|endpoint| Some(endpoint.name.as_str()) == configured.endpoint.as_deref())
-                        .ok_or_else(|| tok_core::Error::InvalidConfig(format!("服务端点未配置：{service_name}")))?.address;
+                        .ok_or_else(|| crate::config::Error::Invalid(format!("服务端点未配置：{service_name}")))?.address;
                     extensions.insert(Binding { listen_address, service: service.clone(), directory: Arc::clone(&self.service_directory) });
                 }
                 let factory = Arc::clone(self.factories.get(configured.factory_name())
@@ -390,7 +399,7 @@ impl Application {
                 .directory
                 .unregister(&service.node_id, &service.service_name)
             {
-                cleanup_error.get_or_insert(Error::Core(error));
+                cleanup_error.get_or_insert(Error::Discovery(error));
             }
         }
         token.cancel();
@@ -399,7 +408,7 @@ impl Application {
             if let Some(redis) = &self.redis
                 && let Err(error) = redis.withdraw().await
             {
-                cleanup_error.get_or_insert(Error::Core(error));
+                cleanup_error.get_or_insert(Error::Discovery(error));
             }
             while let Some(result) = tasks.join_next().await {
                 let error = match result {

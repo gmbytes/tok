@@ -40,7 +40,7 @@ tok-gateway 是这套基础设施的内置扩展，增加连接、认证、sessi
 | 使用入口 | 职责 |
 | --- | --- |
 | [`core`] / tok-core | 服务身份、Extensions、发现、路由和通用请求锁契约 |
-| [`execution`] / tok-execution | Context / StopReason、Request、Tower 调用执行与 handler 适配 |
+| [`execution`] / tok-execution | Context / StopReason、Request、Tower 调用执行及按自定义键分发处理链 |
 | [`lifecycle`] / tok-lifecycle | 服务工厂、生命周期编排和有界任务监督 |
 | [`player`] / tok-player | SessionIdentity、LogicalMessage、TimerSpec / TimerTrigger / TimerUpdate、所有权与恢复凭证契约 |
 | [`rpc`] / tok-rpc | 通用 Channel 缓存、共享端点、追踪、期限及类型化执行，不理解游戏正文 |
@@ -49,7 +49,8 @@ tok-gateway 是这套基础设施的内置扩展，增加连接、认证、sessi
 
 调用执行层和生命周期层均不依赖 tok-player，彼此也不依赖。tok-player 只依赖 tok-core，供 RPC、网关和基础设施后端共同使用，不能反向依赖 gateway 或门面。[`player::TimerTrigger`] 表达玩家会话的实际计时触发，与同库 TimerSpec / TimerUpdate 组成计时契约；通用执行设施不依赖这些类型。
 
-所有权使用 [`player::ownership::Store`]、[`player::ownership::Owner`]、[`player::ownership::Record`]；恢复凭证使用 [`player::credentials::ResumeTokenCodec`]。它们的结果为 [`player::Result`]，所有权冲突与本地凭证不可用属于 [`player::Error`]；通用参数或后端错误保留在 Error::Core 中。请求锁仍使用 core::lock，不要求玩家会话。锁、所有权与发现接口统一使用 [`core::BoxFuture`]，其中输出参数是完整类型，不隐含 Result。锁与发现返回 `BoxFuture<'a, core::Result<T>>`，所有权返回 `BoxFuture<'a, player::Result<T>>`。此别名不会自行排队、启动或监督任务；lifecycle::task::Task 继续表达交给监督范围的工作。原 Operation 与 RegistrationTask 别名已移除。
+所有权使用 [`player::ownership::Store`]、[`player::ownership::Owner`]、[`player::ownership::Record`]；恢复凭证使用 [`player::credentials::ResumeTokenCodec`]。它们的结果为 [`player::Result`]：所有权冲突、所有权不可用和本地凭证不可用分别由 [`player::Error`] 表达；参数、配置及可选能力错误也由 player::Error 直接表达，不依赖 core 根错误。请求锁使用 core::lock，不要求玩家会话。
+锁、所有权与发现接口统一使用 [`core::BoxFuture`]，其中输出参数是完整类型，不隐含 Result。锁返回 `BoxFuture<'a, core::lock::Result<T>>`，发现返回 `BoxFuture<'a, core::discovery::Result<T>>`，所有权返回 `BoxFuture<'a, player::Result<T>>`。别名不会自行排队、启动或监督任务；lifecycle::task::Task 继续表达交给监督范围的工作。原 Operation 与 RegistrationTask 别名已移除。
 
 迁移时将旧 core 下的玩家类型改从 player 导入，将 CallContext 改从 game_rpc 导入；Context / StopReason 改从 execution 导入，Extensions 改从 core 根导入；不保留旧路径兼容别名。game_rpc::player 是 PlayerRpc 客户端适配，gateway::player 是会话运行实现，顶层 player 是共享契约，职责不同。
 
@@ -57,13 +58,29 @@ tok-gateway 是这套基础设施的内置扩展，增加连接、认证、sessi
 
 公开 API 按使用者的功能概念组织，内部文件组织通过 mod 隐藏，主要入口可以由 pub use 重导出。此规则来自 Rust 官方对公开 API 与内部结构解耦的指导，不是固定目录模板。公开模块路径与根路径可以同时存在，指向同一定义，不要求只保留一个路径。
 
-core::discovery / lock / routing / service 是功能命名空间；常用的 Identity、ServiceDescriptor、ServiceDirectory、ServiceRegistry、DirectoryWatch 和 ServiceRouter 同时可从 core 根导入。Error / Result、Extensions 和 BoxFuture 直接从根访问，其实现模块私有。通常可导入主要类型；使用锁接口等一组相关项时保留模块限定名，避免 Key / Lease 等通用名字失去上下文。
+core::discovery / lock / routing / service 是功能命名空间；常用的 Identity、ServiceDescriptor、ServiceDirectory、ServiceRegistry、DirectoryWatch 和 ServiceRouter 同时可从 core 根导入。Extensions 和 BoxFuture 直接从根访问；各领域 Error / Result 位于其功能模块，core 不提供根错误。通常可导入主要类型；使用锁接口等一组相关项时保留模块限定名，避免 Key / Lease 等通用名字失去上下文。
 
 例如服务身份既可使用 `use tok::core::Identity`，也可使用 `use tok::core::service::Identity`；错误分类说明位于公开的 Error 类型文档，不需要访问内部 error 模块。根导出的角色名前缀按辨识价值保留，不因路径形式机械删改。
 
 ## 错误边界
 
-[`core::Error`] 只表达基础契约可解释的失败，具体后端按契约映射；它不覆盖所有 RPC、玩家或游戏业务错误。核心接口的主要失败类别见 [`core::Error`] 的文档。例如请求锁区分 LockWaitTimeout、LockCapacityExceeded 与 CoordinationUnavailable，服务发现区分 RegistrationConflict、RegistrationCapacityExceeded、DirectoryStateUnavailable 和 DiscoveryUnavailable；不支持可选能力使用 Unsupported。
+tok-core 不提供根 Error / Result；各能力只定义和返回自己能够解释的错误，组装层显式聚合。
+
+| 接口范围 | 错误类型与主要类别 |
+| --- | --- |
+| 服务发现和目录 | [`core::discovery::Error`]：InvalidInput、InvalidConfig、RegistrationConflict、CapacityExceeded、StateUnavailable、Unavailable、Unsupported |
+| 请求锁 | [`core::lock::Error`]：InvalidInput、InvalidConfig、WaitTimeout、CapacityExceeded、Unavailable |
+| 业务选点 | [`core::routing::Error`]：InvalidInput、NoAvailableService、Discovery；Discovery 保留发现错误及 source |
+| 玩家契约 | [`player::Error`]：InvalidInput、InvalidConfig、Unsupported、OwnershipConflict、OwnershipUnavailable、CredentialUnavailable |
+| 执行上下文创建 | [`execution::ContextError`]：InvalidService、InvalidOperation、DeadlineOverflow |
+| 任务范围创建 | [`lifecycle::task::CreateError`]：InvalidCapacity、ParentStopping |
+| 服务构建器创建 | [`lifecycle::CreateError`]：InvalidIdentity、Tasks；Tasks 保留任务范围构造错误 |
+| 应用配置 | [`config::Error`]：Invalid；配置校验按组件参数给出原因 |
+| 玩家接入配置 | [`gateway::player::ConfigError`] |
+| 注册处理链 | [`execution::registry::Error`]：DuplicateKey |
+| 按键分发执行 | [`execution::registry::DispatchError`]：Unknown、Stopped、Handler，保留键与原始业务错误 |
+
+各领域接口返回自己的 Result；组合服务由上层聚合，例如 application::Error::Discovery 单独承载发现失败，不再经 Core 透传。发现与锁后端配置校验采用相应领域错误，Application 的整体配置校验将组件校验失败转换为 config::Error::Invalid。application::Error::Configuration 与 Create 分别保留配置和服务构建错误的来源，Unsupported 表达应用尚未实现的可选能力。
 
 调用方根据变体判断，不解析 Display 文本。新增错误类别应对应新的处理语义；增加一种底层网络错误通常仍映射到既有不可用类别。其他领域继续使用自己的错误类型，例如 player::Error、game_rpc::Error 或 tonic::Status；跨领域转换由适配层负责。内置后端的错误信息隐藏凭据，不将底层 URL 或 token 作为诊断正文。
 
@@ -297,6 +314,93 @@ trace_sample_ratio = 0.1
 
 指标不使用 player_id、bid 或 request_id 作为标签。token 和协议正文默认不记录。
 内部 RPC 已通过 metadata 传播 W3C TraceContext；Core NATS 已通过标准 headers 传播，转发进入 session 后继续关联至内部事件 RPC。
+
+## 按自定义键分发处理链
+
+[`execution::registry::Registry`] 只根据键选择和执行 Tower 处理链，不规定输入、结果或编码方式。
+`Registry<K, T, R, E>` 中，K 是实现 Ord + Clone 的分发键，T 是每次调用的自有输入，R 是结果，E 是原始业务错误。键可以是枚举、字符串或自定义类型，不要求 Display；零值和空字符串是否有效由协议或业务决定。
+核心执行库不依赖 prost、Tonic 或框架生成协议。分发保留输入 Context 的操作名、期限、取消和扩展，不创建队列、增加预算或重试。共享业务状态可放在输入的 Arc 中；借用输入仍可直接通过 execution 的 Tower 调用执行，当前注册器只保存静态处理链。
+
+```rust
+use std::time::Duration;
+use tok::{core::Identity, execution::{Context, Request, Registry}};
+use tok::application::CancellationToken;
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum Operation { Increment }
+
+# #[tokio::main]
+# async fn main() -> Result<(), Box<dyn std::error::Error>> {
+let mut registry = Registry::<Operation, u64, u64, std::io::Error>::new();
+registry.register(Operation::Increment, |request| async move {
+    Ok(request.input + 1)
+})?;
+let context = Context::new(
+    Identity { node_id: "local".into(), service_name: "custom".into() },
+    "local.increment", Duration::from_secs(1), CancellationToken::new(),
+)?;
+assert_eq!(registry.dispatch(&Operation::Increment, Request::new(context, 41)).await?, 42);
+# Ok(())
+# }
+```
+
+注册错误 [`execution::registry::Error`] 保留重复键；运行错误 [`execution::registry::DispatchError`] 区分 Unknown、Stopped 和 Handler，并保留原始键及业务错误。
+
+### protobuf 与游戏 RPC 适配
+
+[`game_rpc::protobuf`] 提供正文编解码适配，封装上述通用分发表；消息键 K 仍为泛型，不把 protobuf 放入执行核心。
+`protobuf::Registry<K, C, O, E>` 的 C 是业务状态，O 是附加结果；Reply 包含回应消息和附加结果，`Message<K>` 包含键和编码正文。
+编解码和内层 Service 的就绪等待也计入原执行范围。解码错误通过 `registry::DispatchError::Handler(protobuf::Error::Decode(...))` 返回，业务错误保留在 `protobuf::Error::Handler` 中；RPC 边界再映射为 Status。
+
+```rust
+use std::{sync::Arc, time::Duration};
+use prost::Message as _;
+use tok::{core::Identity, execution::{Context, Request}, game_rpc::{self, protobuf}};
+use tok::application::CancellationToken;
+
+#[derive(Clone, PartialEq, prost::Message)]
+struct Value {
+    #[prost(uint64, tag = "1")]
+    value: u64,
+}
+
+# #[tokio::main]
+# async fn main() -> Result<(), Box<dyn std::error::Error>> {
+let mut registry = protobuf::Registry::<u32, u64, (), std::io::Error>::new();
+registry.register(1, 2, |target, input: Value| async move {
+    if input.value != target {
+        return Err(std::io::Error::other("目标不匹配"));
+    }
+    Ok(protobuf::Reply { message: input, output: () })
+})?;
+let registry = Arc::new(registry);
+let context = Context::new(
+    Identity { node_id: "local".into(), service_name: "custom".into() },
+    "local.get", Duration::from_secs(1), CancellationToken::new(),
+)?;
+let reply = registry.dispatch(Request::new(context, (42, protobuf::Message {
+    key: 1,
+    body: Value { value: 42 }.encode_to_vec(),
+}))).await?;
+assert_eq!(Value::decode(reply.message.body.as_slice())?.value, 42);
+
+// 游戏线协议明确使用 u32 消息 ID；同一分发表由本地和 RPC 共用。
+let adapter = game_rpc::business::Handler::new(
+    registry,
+    |call| call.bid.as_deref().and_then(|id| id.parse::<u64>().ok())
+        .ok_or_else(|| game_rpc::tonic::Status::invalid_argument("目标 ID 无效")),
+    |error: std::io::Error| game_rpc::tonic::Status::invalid_argument(error.to_string()),
+);
+let rpc = game_rpc::RpcService::new("local", "custom", Arc::new(adapter))?;
+# drop(rpc);
+# Ok(())
+# }
+```
+
+业务中间件通过 register_service 安装，本地与 RPC 调用共用该链。普通业务 RPC 适配要求 u32 消息 ID，拒绝零请求消息 ID 和零回应消息 ID；game_rpc::HandlerRegistry 在注册时校验请求/回应 ID 非零，通用分发表和 protobuf 适配本身不施加该规则。
+示例公会的 guild::handlers 返回 protobuf 适配注册器及自身错误；RPC 组装只负责提取目标、映射错误并安装请求锁。运行 `just dispatch-smoke` 验证直接本地调用，`just rpc-smoke client-smoke` 验证同一业务链在真实 RPC/TCP 中的使用。
+
+当前 game_rpc::HandlerRegistry 的普通请求表已委托执行库分发；timer、事件及其玩家附加结果仍由游戏协议层组合。通知归属和通用请求锁迁移属于后续批次，本批不宣称已完成。
 
 ## 内部 RPC 与共享端点
 
@@ -1327,7 +1431,7 @@ fn pipeline(executor: Arc<dyn Executor>) -> Pipeline {
 | --- | --- |
 | [`config`] | TOML 加载、校验与端点引用 |
 | [`application`] | 服务工厂、启动监督与退出 |
-| [`core`] | 共享类型、错误、Extensions 和基础组件契约 |
+| [`core`] | 服务身份、Extensions 和发现/锁/路由领域契约及各自错误 |
 | [`execution`] | 类型化请求与预算/取消执行 Layer |
 | [`lifecycle`] | 公共工厂、任务监督和服务生命周期 |
 | [`infra`] | 服务目录、路由及协调后端 |

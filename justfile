@@ -116,3 +116,7 @@ events-smoke:
 # 验证应用配置组装 RPC 与无端点事件服务，共用 Layer 与服务生命周期
 application-smoke:
     cargo run -p demo-game --example application --locked
+
+# 验证传输无关的消息分发与公会本地调用
+dispatch-smoke:
+    cargo run -p demo-game --example dispatch --locked

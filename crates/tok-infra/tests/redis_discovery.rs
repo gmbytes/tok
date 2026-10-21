@@ -41,7 +41,7 @@ async fn wait_for(directory: &RedisDirectory, port: Option<u16>) {
     .expect("目录未按期收敛");
 }
 fn run(
-    tasks: &mut JoinSet<tok_core::Result<()>>,
+    tasks: &mut JoinSet<tok_core::discovery::Result<()>>,
     directory: &Arc<RedisDirectory>,
     stop: &CancellationToken,
 ) -> tokio::task::AbortHandle {
@@ -65,7 +65,7 @@ async fn registration_cache_watch_expiry_restart_and_old_instance_safety() {
     isolated.initialize().await.unwrap();
     first.register(service(17001)).await.unwrap();
     assert!(
-        matches!(replacement.register(service(17002)).await, Err(tok_core::Error::RegistrationConflict(reason)) if reason.contains("game"))
+        matches!(replacement.register(service(17002)).await, Err(tok_core::discovery::Error::RegistrationConflict(reason)) if reason.contains("game"))
     );
     let stop = CancellationToken::new();
     let mut tasks = JoinSet::new();
@@ -114,7 +114,7 @@ async fn lost_lease_fails_worker_and_stale_cache_is_not_usable_forever() {
     replacement.register(service(17004)).await.unwrap();
     assert!(matches!(
         first.run(CancellationToken::new()).await,
-        Err(tok_core::Error::DiscoveryUnavailable)
+        Err(tok_core::discovery::Error::Unavailable)
     ));
     assert!(first.snapshot("guild").is_err());
     first.withdraw().await.unwrap();
@@ -142,13 +142,13 @@ async fn registration_capacity_is_distinct_from_conflict_and_recovers_after_remo
     duplicate.service_name = "service-0".into();
     assert!(matches!(
         directory.register(duplicate).await,
-        Err(tok_core::Error::RegistrationConflict(_))
+        Err(tok_core::discovery::Error::RegistrationConflict(_))
     ));
     let mut extra = service(17006);
     extra.service_name = "extra".into();
     assert!(matches!(
         directory.register(extra.clone()).await,
-        Err(tok_core::Error::RegistrationCapacityExceeded)
+        Err(tok_core::discovery::Error::CapacityExceeded)
     ));
     assert!(directory.unregister("game", "service-0").await.unwrap());
     directory.register(extra).await.unwrap();

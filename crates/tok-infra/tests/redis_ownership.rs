@@ -239,7 +239,7 @@ async fn epochs_above_double_precision_are_exact_and_overflow_does_not_replace_l
     seed(&config, "9223372036854775807").await;
     assert!(matches!(
         acquire(&store, "c", "g3", Some(second.identity.epoch), ttl).await,
-        Err(Error::Core(tok_core::Error::CoordinationUnavailable(_)))
+        Err(Error::OwnershipUnavailable(_))
     ));
     assert_eq!(store.lookup("p").await.unwrap(), Some(second));
     cleanup(&config).await;
@@ -256,7 +256,7 @@ async fn timeout_and_invalid_ttl_are_bounded_and_do_not_expose_credentials() {
     .unwrap();
     assert!(matches!(
         acquire(&store, "s", "g", None, Duration::ZERO).await,
-        Err(Error::Core(tok_core::Error::InvalidInput(_)))
+        Err(Error::InvalidInput(_))
     ));
     let error = tokio::time::timeout(
         Duration::from_secs(1),
@@ -265,9 +265,6 @@ async fn timeout_and_invalid_ttl_are_bounded_and_do_not_expose_credentials() {
     .await
     .unwrap()
     .unwrap_err();
-    assert!(matches!(
-        error,
-        Error::Core(tok_core::Error::CoordinationUnavailable(_))
-    ));
+    assert!(matches!(error, Error::OwnershipUnavailable(_)));
     assert!(!error.to_string().contains("secret"));
 }

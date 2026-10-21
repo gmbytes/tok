@@ -1,9 +1,29 @@
 //! 通用请求级锁契约，不绑定玩家会话或 Redis。
 
+/// 请求锁配置、获取与释放错误，不包含发现或玩家所有权错误。
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    /// 锁键或时间参数无效。
+    #[error("请求锁参数无效：{0}")]
+    InvalidInput(String),
+    /// 请求锁后端配置无效。
+    #[error("请求锁配置错误：{0}")]
+    InvalidConfig(String),
+    /// 竞争等待超时，不表示后端 I/O 超时。
+    #[error("等待请求锁超时")]
+    WaitTimeout,
+    /// 锁记录或并发获取容量已耗尽。
+    #[error("请求锁资源容量已耗尽")]
+    CapacityExceeded,
+    /// 后端操作失败或超时，获取结果可能不确定，不包含凭据。
+    #[error("请求锁后端不可用：{0}")]
+    Unavailable(String),
+}
+/// 请求锁领域的操作结果。
+pub type Result<T> = std::result::Result<T, Error>;
+
 use crate::BoxFuture;
 use std::time::Duration;
-
-use crate::Result;
 
 /// 不同业务服务通过命名空间隔离同名业务 ID 的锁。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -29,7 +49,7 @@ pub trait Lease: Send {
 pub trait Backend: Send + Sync {
     /// 在 wait 竞争期限内获取实体锁，成功后返回有限 ttl 租约。
     /// wait 为零仍允许一次有界尝试；连接和后端操作还受实现自身的操作期限约束。
-    /// 内置后端以 LockWaitTimeout 表示竞争超时，以 LockCapacityExceeded 表示本地容量不足。
+    /// 内置后端以 WaitTimeout 表示竞争超时，以 CapacityExceeded 表示本地容量不足。
     fn acquire(
         &self,
         key: Key,

@@ -5,8 +5,9 @@ use std::{
     sync::{Arc, RwLock},
 };
 use tok_core::BoxFuture;
+use tok_core::discovery::{Error, Result};
 
-use tok_core::{DirectoryWatch, Error, Result, ServiceDescriptor, ServiceDirectory};
+use tok_core::{DirectoryWatch, ServiceDescriptor, ServiceDirectory};
 use tokio::sync::watch;
 
 type Services = BTreeMap<(String, String), ServiceDescriptor>;
@@ -34,22 +35,14 @@ impl Default for MemoryDirectory {
 struct Changes(watch::Receiver<u64>);
 impl DirectoryWatch for Changes {
     fn changed(&mut self) -> BoxFuture<'_, Result<()>> {
-        Box::pin(async move {
-            self.0
-                .changed()
-                .await
-                .map_err(|_| Error::DirectoryStateUnavailable)
-        })
+        Box::pin(async move { self.0.changed().await.map_err(|_| Error::StateUnavailable) })
     }
 }
 
 impl MemoryDirectory {
     /// 注册节点业务服务并通知订阅者，重复身份保留原条目并返回错误。
     pub fn register(&self, service: ServiceDescriptor) -> Result<()> {
-        let mut services = self
-            .services
-            .write()
-            .map_err(|_| Error::DirectoryStateUnavailable)?;
+        let mut services = self.services.write().map_err(|_| Error::StateUnavailable)?;
         let key = (service.node_id.clone(), service.service_name.clone());
         match services.entry(key) {
             Entry::Vacant(entry) => {
@@ -67,10 +60,7 @@ impl MemoryDirectory {
 
     /// 移除指定节点业务服务，返回是否存在；实际移除后才发送变更通知。
     pub fn unregister(&self, node_id: &str, service_name: &str) -> Result<bool> {
-        let mut services = self
-            .services
-            .write()
-            .map_err(|_| Error::DirectoryStateUnavailable)?;
+        let mut services = self.services.write().map_err(|_| Error::StateUnavailable)?;
         let removed = services
             .remove(&(node_id.to_owned(), service_name.to_owned()))
             .is_some();
@@ -87,10 +77,7 @@ impl ServiceDirectory for MemoryDirectory {
         Ok(Box::new(Changes(self.updates.subscribe())))
     }
     fn snapshot(&self, service_name: &str) -> Result<Vec<ServiceDescriptor>> {
-        let services = self
-            .services
-            .read()
-            .map_err(|_| Error::DirectoryStateUnavailable)?;
+        let services = self.services.read().map_err(|_| Error::StateUnavailable)?;
         Ok(services
             .values()
             .filter(|service| service.service_name == service_name)
@@ -100,7 +87,10 @@ impl ServiceDirectory for MemoryDirectory {
 }
 
 impl tok_core::discovery::ServiceRegistry for MemoryDirectory {
-    fn register(&self, service: ServiceDescriptor) -> BoxFuture<'_, tok_core::Result<()>> {
+    fn register(
+        &self,
+        service: ServiceDescriptor,
+    ) -> BoxFuture<'_, tok_core::discovery::Result<()>> {
         Box::pin(async move { MemoryDirectory::register(self, service) })
     }
 
@@ -108,7 +98,7 @@ impl tok_core::discovery::ServiceRegistry for MemoryDirectory {
         &'a self,
         node_id: &'a str,
         service_name: &'a str,
-    ) -> BoxFuture<'a, tok_core::Result<bool>> {
+    ) -> BoxFuture<'a, tok_core::discovery::Result<bool>> {
         Box::pin(async move { MemoryDirectory::unregister(self, node_id, service_name) })
     }
 }

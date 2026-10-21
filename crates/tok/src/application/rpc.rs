@@ -46,10 +46,10 @@ impl Application {
             .iter()
             .find(|service| service.service_name == service_name)
             .ok_or_else(|| {
-                tok_core::Error::InvalidConfig(format!("RPC 服务未配置：{service_name}"))
+                crate::config::Error::Invalid(format!("RPC 服务未配置：{service_name}"))
             })?;
         let name = service.endpoint.as_deref().ok_or_else(|| {
-            tok_core::Error::InvalidConfig(format!("RPC 服务缺少端点：{service_name}"))
+            crate::config::Error::Invalid(format!("RPC 服务缺少端点：{service_name}"))
         })?;
         if !self
             .config
@@ -62,7 +62,7 @@ impl Application {
                     || (entry.endpoint == name && entry.protocol == protocol)
             })
         {
-            return Err(tok_core::Error::InvalidConfig(format!(
+            return Err(crate::config::Error::Invalid(format!(
                 "RPC 端点协议或绑定冲突：{service_name} / {protocol}"
             ))
             .into());
@@ -124,7 +124,7 @@ impl Application {
         for service in &services {
             let endpoint = self.validate_rpc(service, S::NAME)?;
             if !endpoints.insert(endpoint) {
-                return Err(tok_core::Error::InvalidConfig(format!(
+                return Err(crate::config::Error::Invalid(format!(
                     "同一端点不能绑定重复 protobuf 服务：{}",
                     S::NAME
                 ))

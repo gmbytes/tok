@@ -267,3 +267,18 @@ async fn panicked_tasks_keep_their_names_and_do_not_consume_future_capacity() {
     completion.result.unwrap();
     scope.shutdown(Some(LIMIT)).await.unwrap();
 }
+
+#[tokio::test]
+async fn rejecting_child_creation_does_not_keep_the_stopping_parent_alive() {
+    let parent = scope(1);
+    let handle = parent.handle();
+    handle.request_stop();
+    assert!(matches!(
+        Supervisor::child(1, &handle),
+        Err(tok_lifecycle::task::CreateError::ParentStopping)
+    ));
+    parent.shutdown(Some(LIMIT)).await.unwrap();
+    tokio::time::timeout(LIMIT, handle.wait_finished())
+        .await
+        .unwrap();
+}

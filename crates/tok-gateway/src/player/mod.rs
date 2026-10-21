@@ -12,7 +12,7 @@ pub mod resume_token;
 pub mod session;
 
 pub use auth::{AuthenticatedIdentity, AuthenticationTask, Authenticator};
-pub use config::Config;
+pub use config::{Config, ConfigError};
 pub use executor::{
     ClientRequest, DefaultRpcErrorMapper, EventInput, EventTask, Executor, Reply, RequestInput,
     RpcErrorMapper, RpcExecutor, Task, TimerInput,

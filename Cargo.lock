@@ -2042,6 +2042,7 @@ dependencies = [
  "opentelemetry",
  "opentelemetry_sdk",
  "prost",
+ "thiserror",
  "tok-core",
  "tok-events",
  "tok-execution",

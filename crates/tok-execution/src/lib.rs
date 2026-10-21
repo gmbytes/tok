@@ -1,13 +1,17 @@
 //! 类型化调用执行：上下文、请求、Tower 处理链及期限、取消和追踪约束。
 //!
 //! 主要入口为 Context、Request、Layer 和同步 handler 适配；不管理服务启动或后台任务。
+//! registry 提供以自定义键选择处理链的功能命名空间，不限定编码或传输。
 //! 服务构建、生命周期和任务监督由独立的 tok-lifecycle 提供。
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
 mod context;
 mod execution;
 mod handler;
+/// 按自定义键选择处理链，不限定输入、结果或编码格式。
+pub mod registry;
 mod request;
-pub use context::{Context, StopReason};
+pub use context::{Context, ContextError, StopReason};
 pub use execution::{Call, Error, Layer, Service};
 pub use handler::{SyncHandler, sync_handler};
+pub use registry::Registry;
 pub use request::Request;

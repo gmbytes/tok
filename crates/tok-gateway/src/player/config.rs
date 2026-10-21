@@ -1,7 +1,11 @@
 //! Ingress 的协议、session 与租约参数；由服务工厂显式选择使用。
 
 use serde::Deserialize;
-use tok_core::{Error, Result};
+
+/// 玩家接入运行参数校验失败。
+#[derive(Debug, thiserror::Error)]
+#[error("玩家接入配置错误：{0}")]
+pub struct ConfigError(pub String);
 
 /// Player 接入组件的 TCP、串行 session、租约、恢复与跨网关交接参数。
 #[derive(Debug, Clone, Deserialize)]
@@ -101,13 +105,13 @@ impl Config {
         }
     }
     /// 验证正数、容量上限及租期对调用和续租间隔的覆盖。
-    pub fn validate(&self) -> Result<()> {
+    pub fn validate(&self) -> Result<(), ConfigError> {
         if self.gateway_rpc_service_name.trim().is_empty()
             || !(1..=60000).contains(&self.handoff_timeout_ms)
             || !(1..=4096).contains(&self.max_handoffs)
             || !(65536..=134217728).contains(&self.max_handoff_bytes)
         {
-            return Err(Error::InvalidConfig("跨网关交接参数无效".into()));
+            return Err(ConfigError("跨网关交接参数无效".into()));
         }
         if [
             self.max_connections,
@@ -141,7 +145,7 @@ impl Config {
             || self.disconnect_grace_ms > 86_400_000
             || self.ownership_ttl_ms <= self.rpc_timeout_ms * 2 + self.renew_interval_ms
         {
-            return Err(Error::InvalidConfig(
+            return Err(ConfigError(
                 "玩家网关需要有限的正数容量和期限，租期必须覆盖续租间隔与两次调用期限".into(),
             ));
         }

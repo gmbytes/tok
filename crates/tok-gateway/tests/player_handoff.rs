@@ -79,10 +79,9 @@ impl OwnershipStore for TransferFault {
             if self.committed_error {
                 self.inner.transfer(value, target, ttl).await?;
             }
-            Err(
-                tok_core::Error::CoordinationUnavailable("injected transfer result loss".into())
-                    .into(),
-            )
+            Err(tok_player::Error::OwnershipUnavailable(
+                "injected transfer result loss".into(),
+            ))
         })
     }
 }

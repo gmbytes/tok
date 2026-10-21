@@ -38,9 +38,7 @@ pub trait Store: Send + Sync {
         _expected_epoch: Option<u64>,
         _ttl: Duration,
     ) -> BoxFuture<'_, Result<Record>> {
-        Box::pin(async {
-            Err(tok_core::Error::Unsupported("快速重登会话代次校验").into())
-        })
+        Box::pin(async { Err(crate::Error::Unsupported("快速重登会话代次校验")) })
     }
     /// 仅在完整旧身份匹配且租约有效时转移；保留 session_id 并增加 epoch。
     /// 默认不支持，不能用先查询再 acquire 模拟完整身份比较。
@@ -50,7 +48,7 @@ pub trait Store: Send + Sync {
         _target: Owner,
         _ttl: Duration,
     ) -> BoxFuture<'_, Result<Record>> {
-        Box::pin(async { Err(tok_core::Error::Unsupported("所有权条件转移").into()) })
+        Box::pin(async { Err(crate::Error::Unsupported("所有权条件转移")) })
     }
     /// 读取未过期的所有权；查询结果不能代替获取或续租。
     fn lookup(&self, player_id: &str) -> BoxFuture<'_, Result<Option<Record>>>;

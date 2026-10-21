@@ -49,10 +49,11 @@ fn production_spec(due_at_ms: i64) -> TimerSpec {
 
 impl State {
     /// 创建具有指定记录上限的示例存储，capacity 必须大于零。
-    pub fn new(capacity: usize) -> Result<Self, tok::core::Error> {
+    pub fn new(capacity: usize) -> Result<Self, std::io::Error> {
         if capacity == 0 {
-            return Err(tok::core::Error::InvalidInput(
-                "示例状态容量必须大于零".into(),
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "示例状态容量必须大于零",
             ));
         }
         Ok(Self {

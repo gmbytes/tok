@@ -14,7 +14,7 @@ struct Added {
 impl Event for Added {
     const NAME: &'static str = "demo.added.v1";
 }
-fn context() -> Result<Context, tok::core::Error> {
+fn context() -> Result<Context, tok::execution::ContextError> {
     Context::new(
         Identity {
             node_id: "local".into(),

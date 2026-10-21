@@ -3,7 +3,17 @@
 use std::{collections::BTreeSet, net::SocketAddr};
 
 use serde::Deserialize;
-use tok_core::{Error, Result, ServiceDescriptor};
+use tok_core::ServiceDescriptor;
+
+/// 应用配置解析或跨组件配置校验失败。
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    /// 无效配置及具体原因，不包含凭据。
+    #[error("应用配置错误：{0}")]
+    Invalid(String),
+}
+/// 应用配置操作结果。
+pub type Result<T> = std::result::Result<T, Error>;
 
 /// 配置选定的服务发现后端。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -116,7 +126,7 @@ impl AppConfig {
     /// 解析并立即验证 TOML，包括可观测参数。
     pub fn from_toml(source: &str) -> Result<Self> {
         let config: Self =
-            toml::from_str(source).map_err(|error| Error::InvalidConfig(error.to_string()))?;
+            toml::from_str(source).map_err(|error| Error::Invalid(error.to_string()))?;
         config.validate()?;
         Ok(config)
     }
@@ -126,72 +136,72 @@ impl AppConfig {
         if let Some(events) = &self.events {
             events
                 .validate()
-                .map_err(|error| Error::InvalidConfig(error.to_string()))?;
+                .map_err(|error| Error::Invalid(error.to_string()))?;
         }
         if let Some(keys) = &self.resume_token {
             keys.validate()
-                .map_err(|error| Error::InvalidConfig(error.to_string()))?;
+                .map_err(|error| Error::Invalid(error.to_string()))?;
         }
         if self.player_gateway.handoff_enabled
             && (self.resume_token.is_none()
                 || self.ownership != OwnershipBackend::Redis
                 || self.discovery == DiscoveryBackend::Memory)
         {
-            return Err(Error::InvalidConfig(
+            return Err(Error::Invalid(
                 "跨进程交接需要本地共用签名密钥、Redis 所有权及多节点发现".into(),
             ));
         }
         match (self.ownership, &self.redis_ownership) {
             (OwnershipBackend::Redis, Some(redis)) => {
-                redis.validate()?;
+                redis
+                    .validate()
+                    .map_err(|error| Error::Invalid(error.to_string()))?;
                 if redis.operation_timeout_ms > self.player_gateway.rpc_timeout_ms {
-                    return Err(Error::InvalidConfig(
-                        "所有权操作期限不能大于网关调用期限".into(),
-                    ));
+                    return Err(Error::Invalid("所有权操作期限不能大于网关调用期限".into()));
                 }
             }
             (OwnershipBackend::Redis, None) => {
-                return Err(Error::InvalidConfig(
+                return Err(Error::Invalid(
                     "Redis 所有权需要 redis_ownership 配置".into(),
                 ));
             }
             (_, Some(_)) => {
-                return Err(Error::InvalidConfig(
+                return Err(Error::Invalid(
                     "redis_ownership 仅适用于 Redis 所有权".into(),
                 ));
             }
             _ => {}
         }
         match (self.discovery, &self.redis_discovery) {
-            (DiscoveryBackend::Redis, Some(redis)) => redis.validate()?,
+            (DiscoveryBackend::Redis, Some(redis)) => redis
+                .validate()
+                .map_err(|error| Error::Invalid(error.to_string()))?,
             (DiscoveryBackend::Redis, None) => {
-                return Err(Error::InvalidConfig(
-                    "Redis 发现需要 redis_discovery 配置".into(),
-                ));
+                return Err(Error::Invalid("Redis 发现需要 redis_discovery 配置".into()));
             }
             (_, Some(_)) => {
-                return Err(Error::InvalidConfig(
-                    "redis_discovery 仅适用于 Redis 发现".into(),
-                ));
+                return Err(Error::Invalid("redis_discovery 仅适用于 Redis 发现".into()));
             }
             _ => {}
         }
-        self.player_gateway.validate()?;
+        self.player_gateway
+            .validate()
+            .map_err(|error| Error::Invalid(error.to_string()))?;
         self.observability
             .validate()
-            .map_err(|error| Error::InvalidConfig(error.to_string()))?;
+            .map_err(|error| Error::Invalid(error.to_string()))?;
         if self.node_id.trim().is_empty() {
-            return Err(Error::InvalidConfig("node_id 不能为空".into()));
+            return Err(Error::Invalid("node_id 不能为空".into()));
         }
         if self.discovery == DiscoveryBackend::Redis
             && (self.node_id.len() > 256 || self.services.len() > 64)
         {
-            return Err(Error::InvalidConfig(
+            return Err(Error::Invalid(
                 "Redis 发现限制 node_id 为 256 字节、每节点最多 64 个服务".into(),
             ));
         }
         if self.services.is_empty() {
-            return Err(Error::InvalidConfig("至少需要配置一个服务".into()));
+            return Err(Error::Invalid("至少需要配置一个服务".into()));
         }
         let mut endpoint_names = BTreeSet::new();
         for endpoint in &self.endpoints {
@@ -199,21 +209,16 @@ impl AppConfig {
             if advertised.port() == 0
                 || (self.discovery == DiscoveryBackend::Redis && advertised.ip().is_unspecified())
             {
-                return Err(Error::InvalidConfig(
-                    "Redis 发现需要可连接的发布地址".into(),
-                ));
+                return Err(Error::Invalid("Redis 发现需要可连接的发布地址".into()));
             }
             if endpoint.name.trim().is_empty()
                 || endpoint.protocol.trim().is_empty()
                 || endpoint.address.port() == 0
             {
-                return Err(Error::InvalidConfig("端点需要名称、协议和非零端口".into()));
+                return Err(Error::Invalid("端点需要名称、协议和非零端口".into()));
             }
             if !endpoint_names.insert(&endpoint.name) {
-                return Err(Error::InvalidConfig(format!(
-                    "重复的端点名称：{}",
-                    endpoint.name
-                )));
+                return Err(Error::Invalid(format!("重复的端点名称：{}", endpoint.name)));
             }
         }
         let mut identities = BTreeSet::new();
@@ -223,21 +228,21 @@ impl AppConfig {
                 .as_ref()
                 .is_some_and(|name| name.trim().is_empty() || name.len() > 64)
             {
-                return Err(Error::InvalidConfig("工厂名称无效".into()));
+                return Err(Error::Invalid("工厂名称无效".into()));
             }
             if service.service_name.trim().is_empty() {
-                return Err(Error::InvalidConfig("服务名不能为空".into()));
+                return Err(Error::Invalid("服务名不能为空".into()));
             }
             if let Some(endpoint) = &service.endpoint
                 && !endpoint_names.contains(endpoint)
             {
-                return Err(Error::InvalidConfig(format!(
+                return Err(Error::Invalid(format!(
                     "服务 {} 引用了不存在的端点：{}",
                     service.service_name, endpoint
                 )));
             }
             if !identities.insert(&service.service_name) {
-                return Err(Error::InvalidConfig(format!(
+                return Err(Error::Invalid(format!(
                     "节点内重复的服务名：{}",
                     service.service_name
                 )));
@@ -257,7 +262,7 @@ impl AppConfig {
                     .iter()
                     .find(|endpoint| Some(endpoint.name.as_str()) == service.endpoint.as_deref())
                     .ok_or_else(|| {
-                        Error::InvalidConfig(format!("服务端点不存在：{}", service.service_name))
+                        Error::Invalid(format!("服务端点不存在：{}", service.service_name))
                     })?;
                 Ok(ServiceDescriptor {
                     node_id: self.node_id.clone(),

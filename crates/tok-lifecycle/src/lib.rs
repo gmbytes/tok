@@ -8,4 +8,4 @@ mod factory;
 mod service;
 pub mod task;
 pub use factory::{Factory, Init, InitFuture};
-pub use service::{Builder, Error, Handle, Phase, Prepared, Running};
+pub use service::{Builder, CreateError, Error, Handle, Phase, Prepared, Running};
