@@ -48,6 +48,30 @@ RPC / 客户端业务消息 / 本地或 NATS 事件 / timer
 
 上下文由当前进程的入口适配器创建。跨 RPC 或 NATS 只传播允许的身份、追踪、关联及预算元数据，不序列化任务/生命周期句柄、SessionHandle、扩展对象或取消令牌。远程服务建立自己的上下文，不能承诺直接访问源网关内存；需要源节点操作时使用显式内部接口。
 
+### 执行上下文连续性规范
+
+以下是目标契约；不代表所有现有入口已迁移。当前缺口见[实现状态](status.md#执行上下文连续性审查2026-10-21)，实施顺序见[实施计划](implementation-plan.md#执行上下文连续性校正待实施)。
+
+框架业务处理链的统一承载是 `tok_execution::Request<T>`，Context 与正文具有独立职责。入口适配器负责建立根范围，中间件组织行为，Extensions 提供本地可选元信息和能力。协议特有目标、关联序号和 metadata 可放在 T 或有明确类型的扩展中，不能另建只有 Span 或 Duration 的输入来替代已有执行范围。
+
+| 边界 | Context 契约 |
+| --- | --- |
+| 同一范围内转换输入或组合 Layer | 移交原 Context；正文类型变化不重建预算，不丢扩展 |
+| 当前服务内嵌套本地执行 | 显式派生，保留截止点、父子取消关系、追踪和适用扩展；变更操作名不变更执行所属服务 |
+| 同一调用排队或切换任务 | 随工作项携带 Context，等待时间扣减原期限；不能只携带正文或当前 Span |
+| 准入后接受独立工作、独立 timer 或生命周期任务 | 明确声明为新范围，定义预算起点、停止关系、追踪关联及扩展转移；不能靠队列或 spawn 隐式获得新预算 |
+| 同进程跨服务或跨 session 投递 | 显式确定范围是否独立，目标服务/会话能力由目标安装；源调用信息按类型筛选，不完整克隆源能力集合冒充目标能力 |
+| 出站请求式 RPC | 本地出站处理链保留调用 Context，目标地址独立表达；发送预算不得放大上游剩余时间，取消在本地等待与执行期间生效 |
+| 远端 RPC 接收 | 校验协议允许的 metadata，在接收服务内重建 Context；单调时钟、取消令牌和对象不跨网络 |
+| NATS 发布与独立消费 | 发布侧若处于调用中，其本地发布适配接收调用范围；消费侧以订阅者配置建立独立范围，不继承已结束的发布者执行期限或本地能力 |
+| 退出清理或交接补偿 | 需要在原调用取消后继续的工作使用显式、有限的补偿范围，并由既有生命周期监督；不因继承已取消 Context 而跳过必要清理 |
+
+Extensions 的继承有作用域：同一范围的自定义信息不能在中间转换时静默丢失；进入另一服务或 session 时，继承哪些信息、覆盖哪些目标能力须由适配器明确。Clone 共享已有扩展值，但对某个容器 insert/remove 不会修改其他克隆；兄弟处理者之间没有自动的扩展回写，不能将 Extensions 当作全局可变状态。
+
+Context 不依赖任务局部变量自动传播。普通辅助函数可以接收具体输入、能力或 Context 的借用；基础设施与第三方库不必统一签名。原生 Tonic / NATS 客户端仍可作为底层出口，框架在其外提供保持 Context 的业务执行适配，最终编码边界再提取允许的网络字段。共同执行约束不保证远端抢占或回滚。
+
+审查处理链时依次确认：谁建立根范围、谁派生或显式结束范围、队列中携带什么、哪些能力属于目标、哪些字段跨网络。验收使用自定义扩展标记穿过真实适配链，并核对期限不重置、取消关系和追踪连续性；仅验证 Handler 最终收到了正文不算通过。
+
 ### 操作身份、路由与熔断边界
 
 `Context.service` 表示当前执行所属的服务；`operation` 是入口适配器按注册路由填写的稳定操作标识，在该服务内标识执行入口。RPC 方法、客户端消息、事件处理和 timer 各自映射到明确标识；不拼接玩家 ID、请求 ID 等动态值。字符串适应开放的业务入口集合；当前构造器只校验非空和长度，不能代替入口注册校验。
@@ -357,8 +381,12 @@ execution::lock::Layer 显式注入 Backend、Config、取键函数和结果判�
 
 ## gRPC 客户端与监听处理链（2026-10-21）
 
-Client::execute_service 对每次出站调用注入已选定的目标、关联序号和连接，通过标准 Tower Service 组合协议发送器。请求和结果类型泛型，不依赖玩家或固定生成协议，支持借用且不要求 Service 克隆；连接仍按节点和地址共享。原 execute 与新入口复用一套预算、追踪和指标实现，不主动重试。
+Client::layer 返回 client::Layer；输入 client::Call<T> 包含待准备连接的目标、关联序号、原始请求与 Span。Layer 获取共享连接、注入追踪并将 Outgoing<T> 交给内层 Service；外层策略可在连接获取前拒绝或调整目标，内层策略可修改 metadata 和类型化请求。直接调用保留内层完整响应；execute_service 消费单次内层 Service 并返回 tonic 响应正文，execute 保留 FnOnce 回调，三者共用执行 Future。输入与 Future 支持借用，不固定生成协议，不主动重试。
 
-准备连接、Service 就绪等待和中间件执行计入原绝对期限；非协作式 poll_ready 迟到后不继续调用发送器。Outgoing::into_parts 在实际发送前检查截止点并按剩余时间缩短 grpc-timeout，中间件指定的更短期限也保留；延迟或排队策略不能通过重新构造预算延长本地调用，超时不回滚副作用。
+客户端本地期限从进入 Layer 的 call 开始，覆盖准备连接、内层就绪等待和执行。外层策略等待须自行约束，需共用本地预算的策略放在 Layer 内。非协作式 poll_ready 迟到后不调用发送器；Outgoing::into_parts 在发送前检查截止点并缩短 grpc-timeout，保留更短 metadata 期限。超时或丢弃 Future 不保证回滚副作用。准备失败和执行结果均计入客户端 Layer 指标；未进入 Layer 的外层拒绝由外层负责观察。
 
-Listener::from_server 接收 Tonic Server<L>，监听级 Layer 覆盖共享端点的整个 Routes；单服务仍可独立安装 Tower 链。内部仅擦除监听工厂，保留 Tonic 的类型边界，支持不同 HTTP 回应 Body；对外 Listener 和 Application::register_rpc_endpoint 继续为非泛型接口。就绪控制、重复绑定校验及退出监督保持原语义，HTTP 级策略与解码后的业务 Layer 分别组合。
+可重复调用的 client::Service 每次克隆内层，server::Service 沿用 execution::Layer 的相同规则；共享限额等状态应显式共享，不承诺普通 Clone 会自动共享任意策略状态。Client 本身克隆共享工厂与缓存，invalidate 对所有共享克隆生效；with_endpoint_factory 建立独立配置与空缓存，其他克隆不受影响。
+
+Server::layer 返回 server::Layer，输入为 execution::Request<T>。Layer 校验服务身份、映射执行停止原因并记录 gRPC 指标，内部就绪、取消、期限和追踪由 execution::Layer 驱动。Server::context 继续从 metadata 建立原范围；直接 Layer 与 Server::execute 不重复分配预算，协议解码、认证与路由仍由适配器负责。
+
+Listener::from_server 接收 Tonic Server<L>，监听级 Layer 覆盖共享端点的整个 Routes；单服务仍可独立安装 Tower 链。内部仅擦除监听工厂，保留 Tonic 类型边界；对外 Listener 和 Application::register_rpc_endpoint 继续为非泛型接口。就绪控制、重复绑定校验及退出监督保持原语义，HTTP 级策略与解码后的业务 Layer 分别组合。

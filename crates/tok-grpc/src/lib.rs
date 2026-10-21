@@ -1,16 +1,17 @@
 //! 与业务协议无关的 gRPC 设施：连接复用、共享端点与类型化执行。
 //!
-//! Client::execute 接入任意生成客户端，Client::execute_service 接收出站 Tower 链；
-//! Outgoing 提供已选定连接和请求，Server 接入类型化服务处理链。
+//! Client 与 Server 是主要配置入口，client / server 提供标准 Tower Layer、Service 与调用 Future。
+//! client::Call 在连接准备前接入外层策略，Outgoing 向内层提供已选定连接和类型化请求。
+//! Client::execute、execute_service 与 Server::execute 是同一执行链的便捷方法。
 //! Listener::from_server 接收包含监听级 Tower Layer 的 Tonic Server。
 //! 游戏消息、玩家事件与 timer 的适配位于 tok-message，本 crate 不理解这些正文。
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
 
-mod client;
+pub mod client;
 mod listener;
 mod outgoing;
 mod propagation;
-mod server;
+pub mod server;
 mod timeout;
 pub use client::Client;
 pub use listener::{Listener, Readiness};

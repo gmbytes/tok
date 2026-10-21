@@ -151,8 +151,16 @@ async fn trace_context_is_propagated_across_the_network_call() {
                     .await
             },
         );
+        use tower::{Layer as _, ServiceExt as _};
         clients
-            .execute_service(&target, 2, request, root, sender)
+            .layer()
+            .layer(sender)
+            .oneshot(tok_grpc::client::Call {
+                target: target.clone(),
+                request_id: 2,
+                request,
+                span: root,
+            })
             .await
             .unwrap();
     }

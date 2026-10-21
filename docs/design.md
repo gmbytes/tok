@@ -224,8 +224,18 @@ tok-core::lock 定义后端与租约契约，tok-infra::locks 提供 Memory / Re
 
 tok-message::rpc::lock 是薄协议适配，校验固定逻辑服务与 CallContext.bid，提供回应判定并将通用错误映射为 Status；不再实现获取、持锁、超时和释放循环。通用 Config 不含 RPC 命名空间，只提供时间预算。当前适配要求自有 Send + static 输入、回应和业务错误，不创建后台任务；现有借用执行能力不受影响。不新增 tok-middleware 或 tok-common。
 
+## 框架处理链的 Context 契约（2026-10-21）
+
+框架业务执行与用户扩展入口以 tok-execution::Request<T> / Context 为共同契约，适配器对第三方协议二次封装。同一执行范围中的输入转换、排队、任务切换与中间件组合保留上下文；派生执行不重置截止点。执行所属服务与出站目标分开表达，Context / Extensions 不充当线协议。
+
+独立事件消费、timer、生命周期与补偿工作可以建立新范围，但必须声明范围边界、预算、停止关系和扩展规则。跨服务或 session 时由目标安装本地能力；跨进程仅传播白名单元数据并重建 Context。基础容器、存储后端和普通辅助函数不受统一请求签名限制，原生传输入口之外须有符合框架契约的执行适配。
+
+完整规则见[执行上下文连续性规范](service-runtime.md#执行上下文连续性规范)，代码差异见[审查记录](status.md#执行上下文连续性审查2026-10-21)。以下 gRPC Layer 化已完成，但尚未完成从上游 Context 接续出站范围，不能据此宣称端到端契约已满足。
+
 ## gRPC 处理链扩展（2026-10-21）
 
-gRPC 的连接缓存、监听、metadata 转换保留为边界组件，不强制全部变成 Layer。服务端 Server::execute 接收类型化 Tower Service 并复用共同执行层；客户端 Client::execute_service 接收 Service<Outgoing<Req>>，协议发送器和用户 Layer 显式组合。已有 execute 的 FnOnce 回调继续提供便捷调用，内置协议适配器不会自动获得用户出站策略。
+gRPC 的连接缓存、监听、metadata 转换保留为边界组件；执行范围通过 client::{Layer, Service} 和 server::{Layer, Service} 表达。主要配置入口 Client / Server 保持根导出，功能命名空间公开，内部执行 Future 的实现模块私有。Client::execute、execute_service 与 Server::execute 是同一执行链的便捷方法，内置协议适配器不会自动获得用户出站策略。
 
-Outgoing 提供调用前选定的目标、关联序号、原截止点及类型化 tonic::Request，不承担业务路由。发送器通过 into_parts 在等待后缩短远端期限；客户端管理共享 Channel、追踪注入、整体期限与指标，包含 Service 就绪等待，不主动重试。Listener::from_server 接收带 Layer 的 Tonic Server，内部保存 Routes 与类型擦除的监听工厂；Listener 和 Application 注册保持非泛型，服务绑定和就绪规则不变。
+客户端 Layer 将连接准备前的 client::Call<T> 转换为 Outgoing<T>，允许外层策略在连接获取前选择目标或拒绝调用；其本地预算从进入 Layer 开始，覆盖连接准备、内层就绪和发送，外层等待须另行约束。Outgoing 提供已选定目标、关联序号、截止点与类型化 tonic::Request，发送器通过 into_parts 缩短远端期限。可重复调用的 Service 克隆内层，需要跨请求共享的策略状态由策略显式共享。便捷客户端方法可消费非 Clone Service / FnOnce 回调，支持借用输入和 Future，不另设执行循环，不主动重试。
+
+服务端 Layer 接收 execution::Request<T>，校验服务身份、复用 execution 执行约束并映射停止原因与指标。Server::context 继续负责 metadata 转换，Layer 不新建期限或进行认证。Client 克隆共享配置与 Channel 缓存，更换工厂为该实例建立独立配置。Listener::from_server 接收带 Layer 的 Tonic Server，Listener 与 Application 注册保持非泛型，服务绑定和就绪规则不变。

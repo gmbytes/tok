@@ -277,6 +277,7 @@ async fn outgoing_tower_chain_receives_target_and_can_mutate_borrowed_input() {
     assert_eq!(result, value.len());
 }
 
+#[derive(Clone)]
 struct ReadinessProbe {
     mode: u8,
     calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
@@ -433,4 +434,208 @@ async fn outgoing_work_timeout_is_not_retried_and_invalid_budget_skips_readiness
         .unwrap_err();
     assert_eq!(error.code(), Code::InvalidArgument);
     assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn client_layer_preserves_borrowed_input_and_response_metadata() {
+    use tok_grpc::{Outgoing, client::Call};
+    use tower::ServiceExt as _;
+    let client = Client::new(Duration::from_secs(1), 1).unwrap();
+    let service = tower::ServiceBuilder::new()
+        .map_request(|mut call: Call<&mut String>| {
+            // 连接准备之前的策略可修改目标。
+            call.target.service_name = "selected".into();
+            call
+        })
+        .layer(client.layer())
+        .map_request(|mut call: Outgoing<&mut String>| {
+            assert_eq!(call.target().service_name, "selected");
+            call.request
+                .metadata_mut()
+                .insert("x-policy", "checked".parse().unwrap());
+            call
+        })
+        .map_response(|mut response: tonic::Response<usize>| {
+            response
+                .metadata_mut()
+                .insert("x-response", "retained".parse().unwrap());
+            response
+        })
+        .service(tower::service_fn(borrowed_sender));
+    let mut value = String::from("direct");
+    let response = service
+        .oneshot(Call {
+            target: target(),
+            request_id: 17,
+            request: tonic::Request::new(&mut value),
+            span: tracing::Span::none(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(response.metadata().get("x-response").unwrap(), "retained");
+    assert_eq!(*response.get_ref(), value.len());
+    assert_eq!(value, "direct sender");
+}
+
+#[tokio::test]
+async fn outer_client_policy_can_reject_before_connection_preparation() {
+    use tok_grpc::{Outgoing, client::Call};
+    use tower::ServiceExt as _;
+    let client = Client::new(Duration::from_secs(1), 1)
+        .unwrap()
+        .with_endpoint_factory(|_| panic!("rejected call must not prepare a connection"));
+    let service = tower::ServiceBuilder::new()
+        .layer(client.layer())
+        .service(tower::service_fn(|_: Outgoing<()>| async {
+            panic!("rejected call must not dispatch");
+            #[allow(unreachable_code)]
+            Ok::<_, tonic::Status>(tonic::Response::new(()))
+        }));
+    let service = tower::service_fn(move |call: Call<()>| {
+        let inner = service.clone();
+        async move {
+            if call.target.service_name == "custom" {
+                return Err(tonic::Status::permission_denied("策略拒绝"));
+            }
+            inner.oneshot(call).await
+        }
+    });
+    let error = service
+        .oneshot(Call {
+            target: target(),
+            request_id: 1,
+            request: tonic::Request::new(()),
+            span: tracing::Span::none(),
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), Code::PermissionDenied);
+}
+
+#[tokio::test]
+async fn cloned_client_layer_shares_cache_and_bounds_inner_readiness() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    use tok_grpc::client::Call;
+    use tower::ServiceExt as _;
+    let count = Arc::new(AtomicUsize::new(0));
+    let observed = Arc::clone(&count);
+    let client = Client::new(Duration::from_secs(1), 2)
+        .unwrap()
+        .with_endpoint_factory(move |target| {
+            observed.fetch_add(1, Ordering::SeqCst);
+            Ok(tonic::transport::Endpoint::from_shared(format!(
+                "http://{}",
+                target.address
+            ))?)
+        });
+    let cloned = client.clone();
+    let permits = Arc::new(tokio::sync::Semaphore::new(0));
+    let held = Arc::clone(&permits);
+    let service = tower::ServiceBuilder::new()
+        .layer(client.layer())
+        .layer(tower::limit::GlobalConcurrencyLimitLayer::with_semaphore(
+            held,
+        ))
+        .service(tower::service_fn(|_: tok_grpc::Outgoing<()>| async {
+            panic!("no permit available");
+            #[allow(unreachable_code)]
+            Ok::<_, tonic::Status>(tonic::Response::new(()))
+        }));
+    for service in [service.clone(), service] {
+        let mut request = tonic::Request::new(());
+        request.set_timeout(Duration::from_millis(20));
+        let error = service
+            .oneshot(Call {
+                target: target(),
+                request_id: 1,
+                request,
+                span: tracing::Span::none(),
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), Code::DeadlineExceeded);
+        assert_eq!(permits.available_permits(), 0);
+    }
+    cloned.channel(&target()).unwrap();
+    assert_eq!(count.load(Ordering::SeqCst), 1);
+    cloned.invalidate("node").unwrap();
+    client.channel(&target()).unwrap();
+    assert_eq!(count.load(Ordering::SeqCst), 2);
+    let detached =
+        cloned.with_endpoint_factory(|_| Err(tok_grpc::Error::Configuration("独立配置".into())));
+    assert!(detached.channel(&target()).is_err());
+    assert!(client.channel(&target()).is_ok());
+    assert_eq!(count.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn server_layer_accepts_borrowed_input_and_rejects_wrong_identity_or_cancelled_context() {
+    use tower::ServiceExt as _;
+    let stop = CancellationToken::new();
+    let server = server(stop.clone());
+    let service =
+        tower::ServiceBuilder::new()
+            .layer(server.layer())
+            .service(tok_execution::sync_handler(
+                |request: Request<&mut String>| {
+                    request.input.push_str(" layer");
+                    Ok::<_, tonic::Status>(request.input.len())
+                },
+            ));
+    let mut value = String::from("server");
+    let context = server.context(&MetadataMap::new(), "append").unwrap();
+    let length = service
+        .clone()
+        .oneshot(Request::new(context, &mut value))
+        .await
+        .unwrap();
+    assert_eq!(length, value.len());
+    let other = Server::new(Identity {
+        node_id: "other".into(),
+        service_name: "custom".into(),
+    })
+    .unwrap();
+    let context = other.context(&MetadataMap::new(), "append").unwrap();
+    let error = service
+        .clone()
+        .oneshot(Request::new(context, &mut value))
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), Code::FailedPrecondition);
+    let context = server.context(&MetadataMap::new(), "append").unwrap();
+    stop.cancel();
+    let error = service
+        .oneshot(Request::new(context, &mut value))
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), Code::Cancelled);
+    assert_eq!(value, "server layer");
+}
+
+#[tokio::test]
+async fn convenience_callback_can_consume_non_clone_capture_and_borrowed_input() {
+    let client = Client::new(Duration::from_secs(1), 1).unwrap();
+    let owned = std::sync::Mutex::new(String::from(" once"));
+    let mut value = String::from("borrowed");
+    let size = client
+        .execute(
+            &target(),
+            1,
+            tonic::Request::new(&mut value),
+            tracing::Span::none(),
+            move |_, request| async move {
+                let suffix = owned.into_inner().unwrap();
+                let value = request.into_inner();
+                tokio::task::yield_now().await;
+                value.push_str(&suffix);
+                Ok(tonic::Response::new(value.len()))
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(value, "borrowed once");
+    assert_eq!(size, value.len());
 }

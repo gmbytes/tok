@@ -450,3 +450,24 @@ RPC 的 lock::Layer::new(backend, namespace, config) 只校验固定服务与 bi
 Listener::from_server 已支持带 Tower Layer 的 Tonic Server。内部改为 Routes 与类型擦除的监听工厂，对外 Listener 和 Application 注册无需泛型变更；共享服务就绪控制、绑定校验和传输参数保持原约束。指南展示显式出站链和监听级 Layer；不新增自动重试、路由、熔断默认策略或并行执行模型。
 
 本轮 Windows 验收：工作区 292 项测试通过、31 项外部专项按约定跳过，包含 18 项指南示例。新增回归覆盖出站 metadata/借用输入、就绪等待和迟到就绪、发送前预算扣减、原错误与无主动重试、共享路由监听 Layer、就绪切换及 Application 非泛型注册；追踪回归同时覆盖便捷回调和 Tower 网络路径。全目标编译与 Clippy、workspace rustdoc、rpc / client / application smoke、格式、216 个文本文件 UTF-8/LF、82 处相对文档路径及空白检查通过。未运行真实 Redis/NATS、Linux 或 release 构建；随本次提交交付。
+
+
+## gRPC 执行标准 Layer 化（2026-10-21）
+
+已提供 client::{Call, Layer, Service, ResponseFuture} 与 server::{Layer, Service, ResponseFuture} 功能命名空间，Client / Server 保留主要根入口。客户端 Layer 将准备前的 Call 转换为 Outgoing，直接组合时保留完整回应；execute_service 与 FnOnce execute 复用相同执行 Future，仍允许非 Clone 单次 Service 与借用。服务端 Layer 复用 execution 约束，Server::execute 仅作便捷调用，metadata 转换保留在 Server::context。
+
+客户端预算从 Layer 的 call 开始，覆盖连接准备、内层就绪和发送；外层策略可提前拒绝或选点，其等待须独立约束。可重复 Service 克隆内层，共享策略状态须显式共享；指南使用标准 Layer / ServiceBuilder，说明预算放置与共享规则。Client 克隆共享工厂与缓存，invalidate 影响共享克隆，替换工厂建立独立配置。准备失败也计入 Layer 的调用指标，不主动增加重试或后台任务。
+
+本轮 Windows 验收：工作区 298 项测试通过、31 项外部专项按约定跳过，包含 19 项指南示例。新增回归覆盖直接 Layer 的借用输入与完整回应、外层提前拒绝、共享客户端缓存与工厂隔离、内层并发就绪预算、服务身份与取消及非 Clone FnOnce 回调；真实网络追踪回归切换到直接 Layer 路径并通过。全目标 Clippy、workspace rustdoc、rpc / client / application smoke、格式、220 个文本文件 UTF-8/LF、82 处相对文档路径及空白检查通过。未运行真实 Redis/NATS、Linux 或 release 构建；本轮代码和文档尚未提交。
+
+
+## 执行上下文连续性校正（待实施）
+
+依据[连续性规范](service-runtime.md#执行上下文连续性规范)与[源码审查](status.md#执行上下文连续性审查2026-10-21)，按以下依赖顺序修正。这是 P1–P7 形成的处理链在真实边界上的校正，不重启旧阶段编号。本次仅完成规范和审查，下面各项尚未实施；上一轮 Layer 化的验收不代表这些端到端约束已验证。
+
+1. **通用 gRPC 出站承载。** 使框架出站 Layer / Service 与便捷入口接续 execution::Request<T> / Context，协议 Call / Outgoing 只表达传输所需内容，避免重复保存可漂移的预算与追踪。已有范围使用原截止点和本地配置共同限制，根调用显式建范围；Context.service 保持本地身份。若重复的输入转换需要公共辅助方法，在 tok-execution 提供保留 Context 的转换，具体 API 以实现审查为准。验收外层策略到发送器的自定义扩展、取消、排队和准备耗时、剩余 grpc-timeout、借用及完整回应。
+2. **游戏 RPC 与网关执行接续。** 改造 business / player 客户端、普通 call 与内部事件编码和 RpcExecutor 的请求/事件/timer 三条路径。协议 CallContext 与执行 Context 保持分工。验收从网关执行中间件到本地出站策略的扩展保留、原预算和追踪；真实网络对端仅重建允许元数据与自身能力，不取得源 SessionHandle。
+3. **网关调度、事件投递与下行范围。** 校正 admission 输出、RequestJob / EventJob、deliver 与新下行适配，显式定义准入、已接受工作和下行发布是否属于同一范围，以及何时派生新范围。同一范围队列携带 Context 并扣减等待时间；独立范围声明新的有限预算、停止关系和扩展筛选。验收准入标记抵达执行、队列过期不执行业务、断线后的在途收束、消费处理到通知的范围、独立事件入队后不依赖发布者存活、fan-out 目标能力正确和补发不重复执行中间件。
+4. **内部交接 RPC 与事件发布边界。** GatewayRpcService 接入标准服务端执行适配，协调端复用出站承载；预算取现有调用与交接限制的较小者，必要补偿保持独立有界并受监督。NATS 原生出口外提供显式的执行发布适配，继承当前本地范围约束并提取允许追踪；订阅消费仍独立。验收四个交接接口的 metadata / Context、原状态机失败恢复、取消后的必要补偿、本地发布取消/超时和独立消费能力，不新增 broker 确认、重试或远端取消承诺。
+
+每项实施后更新 status 与 rustdoc 指南，仅将已提供的 API 写入可运行示例；新增回归围绕边界行为，不用与实现逐行对应的测试替代契约验证。既有发现、所有权、队列容量、会话接管、错误映射和借用支持保持回归。实现前先核对当前未提交的 Layer 化改动，避免用签名保留掩盖不符合 Context 契约的旧路径。

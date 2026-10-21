@@ -1,22 +1,38 @@
+//! 客户端连接管理与可组合的 gRPC 执行处理链。
+//!
+//! Call 是连接准备前的输入，Layer 将其转换为 Outgoing 并约束内部就绪和执行。
+//! Service 每次调用克隆内层；共享限额和其他状态应由内层策略显式共享。
+mod call;
+mod middleware;
+mod sender;
 use crate::Outgoing;
+pub use call::Call;
+pub use middleware::{Layer, ResponseFuture, Service};
 use std::future::Future;
-use std::{collections::BTreeMap, sync::Mutex, time::Duration};
+use std::{
+    collections::BTreeMap,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 use tok_core::ServiceDescriptor;
 use tonic::{
     Request, Response, Status,
     transport::{Channel, Endpoint},
 };
-use tower::{Service, ServiceExt};
-use tracing::Instrument;
+use tower::Layer as _;
 
 type EndpointFactory = dyn Fn(&ServiceDescriptor) -> Result<Endpoint, crate::Error> + Send + Sync;
 
-/// 可共享的通用 RPC 客户端，管理有界 Channel 缓存、调用期限、追踪和指标；协议方法由适配器提供。
+/// 可廉价克隆的通用 RPC 客户端，管理有界 Channel 缓存、调用期限、追踪和指标；协议方法由适配器提供。
 ///
-/// 缓存键包含节点和地址，共享端点的不同业务服务复用同一 Channel。
+/// 克隆共享缓存和端点工厂；缓存键包含节点和地址，共享端点的服务复用同一 Channel。
 /// 节点变更时可显式 invalidate；缓存满时
 /// 清除一个旧键，已有 Channel 克隆仍可完成在途请求。默认使用明文内部 gRPC，可通过端点工厂定制传输。
+#[derive(Clone)]
 pub struct Client {
+    shared: Arc<Shared>,
+}
+struct Shared {
     timeout: Duration,
     capacity: usize,
     endpoint_factory: Box<EndpointFactory>,
@@ -32,13 +48,15 @@ impl Client {
             ));
         }
         Ok(Self {
-            timeout,
-            capacity,
-            endpoint_factory: Box::new(move |target| {
-                Ok(Endpoint::from_shared(format!("http://{}", target.address))?
-                    .connect_timeout(timeout))
+            shared: Arc::new(Shared {
+                timeout,
+                capacity,
+                endpoint_factory: Box::new(move |target| {
+                    Ok(Endpoint::from_shared(format!("http://{}", target.address))?
+                        .connect_timeout(timeout))
+                }),
+                channels: Mutex::new(BTreeMap::new()),
             }),
-            channels: Mutex::new(BTreeMap::new()),
         })
     }
 
@@ -46,15 +64,19 @@ impl Client {
     ///
     /// 工厂在缓存未命中时于缓存锁外执行，不应阻塞或创建后台任务；并发未命中时可能重复调用。
     /// 缓存按节点和地址共享，因此同一节点和地址必须使用一致的 URI 与传输配置，不应按业务服务名变化。
-    /// 更换工厂会撤销本实例的缓存，已取得的 Channel 仍可完成在途调用。
+    /// 更换工厂会为本实例建立独立配置与空缓存；其他 Client 克隆及已取得的 Channel 不受影响。
     /// 自定义工厂负责连接配置，execute 的整体调用期限仍由 Client 管理。
     /// TLS 需在应用依赖中启用 Tonic 对应的 TLS feature。
     pub fn with_endpoint_factory<F>(mut self, factory: F) -> Self
     where
         F: Fn(&ServiceDescriptor) -> Result<Endpoint, crate::Error> + Send + Sync + 'static,
     {
-        self.endpoint_factory = Box::new(factory);
-        self.channels = Mutex::new(BTreeMap::new());
+        self.shared = Arc::new(Shared {
+            timeout: self.shared.timeout,
+            capacity: self.shared.capacity,
+            endpoint_factory: Box::new(factory),
+            channels: Mutex::new(BTreeMap::new()),
+        });
         self
     }
 
@@ -68,6 +90,7 @@ impl Client {
         }
         let key = (target.node_id.clone(), target.address);
         if let Some(channel) = self
+            .shared
             .channels
             .lock()
             .map_err(|_| Status::internal("连接缓存锁不可用"))?
@@ -76,11 +99,12 @@ impl Client {
         {
             return Ok(channel);
         }
-        let endpoint = (self.endpoint_factory)(target).map_err(|error| {
+        let endpoint = (self.shared.endpoint_factory)(target).map_err(|error| {
             Status::failed_precondition(format!("RPC 连接端点配置失败：{error}"))
         })?;
         let channel = endpoint.connect_lazy();
         let mut channels = self
+            .shared
             .channels
             .lock()
             .map_err(|_| Status::internal("连接缓存锁不可用"))?;
@@ -88,7 +112,7 @@ impl Client {
         if let Some(channel) = channels.get(&key) {
             return Ok(channel.clone());
         }
-        if channels.len() >= self.capacity {
+        if channels.len() >= self.shared.capacity {
             channels.pop_first();
         }
         channels.insert(key, channel.clone());
@@ -97,7 +121,8 @@ impl Client {
 
     /// 节点移除或端点变化时撤销缓存，在途 Channel 克隆仍可完成调用。
     pub fn invalidate(&self, node_id: &str) -> Result<(), Status> {
-        self.channels
+        self.shared
+            .channels
             .lock()
             .map_err(|_| Status::internal("连接缓存锁不可用"))?
             .retain(|(node, _), _| node != node_id);
@@ -106,7 +131,12 @@ impl Client {
 
     /// 默认调用期限；协议适配器据此设置请求 deadline 和本地等待上限。
     pub fn timeout(&self) -> Duration {
-        self.timeout
+        self.shared.timeout
+    }
+
+    /// 构造标准 Tower 执行 Layer，克隆共享本客户端的连接缓存和配置。
+    pub fn layer(&self) -> Layer {
+        Layer::new(self)
     }
 
     /// 执行已组装 Tower 中间件的出站调用；就绪等待和调用共用原有限期限。
@@ -124,23 +154,18 @@ impl Client {
         service: S,
     ) -> Result<Res, Status>
     where
-        S: Service<Outgoing<Req>, Response = Response<Res>, Error = Status>,
+        S: tower::Service<Outgoing<Req>, Response = Response<Res>, Error = Status>,
     {
-        let mut service = service;
-        self.execute_with(
-            target,
-            request_id,
-            request,
-            span,
-            move |channel, request, deadline| async move {
-                let service = service.ready().await?;
-                let call = Outgoing::new(target.clone(), request_id, channel, request, deadline);
-                // 非协作式 poll_ready 可能迟到，不能在已过期后继续发送。
-                call.check()?;
-                service.call(call).await
-            },
-        )
-        .await
+        self.layer()
+            .layer(service)
+            .call_once(Call {
+                target: target.clone(),
+                request_id,
+                request,
+                span,
+            })
+            .await
+            .map(Response::into_inner)
     }
 
     /// 执行任意生成协议的单次调用，传播追踪、设置有限期限并记录指标；不自动重试。
@@ -158,55 +183,7 @@ impl Client {
         F: FnOnce(Channel, Request<Req>) -> Fut,
         Fut: Future<Output = Result<Response<Res>, Status>>,
     {
-        self.execute_with(
-            target,
-            request_id,
-            request,
-            span,
-            move |channel, request, _| send(channel, request),
-        )
-        .await
-    }
-
-    async fn execute_with<Req, Res, F, Fut>(
-        &self,
-        target: &ServiceDescriptor,
-        request_id: u64,
-        mut request: Request<Req>,
-        span: tracing::Span,
-        send: F,
-    ) -> Result<Res, Status>
-    where
-        F: FnOnce(Channel, Request<Req>, tokio::time::Instant) -> Fut,
-        Fut: Future<Output = Result<Response<Res>, Status>>,
-    {
-        let started = std::time::Instant::now();
-        let budget = crate::timeout::request_budget(request.metadata(), self.timeout)?;
-        let deadline = tokio::time::Instant::now() + budget;
-        let channel = self.channel(target)?;
-        crate::propagation::inject(request.metadata_mut(), &span);
-        let result = async {
-            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-            if remaining.is_zero() {
-                return Err(Status::deadline_exceeded("内部 RPC 超时，未自动重试"));
-            }
-            request.set_timeout(remaining);
-            let call = send(channel, request, deadline).instrument(span);
-            if tokio::time::Instant::now() >= deadline {
-                return Err(Status::deadline_exceeded("内部 RPC 超时，未自动重试"));
-            }
-            let result = tokio::time::timeout_at(deadline, call).await;
-            if tokio::time::Instant::now() >= deadline {
-                return Err(Status::deadline_exceeded("内部 RPC 超时，未自动重试"));
-            }
-            result.unwrap_or_else(|_| Err(Status::deadline_exceeded("内部 RPC 超时，未自动重试")))
-        }
-        .await;
-        metrics::histogram!("tok_grpc_client_duration_seconds", "service_name" => target.service_name.clone()).record(started.elapsed().as_secs_f64());
-        metrics::counter!("tok_grpc_client_calls_total", "service_name" => target.service_name.clone(), "result" => if result.is_ok() { "ok" } else { "error" }).increment(1);
-        if let Err(status) = &result {
-            tracing::error!(node_id = %target.node_id, service_name = %target.service_name, request_id, code = ?status.code(), "内部 RPC 失败，未自动重试");
-        }
-        Ok(result?.into_inner())
+        self.execute_service(target, request_id, request, span, sender::Sender::new(send))
+            .await
     }
 }

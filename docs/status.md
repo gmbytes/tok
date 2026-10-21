@@ -200,3 +200,39 @@ RPC 的 lock::Layer::new(backend, namespace, config) 只校验固定服务与 bi
 Listener::from_server 已支持带 Tower Layer 的 Tonic Server。内部改为 Routes 与类型擦除的监听工厂，对外 Listener 和 Application 注册无需泛型变更；共享服务就绪控制、绑定校验和传输参数保持原约束。指南展示显式出站链和监听级 Layer；不新增自动重试、路由、熔断默认策略或并行执行模型。
 
 本轮 Windows 验收：工作区 292 项测试通过、31 项外部专项按约定跳过，包含 18 项指南示例。新增回归覆盖出站 metadata/借用输入、就绪等待和迟到就绪、发送前预算扣减、原错误与无主动重试、共享路由监听 Layer、就绪切换及 Application 非泛型注册；追踪回归同时覆盖便捷回调和 Tower 网络路径。全目标编译与 Clippy、workspace rustdoc、rpc / client / application smoke、格式、216 个文本文件 UTF-8/LF、82 处相对文档路径及空白检查通过。未运行真实 Redis/NATS、Linux 或 release 构建；随本次提交交付。
+
+
+## gRPC 执行标准 Layer 化（2026-10-21）
+
+已提供 client::{Call, Layer, Service, ResponseFuture} 与 server::{Layer, Service, ResponseFuture} 功能命名空间，Client / Server 保留主要根入口。客户端 Layer 将准备前的 Call 转换为 Outgoing，直接组合时保留完整回应；execute_service 与 FnOnce execute 复用相同执行 Future，仍允许非 Clone 单次 Service 与借用。服务端 Layer 复用 execution 约束，Server::execute 仅作便捷调用，metadata 转换保留在 Server::context。
+
+客户端预算从 Layer 的 call 开始，覆盖连接准备、内层就绪和发送；外层策略可提前拒绝或选点，其等待须独立约束。可重复 Service 克隆内层，共享策略状态须显式共享；指南使用标准 Layer / ServiceBuilder，说明预算放置与共享规则。Client 克隆共享工厂与缓存，invalidate 影响共享克隆，替换工厂建立独立配置。准备失败也计入 Layer 的调用指标，不主动增加重试或后台任务。
+
+本轮 Windows 验收：工作区 298 项测试通过、31 项外部专项按约定跳过，包含 19 项指南示例。新增回归覆盖直接 Layer 的借用输入与完整回应、外层提前拒绝、共享客户端缓存与工厂隔离、内层并发就绪预算、服务身份与取消及非 Clone FnOnce 回调；真实网络追踪回归切换到直接 Layer 路径并通过。全目标 Clippy、workspace rustdoc、rpc / client / application smoke、格式、220 个文本文件 UTF-8/LF、82 处相对文档路径及空白检查通过。未运行真实 Redis/NATS、Linux 或 release 构建；本轮代码和文档尚未提交。
+
+
+## 执行上下文连续性审查（2026-10-21）
+
+本次仅补充规范与源码审查，尚未实施下面的迁移。审查基于当前工作树，包含上一轮尚未提交的 client/server Tower Layer；不是只审查 HEAD。契约见[服务运行模型](service-runtime.md#执行上下文连续性规范)，待实施顺序见[实施计划](implementation-plan.md#执行上下文连续性校正待实施)。
+
+### 需要调整的边界
+
+| 优先顺序 | 代码与事实 | 契约差异及调整方向 |
+| --- | --- | --- |
+| 1 | [gRPC 客户端输入](../crates/tok-grpc/src/client/call.rs)、[执行 Layer](../crates/tok-grpc/src/client/middleware.rs)、[Outgoing](../crates/tok-grpc/src/outgoing.rs) 和 [便捷入口](../crates/tok-grpc/src/client.rs)：Call 只带目标、序号、请求和 Span，Layer 根据 Client timeout / metadata 新建本地截止点，Outgoing 没有 execution Context | 在本地出站处理链承接 Request<T> / Context，保留适用扩展和取消，并以已有截止点和客户端配置共同限制预算。保留目标独立于 Context.service；根调用须显式建立范围，便捷入口不能要求调用方拆散后再拼接上游 Context。现有外层 execution Layer 可约束本地结果，但不能让被丢弃的扩展重新可见，也不能保证远端取得上游剩余预算 |
+| 2 | [游戏 RPC 编码](../crates/tok-message/src/rpc/call.rs)、[普通业务客户端](../crates/tok-message/src/rpc/business.rs)、[玩家客户端](../crates/tok-message/src/rpc/player.rs)：只接收协议 CallContext / payload，自建发送 Span；[RpcExecutor](../crates/tok-gateway/src/player/executor.rs) 取 request.input 后不传 request.context | 游戏客户端承接执行请求，在编码正文时保留本地 Context，并交给通用 gRPC 出站适配。CallContext 继续表达远端目标、玩家与协议关联，不代替执行 Context。请求、事件、timer 三条 RpcExecutor 路径均需迁移，避免只修普通 call |
+| 3 | [玩家准入链](../crates/tok-gateway/src/player/pipeline.rs) 的 admission 输出仅 LogicalMessage；[BoundSession::submit](../crates/tok-gateway/src/player/session/handle.rs) 准入后只将正文入队；[RequestJob / worker](../crates/tok-gateway/src/player/session/worker.rs) 出队后重建执行 Context | 准入中写入的自定义扩展无法进入请求执行链；队列没有携带截止点，执行预算从出队后重新开始。需要保留执行承载并明确准入与已接受工作的范围边界；保留断线后在途业务收束的既有语义，不能直接将连接取消令牌替换为所有阶段共同取消令牌。即使声明准入与执行为独立范围，也须明确扩展转移及预算起点，不能静默丢弃 |
+| 4 | [事件转发/通知组件](../crates/tok-gateway/src/player/events.rs) 调 deliver 时只传 Delivery；[SessionManager::deliver](../crates/tok-gateway/src/player/session/events.rs) 不接收 Context；EventJob 只保留事件与当前 Span；[下行入口](../crates/tok-gateway/src/player/session/handle.rs) 每次新建 Context | 事件中间件写入的本地扩展与消费期限无法接续到投递/下行；异步玩家事件执行只继承部分追踪。应将投递与下行适配接入共同执行承载，区分当前订阅者等待的准入范围与成功入队后的独立 session 工作。跨 session fan-out 由目标安装自身能力并显式筛选源元信息，不复制源 SessionHandle；补发仍不重复执行新下行中间件 |
+| 5 | [GatewayRpcService](../crates/tok-gateway/src/rpc.rs) 四个交接方法直接 into_inner，再调用 SessionManager；[交接协调](../crates/tok-gateway/src/player/session/handoff.rs) 直接使用生成的 GatewayRpcClient 与 timeout_at | 内部交接服务未通过 Server::context / 共同执行链，接收端丢弃 metadata，出站与接收入口缺少一致的本地能力、追踪和预算适配。现有 budget_ms、handoff deadline、租约和补偿状态机必须保留；接入 Context 后合并限制，不能将已有取消/完成补偿简单绑定到已失效的原调用 |
+| 6 | [NATS 发布](../crates/tok-events/src/nats.rs) publish / publish_event 接收 Message / Envelope，调用方通过正文追踪载体传递信息，没有接收执行 Context 的框架发布适配 | 原生传输出口可保留；需要为当前处理链内的发布提供显式、保持 Context 的适配，约束本地发布等待和追踪提取。不能因此将 Extensions 序列化，或让独立订阅消费继承发布者的短期调用期限；Core NATS 发布成功仍不是 broker / 订阅者确认 |
+
+### 已符合或不应机械迁移的部分
+
+- [Context::child](../crates/tok-execution/src/context.rs) 保留当前服务、原截止点、父子取消关系、Span 与扩展；[通用分发表](../crates/tok-execution/src/registry.rs)、[protobuf 适配](../crates/tok-protobuf/src/lib.rs)、[游戏处理适配](../crates/tok-message/src/rpc/handler.rs) 转换输入时移交原 context。无需因文件拆分重建另一套上下文。
+- [本地事件 Registry](../crates/tok-events/src/registry.rs) 从父范围派生事件操作，保留自定义扩展，显式覆盖事件头并清除不适用于新事件的原编码；这是有意的扩展作用域处理，不是任意丢失。
+- [普通 RPC 接收端](../crates/tok-message/src/rpc/service.rs) 经 Server::context 重建本地范围，注入本地能力和可信协议关联，再进入共同执行链。远端重建本身符合规范，不要求恢复源进程的 Extensions。
+- [NATS 消费](../crates/tok-events/src/nats.rs) 使用订阅服务身份、消费预算、停止信号与 [Subscriber 本地扩展](../crates/tok-events/src/subscriber.rs) 建立独立执行范围，随后提交 Request。无需复制发布者的本地能力或执行期限。
+- timer 触发、独立生命周期通知和新登录初始化建立新范围有合理职责；应明确入口语义，而不是把所有 Context::new 都替换为 child。SessionManager / SessionHandle 的目标本地能力注入应保留。
+- Extensions、生命周期初始化容器、发现/路由/锁/所有权后端、编解码和底层 Channel 不是业务处理链承载，无需机械增加 Request 参数。scene 仍是预留实现，不计为已完成的执行适配。
+
+本次审查的判断是：共同处理核心已有承载能力，主要缺口在适配、排队与独立范围的衔接。不能以“最外层已有超时”认定内部 Context 已连续，也不应为统一而传播全部源能力、改写交接状态机或增加事件确认与重试语义。

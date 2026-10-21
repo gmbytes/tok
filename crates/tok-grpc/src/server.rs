@@ -1,10 +1,13 @@
-//! 任意 RPC 协议适配器共用的执行期限、追踪与处理链。
+//! 服务端 metadata 到执行上下文的边界转换及标准 Tower 执行链。
+//! Server 负责配置与 context，Layer / Service 负责执行和结果映射。
+mod middleware;
+pub use middleware::{Layer, ResponseFuture, Service};
 use std::time::Duration;
 use tok_core::{Extensions, Identity};
-use tok_execution::{Context, Request, StopReason};
+use tok_execution::{Context, Request};
 use tokio_util::sync::CancellationToken;
 use tonic::{Status, metadata::MetadataMap};
-use tower::{Layer as _, Service, ServiceExt};
+use tower::{Layer as _, ServiceExt};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 /// 与协议正文无关的服务端执行入口；协议适配器负责解码、认证与路由。
@@ -74,32 +77,18 @@ impl Server {
         *context.extensions_mut() = self.extensions.clone();
         Ok(context)
     }
+    /// 构造标准 Tower 执行 Layer，复用本入口的服务身份校验和共同执行约束。
+    pub fn layer(&self) -> Layer {
+        Layer::new(self)
+    }
+
     /// 执行任意类型化协议入口，包含就绪等待、取消、期限和指标；不隐式入队或重试。
     ///
     /// 请求上下文应由本入口的 context 建立或从中派生；此方法保留其原期限与停止信号。
     pub async fn execute<T, R, S>(&self, request: Request<T>, service: S) -> Result<R, Status>
     where
-        S: Service<Request<T>, Response = R, Error = Status> + Clone,
+        S: tower::Service<Request<T>, Response = R, Error = Status> + Clone,
     {
-        if request.context.service() != &self.identity {
-            return Err(Status::failed_precondition("RPC 执行服务与入口不匹配"));
-        }
-        let started = std::time::Instant::now();
-        let result = tok_execution::Layer
-            .layer(service)
-            .oneshot(request)
-            .await
-            .map_err(|error| match error {
-                tok_execution::Error::Inner(error) => error,
-                tok_execution::Error::Stopped(StopReason::Cancelled) => {
-                    Status::cancelled("调用已取消")
-                }
-                tok_execution::Error::Stopped(StopReason::DeadlineExceeded) => {
-                    Status::deadline_exceeded("调用预算已耗尽")
-                }
-            });
-        metrics::histogram!("tok_grpc_server_duration_seconds", "service_name"=>self.identity.service_name.clone()).record(started.elapsed().as_secs_f64());
-        metrics::counter!("tok_grpc_server_calls_total", "service_name"=>self.identity.service_name.clone(), "result"=>if result.is_ok(){"ok"}else{"error"}).increment(1);
-        result
+        self.layer().layer(service).oneshot(request).await
     }
 }
