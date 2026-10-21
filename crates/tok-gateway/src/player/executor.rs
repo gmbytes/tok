@@ -3,13 +3,13 @@
 use crate::{ErrorCode, Result};
 use std::{future::Future, pin::Pin, sync::Arc};
 use tok_core::{ServiceRouter, TimerTrigger};
-use tok_player::{LogicalMessage, MessageKind, SessionIdentity, TimerSpec, TimerUpdate};
-use tok_rpc::CallContext;
-use tok_rpc::{
+use tok_game_rpc::CallContext;
+use tok_game_rpc::{
     player::Client,
     protocol::internal::v1::Payload,
     tonic::{Code, Status},
 };
+use tok_player::{LogicalMessage, MessageKind, SessionIdentity, TimerSpec, TimerUpdate};
 
 /// 单次玩家调用的结果，受 session 的调用期限控制。
 pub type Task<'a> = Pin<Box<dyn Future<Output = Result<Reply>> + Send + 'a>>;
@@ -160,7 +160,7 @@ impl Executor for RpcExecutor {
                 .map_err(|status| self.mapper.map(&status))?;
             let timers = response
                 .timers
-                .map(tok_rpc::timer::decode_update)
+                .map(tok_game_rpc::timer::decode_update)
                 .transpose()
                 .map_err(|_| ErrorCode::Internal)?;
             if let Some(error) = response.error {
@@ -229,7 +229,7 @@ impl RpcExecutor {
                 .map_err(|status| self.mapper.map(&status))?;
             let timers = response
                 .timers
-                .map(tok_rpc::timer::decode_update)
+                .map(tok_game_rpc::timer::decode_update)
                 .transpose()
                 .map_err(|_| ErrorCode::Internal)?;
             if let Some(error) = response.error {

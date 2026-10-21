@@ -9,12 +9,12 @@ use std::{
     time::Duration,
 };
 use tok_core::ServiceDescriptor;
+use tok_game_rpc::CallContext;
+use tok_game_rpc::{CallTask, Handler, HandlerRegistry, RpcClients, RpcEndpoint, RpcService};
 use tok_player::SessionIdentity;
 use tok_proto::internal::v1::{
     CallRequest, CallResponse, Payload, player_rpc_client::PlayerRpcClient,
 };
-use tok_rpc::CallContext;
-use tok_rpc::{CallHandler, CallTask, HandlerRegistry, RpcClients, RpcEndpoint, RpcService};
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 use tonic::Code;
@@ -88,8 +88,8 @@ async fn shared_endpoint_dispatches_and_rejects_unready_malformed_and_wrong_targ
     let shutdown = CancellationToken::new();
     let server = tokio::spawn(endpoint.serve(listener, shutdown.clone()).unwrap());
     let clients = Arc::new(RpcClients::new(Duration::from_secs(2), 1).unwrap());
-    let player_client = tok_rpc::player::Client::new(Arc::clone(&clients));
-    let business_client = tok_rpc::business::Client::new(Arc::clone(&clients));
+    let player_client = tok_game_rpc::player::Client::new(Arc::clone(&clients));
+    let business_client = tok_game_rpc::business::Client::new(Arc::clone(&clients));
     let player = target(address, "player");
     let guild = target(address, "guild");
     assert_eq!(
@@ -186,7 +186,7 @@ async fn shared_endpoint_dispatches_and_rejects_unready_malformed_and_wrong_targ
 struct Slow {
     calls: Arc<AtomicUsize>,
 }
-impl CallHandler for Slow {
+impl Handler for Slow {
     fn call(&self, request: tok_service::Request<(CallContext, Payload)>) -> CallTask<'_> {
         let context = request.input.0;
         Box::pin(async move {
@@ -226,7 +226,7 @@ async fn timeout_does_not_retry_business_execution() {
     let server = tokio::spawn(endpoint.serve(listener, shutdown.clone()).unwrap());
     let target = target(address, "guild");
     let clients = Arc::new(RpcClients::new(Duration::from_millis(150), 1).unwrap());
-    let business_client = tok_rpc::business::Client::new(Arc::clone(&clients));
+    let business_client = tok_game_rpc::business::Client::new(Arc::clone(&clients));
     let error = business_client
         .call(&target, context(&target), payload(1))
         .await
@@ -273,9 +273,9 @@ async fn user_tower_concurrency_limit_is_preserved_across_handler_clones() {
     let active = Arc::new(AtomicUsize::new(0));
     let peak = Arc::new(AtomicUsize::new(0));
     let tracked_peak = Arc::clone(&peak);
-    let service = tok_rpc::tower::ServiceBuilder::new()
+    let service = tok_game_rpc::tower::ServiceBuilder::new()
         .concurrency_limit(1)
-        .service(tok_rpc::tower::service_fn(
+        .service(tok_game_rpc::tower::service_fn(
             move |request: tok_service::Request<(CallContext, Payload)>| {
                 let (context, payload) = request.input;
                 let active = Arc::clone(&active);
@@ -299,16 +299,20 @@ async fn user_tower_concurrency_limit_is_preserved_across_handler_clones() {
     let endpoint = RpcEndpoint::new()
         .add_service(
             "guild",
-            RpcService::new("local", "guild", Arc::new(tok_rpc::TowerHandler(service)))
-                .unwrap()
-                .into_business(),
+            RpcService::new(
+                "local",
+                "guild",
+                Arc::new(tok_game_rpc::TowerHandler(service)),
+            )
+            .unwrap()
+            .into_business(),
         )
         .unwrap();
     endpoint.readiness().set("guild", true);
     let shutdown = CancellationToken::new();
     let server = tokio::spawn(endpoint.serve(listener, shutdown.clone()).unwrap());
     let clients = Arc::new(RpcClients::new(Duration::from_secs(2), 1).unwrap());
-    let business_client = tok_rpc::business::Client::new(Arc::clone(&clients));
+    let business_client = tok_game_rpc::business::Client::new(Arc::clone(&clients));
     let target = target(address, "guild");
     let (first, second) = tokio::join!(
         business_client.call(&target, context(&target), payload(1)),

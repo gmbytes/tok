@@ -10,20 +10,20 @@ use std::{
     time::Duration,
 };
 use tok_core::ServiceDescriptor;
+use tok_game_rpc::CallContext;
+use tok_game_rpc::{CallTask, Handler, RpcClients, RpcEndpoint, RpcService};
 use tok_proto::internal::v1::{CallResponse, Payload};
-use tok_rpc::CallContext;
-use tok_rpc::{CallHandler, CallTask, RpcClients, RpcEndpoint, RpcService};
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 use tracing_subscriber::layer::SubscriberExt;
 
 struct Capture(Arc<Mutex<Option<opentelemetry::trace::TraceId>>>);
-impl CallHandler for Capture {
+impl Handler for Capture {
     fn event(
         &self,
         request: tok_service::Request<(CallContext, Arc<tok_events::Message>)>,
-    ) -> tok_rpc::EventTask<'_> {
+    ) -> tok_game_rpc::EventTask<'_> {
         let context = request.input.0;
         Box::pin(async move {
             *self.0.lock().unwrap() = Some(
@@ -98,7 +98,7 @@ async fn trace_context_is_propagated_across_the_network_call() {
         let root = tracing::info_span!("client_root");
         root.set_parent(context.clone()).unwrap();
         let clients = Arc::new(RpcClients::new(Duration::from_secs(2), 1).unwrap());
-        let business_client = tok_rpc::business::Client::new(Arc::clone(&clients));
+        let business_client = tok_game_rpc::business::Client::new(Arc::clone(&clients));
         let target = ServiceDescriptor {
             node_id: "local".into(),
             service_name: "guild".into(),
@@ -152,7 +152,7 @@ async fn trace_context_is_propagated_across_the_network_call() {
     };
     use tracing::Instrument;
     let clients = Arc::new(RpcClients::new(Duration::from_secs(2), 1).unwrap());
-    let player_client = tok_rpc::player::Client::new(Arc::clone(&clients));
+    let player_client = tok_game_rpc::player::Client::new(Arc::clone(&clients));
     player_client
         .handle_event(
             &target,

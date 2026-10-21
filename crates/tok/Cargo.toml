@@ -14,6 +14,7 @@ tok-events.workspace = true
 tok-gateway.workspace = true
 tok-infra.workspace = true
 tok-rpc.workspace = true
+tok-game-rpc.workspace = true
 tok-observability.workspace = true
 tracing.workspace = true
 metrics.workspace = true

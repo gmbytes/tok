@@ -39,19 +39,21 @@ flowchart TD
     player[tok-player] --> core
     events[tok-events] --> service
     rpc[tok-rpc] --> service
-    rpc --> player
+    game_rpc[tok-game-rpc] --> rpc
+    game_rpc --> player
+    game_rpc --> events
     gateway[tok-gateway] --> service
     gateway --> player
-    gateway --> rpc
+    gateway --> game_rpc
     infra[tok-infra] --> core
     infra --> player
 ```
 
 依赖方向为“门面/游戏组装 → 扩展与适配 → 共同设施 → 基础契约”。实际依赖允许按用途引用更下层组件，禁止形成循环或反向依赖具体游戏。P1 最初将上下文放在 tok-core；当前 Context / Source / StopReason 已归 tok-service，与类型化执行和 Layer 放在一起，Extensions 独立为 core 的基础容器；P2 已将公共工厂与生命周期沿这一落点下沉，P3 已将 RPC/事件及 RPC timer 路由接入共同处理链；P4 已接入 gateway/session 能力、状态工厂与业务消息 Layer。共同设施不能长期留在门面，再由 gateway 复制实现；也不为分层图预先增加空 crate。
 
-Gateway 复用构建、上下文、Layer、任务监督和退出设施；监听、session 调度、恢复与交接保留各自状态机，不强制合并成一个循环。通用设施不能到处判断 player/scene。tok-service 与 tok-events 不依赖 tok-player；RPC 和 gateway 按需消费玩家契约，tok-infra 提供相应后端。RPC 专用 CallContext 归 tok-rpc，不能因跨模块共享再放回 core。游戏自定义服务与内置 gateway 使用相同扩展契约。
+Gateway 复用构建、上下文、Layer、任务监督和退出设施；监听、session 调度、恢复与交接保留各自状态机，不强制合并成一个循环。通用设施不能到处判断 player/scene。tok-service 与 tok-events 不依赖 tok-player；tok-rpc 不依赖玩家、事件或游戏 protobuf；tok-game-rpc 和 gateway 按需消费玩家契约，tok-infra 提供相应后端。游戏协议 CallContext 归 tok-game-rpc，不能因跨模块共享再放回 core。游戏自定义服务与内置 gateway 使用相同扩展契约。
 
-Application / Gateway 已复用同一 Factory 与生命周期，RPC、事件及网关业务入口使用共同 Request / Tower 协议。协议适配仍保留 CallHandler、Executor 等不同输入与结果，不另建平行的执行或事件中间件系统；具体能力与未实现范围以实现状态为准。
+Application / Gateway 已复用同一 Factory 与生命周期，RPC、事件及网关业务入口使用共同 Request / Tower 协议。协议适配仍保留游戏协议 Handler、Executor 等不同输入与结果，不另建平行的执行或事件中间件系统；具体能力与未实现范围以实现状态为准。
 
 ## 公开 API 与内部模块
 
@@ -140,7 +142,7 @@ Kubernetes 配置可校验但后端未实现，部署目录尚无可运行清单
 
 ## 工程与可观测
 
-现有 workspace 包括 tok-core、tok-service、tok-player、tok-proto、tok-rpc、tok-events、tok-gateway、tok-infra、tok-observability 和 tok。游戏协议属于 demo/game；框架协议属于 tok-proto。protobuf 构建期生成到 Cargo OUT_DIR，不提交生成的 Rust 文件。
+现有 workspace 包括 tok-core、tok-service、tok-player、tok-proto、tok-rpc、tok-game-rpc、tok-events、tok-gateway、tok-infra、tok-observability 和 tok。游戏协议属于 demo/game；框架协议属于 tok-proto。protobuf 构建期生成到 Cargo OUT_DIR，不提交生成的 Rust 文件。
 
 游戏消息 ID 可由 proto 枚举在构建期按名字生成关联，运行时仍按数字分发，配对与权限显式注册。未发布 API/协议直接校正，不增加开发中间状态兼容别名；正式发布后的破坏性变更再按版本策略处理。
 
@@ -153,3 +155,9 @@ Kubernetes 配置可校验但后端未实现，部署目录尚无可运行清单
 本轮已沿七批计划完成统一执行、构建、生命周期、gateway 扩展和动态 topic，并收敛配置组装；验收结果与平台边界分别记录。JetStream、离线加载、通用跨节点去重、生产安全、Kubernetes、Redis Cluster、Scene、配置式中间件及无缝场景切换另行实施。
 
 Redis Cluster 缓存与 MongoDB 集群是存储选型方向，存储 API 由业务定义、实现独立；缓存失效、持久化时机、事务和版本检查尚未设计，不纳入本轮。跨实体一致性由业务处理，框架不扩展通用补偿事务。
+
+## 通用 RPC 与游戏协议适配
+
+tok-rpc 只提供 RpcClients、RpcEndpoint 和 Server；Server 接受任意类型化 Tower Service，客户端 execute 接入任意生成协议。它不依赖 tok-player、tok-events 或 tok-proto，不定义玩家事件方法。tok-game-rpc 基于这些设施提供游戏消息注册、CallContext、玩家身份校验、timer、事件转发及可选业务请求锁；通用任务、生命周期和处理链仍由 tok-service 提供。
+
+游戏协议可以有 Call 与 HandleEvent 等不同远程方法；方法数量不是分层依据。session 通过玩家客户端适配调用 HandleEvent，由玩家服务适配解码并进入事件 Registry 和同一 Tower 处理模型。事件由服务器驱动，客户端业务入口不能选择事件或 timer。独立游戏协议层的 Handler 是游戏分发契约，不是通用 RPC 必须实现的接口。tok 门面的 rpc / game_rpc 分别对应这两层，不保留旧游戏 API 路径。

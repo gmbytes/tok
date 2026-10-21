@@ -5,10 +5,9 @@ use tok_core::{TimerTrigger, service::Identity};
 use tok_player::{SessionIdentity, TimerUpdate};
 use tok_proto::internal::v1::{self as proto, CallRequest, CallResponse, Payload};
 use tok_service::Request as ExecutionRequest;
-use tok_service::{Context, Source, StopReason};
+use tok_service::{Source, StopReason};
 use tonic::{Request, Response, Status};
 use tower::{Layer as _, Service, ServiceExt};
-use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 /// RPC 边界处理结果；通用处理链保留各自业务错误，边界映射为 Status。
 pub type CallTask<'a> = Pin<Box<dyn Future<Output = Result<CallResponse, Status>> + Send + 'a>>;
@@ -16,8 +15,10 @@ pub type CallTask<'a> = Pin<Box<dyn Future<Output = Result<CallResponse, Status>
 pub type EventTask<'a> =
     Pin<Box<dyn Future<Output = Result<proto::EventResponse, Status>> + Send + 'a>>;
 
-/// RPC 接入适配；执行上下文由可信入口建立，消息和事件各自保持结果类型。
-pub trait CallHandler: Send + Sync {
+/// 游戏协议处理入口；请求、timer 与服务器事件保持各自语义和结果类型。
+///
+/// 这是上层游戏协议契约，不属于通用 RPC 设施。
+pub trait Handler: Send + Sync {
     /// 处理已校验的调用，不重置预算或自行入队。
     fn call(&self, request: ExecutionRequest<(CallContext, Payload)>) -> CallTask<'_>;
     /// 处理独立的服务器事件，不进入请求或 timer 分发表。
@@ -34,7 +35,7 @@ pub struct TowerHandler<S>(
     /// 克隆应共享所需并发或限流状态的 Service。
     pub S,
 );
-impl<S> CallHandler for TowerHandler<S>
+impl<S> Handler for TowerHandler<S>
 where
     S: Service<ExecutionRequest<(CallContext, Payload)>, Response = CallResponse, Error = Status>
         + Clone
@@ -272,7 +273,7 @@ impl HandlerRegistry {
         Ok(())
     }
 }
-impl CallHandler for HandlerRegistry {
+impl Handler for HandlerRegistry {
     fn event(
         &self,
         request: ExecutionRequest<(CallContext, Arc<tok_events::Message>)>,
@@ -388,15 +389,13 @@ fn merge_timers(effects: Vec<Option<TimerUpdate>>) -> Option<TimerUpdate> {
     result
 }
 
-/// 绑定到一个节点业务服务的通用 gRPC 适配。业务名不从 proto 名称推导。
+/// 游戏消息与玩家执行协议的 gRPC 适配；通用执行由 tok_rpc::Server 承担。
 #[derive(Clone)]
 pub struct RpcService {
     node_id: String,
     service_name: String,
-    handler: Arc<dyn CallHandler>,
-    budget: Duration,
-    cancellation: tokio_util::sync::CancellationToken,
-    extensions: tok_core::Extensions,
+    handler: Arc<dyn Handler>,
+    server: tok_rpc::Server,
 }
 
 impl RpcService {
@@ -404,7 +403,7 @@ impl RpcService {
     pub fn new(
         node_id: impl Into<String>,
         service_name: impl Into<String>,
-        handler: Arc<dyn CallHandler>,
+        handler: Arc<dyn Handler>,
     ) -> Result<Self, crate::Error> {
         let node_id = node_id.into();
         let service_name = service_name.into();
@@ -412,12 +411,13 @@ impl RpcService {
             return Err(crate::Error::Configuration("RPC 服务身份不能为空".into()));
         }
         Ok(Self {
-            node_id,
-            service_name,
+            node_id: node_id.clone(),
+            service_name: service_name.clone(),
             handler,
-            budget: Duration::from_secs(30),
-            cancellation: tokio_util::sync::CancellationToken::new(),
-            extensions: tok_core::Extensions::default(),
+            server: tok_rpc::Server::new(Identity {
+                node_id: node_id.clone(),
+                service_name: service_name.clone(),
+            })?,
         })
     }
 
@@ -445,37 +445,10 @@ impl RpcService {
         cancellation: tokio_util::sync::CancellationToken,
         extensions: tok_core::Extensions,
     ) -> Result<Self, crate::Error> {
-        if budget.is_zero() || budget > Duration::from_secs(86_400) {
-            return Err(crate::Error::Configuration(
-                "RPC 执行预算须大于零且不超过一天".into(),
-            ));
-        }
-        self.budget = budget;
-        self.cancellation = cancellation;
-        self.extensions = extensions;
+        self.server = self
+            .server
+            .with_execution(budget, cancellation, extensions)?;
         Ok(self)
-    }
-    fn execution(
-        &self,
-        call: &CallContext,
-        source: Source,
-        budget: Duration,
-        operation: String,
-    ) -> Result<Context, Status> {
-        let mut context = Context::new(
-            Identity {
-                node_id: self.node_id.clone(),
-                service_name: self.service_name.clone(),
-            },
-            operation,
-            source,
-            budget,
-            self.cancellation.child_token(),
-        )
-        .map_err(|_| Status::invalid_argument("调用执行上下文无效"))?;
-        *context.extensions_mut() = self.extensions.clone();
-        context.extensions_mut().insert(call.clone());
-        Ok(context)
     }
     /// 转换为 player 入口，要求调用上下文携带与 bid 匹配的会话身份。
     pub fn into_player(self) -> proto::player_rpc_server::PlayerRpcServer<Self> {
@@ -543,42 +516,12 @@ impl RpcService {
         })
     }
 
-    async fn execute<T, R, S>(
-        &self,
-        parent: opentelemetry::Context,
-        request_id: u64,
-        bid: Option<String>,
-        mut request: ExecutionRequest<T>,
-        service: S,
-    ) -> Result<R, Status>
-    where
-        S: Service<ExecutionRequest<T>, Response = R, Error = Status> + Clone,
-    {
-        let span = tracing::info_span!("rpc_server",node_id=%self.node_id,service_name=%self.service_name,request_id,bid=?bid);
-        #[expect(
-            clippy::let_underscore_must_use,
-            reason = "追踪关联失败不能中断有效业务调用。"
-        )]
-        let _ = span.set_parent(parent);
-        request.context = request.context.with_span(span);
-        let started = std::time::Instant::now();
-        let result = tok_service::Layer
-            .layer(service)
-            .oneshot(request)
-            .await
-            .map_err(execution_status);
-        metrics::histogram!("tok_rpc_server_duration_seconds","service_name"=>self.service_name.clone()).record(started.elapsed().as_secs_f64());
-        metrics::counter!("tok_rpc_server_calls_total","service_name"=>self.service_name.clone(),"result"=>if result.is_ok(){"ok"}else{"error"}).increment(1);
-        result
-    }
-
     async fn invoke(
         &self,
         request: Request<CallRequest>,
         player: bool,
     ) -> Result<Response<CallResponse>, Status> {
-        let parent = crate::propagation::extract(request.metadata());
-        let budget = request_budget(request.metadata(), self.budget)?;
+        let metadata = request.metadata().clone();
         let request = request.into_inner();
         let context = self.context(request.context, request.timer, player)?;
         let payload = request
@@ -601,13 +544,12 @@ impl RpcService {
             },
             payload.message_id
         );
-        let execution = self.execution(&context, source, budget, operation)?;
+        let mut execution = self.server.context(&metadata, source, operation)?;
+        execution.extensions_mut().insert(context.clone());
         let handler = Arc::clone(&self.handler);
         let mut response = self
+            .server
             .execute(
-                parent,
-                request_id,
-                context.bid.clone(),
                 ExecutionRequest::new(execution, (context, payload)),
                 tower::service_fn(move |request| {
                     let handler = Arc::clone(&handler);
@@ -626,8 +568,7 @@ impl proto::player_rpc_server::PlayerRpc for RpcService {
         &self,
         request: Request<proto::EventRequest>,
     ) -> Result<Response<proto::EventResponse>, Status> {
-        let parent = crate::propagation::extract(request.metadata());
-        let budget = request_budget(request.metadata(), self.budget)?;
+        let metadata = request.metadata().clone();
         let request = request.into_inner();
         let context = self.context(request.context, None, true)?;
         let event = tok_events::Message {
@@ -648,20 +589,18 @@ impl proto::player_rpc_server::PlayerRpc for RpcService {
             .validate(1_048_576)
             .map_err(|_| Status::invalid_argument("事件参数无效"))?;
         let request_id = context.request_id;
-        let execution = self.execution(
-            &context,
+        let mut execution = self.server.context(
+            &metadata,
             Source::Event {
                 event_id: event.event_id.to_string(),
             },
-            budget,
             format!("event/{}", event.event_type),
         )?;
+        execution.extensions_mut().insert(context.clone());
         let handler = Arc::clone(&self.handler);
         let mut response = self
+            .server
             .execute(
-                parent,
-                request_id,
-                context.bid.clone(),
                 ExecutionRequest::new(execution, (context, Arc::new(event))),
                 tower::service_fn(move |request| {
                     let handler = Arc::clone(&handler);
@@ -682,36 +621,4 @@ impl proto::business_rpc_server::BusinessRpc for RpcService {
     async fn call(&self, request: Request<CallRequest>) -> Result<Response<CallResponse>, Status> {
         self.invoke(request, false).await
     }
-}
-
-fn request_budget(
-    metadata: &tonic::metadata::MetadataMap,
-    limit: Duration,
-) -> Result<Duration, Status> {
-    let Some(value) = metadata.get("grpc-timeout") else {
-        return Ok(limit);
-    };
-    let value = value
-        .to_str()
-        .map_err(|_| Status::invalid_argument("RPC 超时格式无效"))?;
-    if !(2..=9).contains(&value.len()) {
-        return Err(Status::invalid_argument("RPC 超时格式无效"));
-    }
-    let (digits, unit) = value.split_at(value.len() - 1);
-    if !digits.bytes().all(|b| b.is_ascii_digit()) {
-        return Err(Status::invalid_argument("RPC 超时格式无效"));
-    }
-    let count = digits
-        .parse::<u64>()
-        .map_err(|_| Status::invalid_argument("RPC 超时格式无效"))?;
-    let duration = match unit {
-        "H" => Duration::from_secs(count * 3600),
-        "M" => Duration::from_secs(count * 60),
-        "S" => Duration::from_secs(count),
-        "m" => Duration::from_millis(count),
-        "u" => Duration::from_micros(count),
-        "n" => Duration::from_nanos(count),
-        _ => return Err(Status::invalid_argument("RPC 超时单位无效")),
-    };
-    Ok(duration.min(limit))
 }

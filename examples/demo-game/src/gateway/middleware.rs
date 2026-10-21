@@ -5,8 +5,8 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
     task::{Context, Poll},
 };
+use tok::game_rpc::tower::{Layer, Service, ServiceExt};
 use tok::observability::tracing;
-use tok::rpc::tower::{Layer, Service, ServiceExt};
 use tok::{
     core::Extensions,
     gateway::{

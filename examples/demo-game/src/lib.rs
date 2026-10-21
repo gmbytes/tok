@@ -16,9 +16,9 @@ use tok::{
     AppConfig,
     application::Application,
     core::ServiceDirectory,
+    game_rpc::{CallContext, RpcClients, RpcService, protocol::internal::v1::Payload},
     observability::Error,
     player::SessionIdentity,
-    rpc::{CallContext, RpcClients, RpcService, protocol::internal::v1::Payload},
     service::{
         lifecycle::{Init, InitFuture},
         task::Task,
@@ -154,7 +154,7 @@ pub fn application_with_locks(
                     Arc::clone(&endpoints.directory),
                 )?;
                 init.extensions
-                    .get::<tok::rpc::Binding>()
+                    .get::<tok::game_rpc::Binding>()
                     .ok_or_else(|| std::io::Error::other("服务缺少 RPC 绑定"))?
                     .install(&init, Arc::new(handlers))?;
                 Ok(Box::pin(async move {
@@ -172,7 +172,7 @@ pub fn application_with_locks(
             Box::pin(async move {
                 let handlers = guild::locked_handler(&init.identity.service_name, locks)?;
                 init.extensions
-                    .get::<tok::rpc::Binding>()
+                    .get::<tok::game_rpc::Binding>()
                     .ok_or_else(|| std::io::Error::other("服务缺少 RPC 绑定"))?
                     .install(&init, handlers)?;
                 Ok(Box::pin(async move {
@@ -191,8 +191,8 @@ pub async fn rpc_smoke(directory: &dyn ServiceDirectory) -> Result<(), Error> {
     let player = tok::infra::routing::route(directory, "player", "42")?;
     let guild = tok::infra::routing::route(directory, "guild", "7")?;
     let clients = Arc::new(RpcClients::new(Duration::from_secs(2), 8)?);
-    let player_client = tok::rpc::player::Client::new(Arc::clone(&clients));
-    let business_client = tok::rpc::business::Client::new(clients);
+    let player_client = tok::game_rpc::player::Client::new(Arc::clone(&clients));
+    let business_client = tok::game_rpc::business::Client::new(clients);
     let response = player_client
         .call(
             &player,

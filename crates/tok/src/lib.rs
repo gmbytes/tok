@@ -7,6 +7,8 @@ pub mod config;
 pub use config::{AppConfig, DiscoveryBackend, EndpointConfig, OwnershipBackend, ServiceConfig};
 pub use tok_core as core;
 pub use tok_events as events;
+/// 游戏消息与玩家执行协议的 RPC 适配。
+pub use tok_game_rpc as game_rpc;
 pub use tok_gateway as gateway;
 pub use tok_infra as infra;
 pub use tok_observability as observability;

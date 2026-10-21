@@ -5,13 +5,13 @@ use std::{
     time::Duration,
 };
 use tok_core::ServiceDescriptor;
+use tok_game_rpc::CallContext;
+use tok_game_rpc::{RpcClients, RpcEndpoint};
 use tok_proto::internal::v1::{
     CallRequest, CallResponse, Payload,
     business_rpc_server::{BusinessRpc, BusinessRpcServer},
     player_rpc_server::{PlayerRpc, PlayerRpcServer},
 };
-use tok_rpc::CallContext;
-use tok_rpc::{RpcClients, RpcEndpoint};
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 use tonic::{Request, Response, Status};
@@ -34,8 +34,8 @@ impl Probe {
 impl PlayerRpc for Probe {
     async fn handle_event(
         &self,
-        _: Request<tok_rpc::protocol::internal::v1::EventRequest>,
-    ) -> Result<Response<tok_rpc::protocol::internal::v1::EventResponse>, Status> {
+        _: Request<tok_game_rpc::protocol::internal::v1::EventRequest>,
+    ) -> Result<Response<tok_game_rpc::protocol::internal::v1::EventResponse>, Status> {
         Err(Status::unimplemented("此连接探针不处理事件"))
     }
 
@@ -65,8 +65,8 @@ async fn two_services_on_one_endpoint_share_a_tcp_connection() {
     let shutdown = CancellationToken::new();
     let server = tokio::spawn(endpoint.serve(listener, shutdown.clone()).unwrap());
     let clients = Arc::new(RpcClients::new(Duration::from_secs(2), 1).unwrap());
-    let player_client = tok_rpc::player::Client::new(Arc::clone(&clients));
-    let business_client = tok_rpc::business::Client::new(Arc::clone(&clients));
+    let player_client = tok_game_rpc::player::Client::new(Arc::clone(&clients));
+    let business_client = tok_game_rpc::business::Client::new(Arc::clone(&clients));
     for (name, player) in [("player", true), ("guild", false)] {
         let target = ServiceDescriptor {
             node_id: "local".into(),

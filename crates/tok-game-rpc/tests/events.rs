@@ -8,11 +8,11 @@ use std::{
 };
 use tok_core::ServiceDescriptor;
 use tok_events::{Event, EventId};
-use tok_player::{SessionIdentity, TimerUpdate};
-use tok_rpc::CallContext;
-use tok_rpc::{
+use tok_game_rpc::CallContext;
+use tok_game_rpc::{
     HandlerRegistry, RpcClients, RpcEndpoint, RpcService, protocol::internal::v1::Payload,
 };
+use tok_player::{SessionIdentity, TimerUpdate};
 use tokio_util::sync::CancellationToken;
 #[derive(Clone, PartialEq, prost::Message)]
 struct Update {
@@ -64,7 +64,7 @@ async fn event_handlers_are_inaccessible_to_requests_and_timers_and_require_sess
     let stop = CancellationToken::new();
     let server = tokio::spawn(endpoint.serve(listener, stop.clone()).unwrap());
     let clients = Arc::new(RpcClients::new(Duration::from_secs(2), 2).unwrap());
-    let player_client = tok_rpc::player::Client::new(Arc::clone(&clients));
+    let player_client = tok_game_rpc::player::Client::new(Arc::clone(&clients));
     let target = ServiceDescriptor {
         node_id: "node".into(),
         service_name: "player".into(),
@@ -164,7 +164,7 @@ async fn event_handlers_are_inaccessible_to_requests_and_timers_and_require_sess
         .unwrap();
     assert_eq!(response.request_id, 1);
     assert!(
-        matches!(tok_rpc::timer::decode_update(response.timers.unwrap()).unwrap(),TimerUpdate::ReplaceAll(timers) if timers.is_empty())
+        matches!(tok_game_rpc::timer::decode_update(response.timers.unwrap()).unwrap(),TimerUpdate::ReplaceAll(timers) if timers.is_empty())
     );
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     stop.cancel();
@@ -252,14 +252,14 @@ async fn ordered_event_handlers_compose_timer_effects_without_client_payloads() 
             session: None,
             timer: None,
         };
-        let response = tok_rpc::CallHandler::event(
+        let response = tok_game_rpc::Handler::event(
             &registry,
             tok_service::Request::new(execution, (call, event)),
         )
         .await
         .unwrap();
         assert_eq!(
-            tok_rpc::timer::decode_update(response.timers.unwrap()).unwrap(),
+            tok_game_rpc::timer::decode_update(response.timers.unwrap()).unwrap(),
             expected
         );
     }

@@ -1976,6 +1976,7 @@ dependencies = [
  "thiserror",
  "tok-core",
  "tok-events",
+ "tok-game-rpc",
  "tok-gateway",
  "tok-infra",
  "tok-observability",
@@ -2020,6 +2021,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "tok-game-rpc"
+version = "0.1.0"
+dependencies = [
+ "opentelemetry",
+ "opentelemetry_sdk",
+ "prost",
+ "tok-core",
+ "tok-events",
+ "tok-infra",
+ "tok-player",
+ "tok-proto",
+ "tok-rpc",
+ "tok-service",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "tonic",
+ "tower",
+ "tracing",
+ "tracing-opentelemetry",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "tok-gateway"
 version = "0.1.0"
 dependencies = [
@@ -2033,9 +2058,9 @@ dependencies = [
  "thiserror",
  "tok-core",
  "tok-events",
+ "tok-game-rpc",
  "tok-infra",
  "tok-player",
- "tok-rpc",
  "tok-service",
  "tokio",
  "tokio-util",
@@ -2107,14 +2132,8 @@ version = "0.1.0"
 dependencies = [
  "metrics",
  "opentelemetry",
- "opentelemetry_sdk",
- "prost",
  "thiserror",
  "tok-core",
- "tok-events",
- "tok-infra",
- "tok-player",
- "tok-proto",
  "tok-service",
  "tokio",
  "tokio-stream",
@@ -2123,7 +2142,6 @@ dependencies = [
  "tower",
  "tracing",
  "tracing-opentelemetry",
- "tracing-subscriber",
 ]
 
 [[package]]

@@ -8,12 +8,12 @@ use std::{
 };
 use tok_core::BoxFuture;
 use tok_core::lock::{Backend as LockBackend, Key as LockKey, Lease as LockLease};
-use tok_proto::internal::v1::{CallResponse, Payload};
-use tok_rpc::CallContext;
-use tok_rpc::{
+use tok_game_rpc::CallContext;
+use tok_game_rpc::{
     lock::{Config, Layer},
     tower::{self, Layer as _, ServiceExt},
 };
+use tok_proto::internal::v1::{CallResponse, Payload};
 use tonic::{Code, Status};
 
 fn context() -> CallContext {
@@ -285,7 +285,7 @@ fn invalid_budgets_are_rejected_before_backend_access() {
 async fn business_rpc_on_two_nodes_shares_locks_after_target_validation() {
     use std::{collections::BTreeMap, sync::Mutex};
     use tok_core::ServiceDescriptor;
-    use tok_rpc::{RpcClients, RpcEndpoint, RpcService, TowerHandler};
+    use tok_game_rpc::{RpcClients, RpcEndpoint, RpcService, TowerHandler};
     use tokio::net::TcpListener;
     use tokio_util::sync::CancellationToken;
 
@@ -357,7 +357,7 @@ async fn business_rpc_on_two_nodes_shares_locks_after_target_validation() {
         nodes.push(target);
     }
     let clients = Arc::new(RpcClients::new(Duration::from_secs(2), 4).unwrap());
-    let business_client = tok_rpc::business::Client::new(Arc::clone(&clients));
+    let business_client = tok_game_rpc::business::Client::new(Arc::clone(&clients));
     let context_for = |node: &ServiceDescriptor, bid: &str| CallContext {
         node_id: node.node_id.clone(),
         bid: Some(bid.into()),
@@ -441,7 +441,7 @@ struct NeverReady;
 impl tower::Service<tok_service::Request<(CallContext, Payload)>> for NeverReady {
     type Response = CallResponse;
     type Error = Status;
-    type Future = tok_rpc::CallTask<'static>;
+    type Future = tok_game_rpc::CallTask<'static>;
     fn poll_ready(
         &mut self,
         _: &mut std::task::Context<'_>,

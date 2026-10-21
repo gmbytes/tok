@@ -15,13 +15,13 @@ use std::{
     sync::{Arc, Mutex, atomic::AtomicBool},
     time::Duration,
 };
+use tok_game_rpc::{
+    protocol::internal::v1 as proto,
+    tonic::{self, Status},
+};
 use tok_player::{
     SessionIdentity,
     ownership::{Owner as SessionOwner, Record as SessionOwnership},
-};
-use tok_rpc::{
-    protocol::internal::v1 as proto,
-    tonic::{self, Status},
 };
 use tokio::sync::{Notify, mpsc, oneshot};
 use tokio::{

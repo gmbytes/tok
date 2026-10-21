@@ -1,9 +1,11 @@
+use std::future::Future;
 use std::{collections::BTreeMap, sync::Mutex, time::Duration};
 use tok_core::ServiceDescriptor;
 use tonic::{
-    Status,
+    Request, Response, Status,
     transport::{Channel, Endpoint},
 };
+use tracing::Instrument;
 
 /// 通用的有界内部 RPC Channel 缓存及传输配置，不包含具体协议调用。
 ///
@@ -70,5 +72,35 @@ impl RpcClients {
     /// 默认调用期限；协议适配器据此设置请求 deadline 和本地等待上限。
     pub fn timeout(&self) -> Duration {
         self.timeout
+    }
+}
+
+impl RpcClients {
+    /// 执行任意生成协议的单次调用，传播追踪、设置有限期限并记录指标；不自动重试。
+    pub async fn execute<Req, Res, F, Fut>(
+        &self,
+        target: &ServiceDescriptor,
+        request_id: u64,
+        mut request: Request<Req>,
+        span: tracing::Span,
+        send: F,
+    ) -> Result<Res, Status>
+    where
+        F: FnOnce(Channel, Request<Req>) -> Fut,
+        Fut: Future<Output = Result<Response<Res>, Status>>,
+    {
+        let channel = self.channel(target)?;
+        request.set_timeout(self.timeout());
+        crate::propagation::inject(request.metadata_mut(), &span);
+        let started = std::time::Instant::now();
+        let result = tokio::time::timeout(self.timeout(), send(channel, request).instrument(span))
+            .await
+            .unwrap_or_else(|_| Err(Status::deadline_exceeded("内部 RPC 超时，未自动重试")));
+        metrics::histogram!("tok_rpc_client_duration_seconds", "service_name" => target.service_name.clone()).record(started.elapsed().as_secs_f64());
+        metrics::counter!("tok_rpc_client_calls_total", "service_name" => target.service_name.clone(), "result" => if result.is_ok() { "ok" } else { "error" }).increment(1);
+        if let Err(status) = &result {
+            tracing::error!(node_id = %target.node_id, service_name = %target.service_name, request_id, code = ?status.code(), "内部 RPC 失败，未自动重试");
+        }
+        Ok(result?.into_inner())
     }
 }

@@ -3,7 +3,7 @@
 use super::PlayerState;
 use tok::{
     events::{Event, Input, Registry},
-    rpc::tonic::Status,
+    game_rpc::tonic::Status,
 };
 
 const OUTPUT: i64 = 1;

@@ -33,7 +33,7 @@ pub(super) struct SessionState {
     pub(super) topic_gate: tokio::sync::Mutex<()>,
     pub(super) downlink_gate: tokio::sync::Mutex<()>,
     pub(super) timers: Arc<timer::Scheduler>,
-    pub(super) initial_execution: Option<tok_rpc::protocol::internal::v1::ExecutionSnapshot>,
+    pub(super) initial_execution: Option<tok_game_rpc::protocol::internal::v1::ExecutionSnapshot>,
     pub(super) ownership: SessionOwnership,
     pub(super) cancel: CancellationToken,
     pub(super) completion: Completion,

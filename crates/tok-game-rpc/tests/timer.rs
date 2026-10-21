@@ -9,13 +9,13 @@ use std::{
     time::Duration,
 };
 use tok_core::{ServiceDescriptor, TimerTrigger};
-use tok_player::{SessionIdentity, TimerSpec, TimerUpdate};
-use tok_rpc::CallContext;
-use tok_rpc::{
+use tok_game_rpc::CallContext;
+use tok_game_rpc::{
     HandlerRegistry, HandlerReply, RpcClients, RpcEndpoint, RpcService,
     protocol::internal::v1::{self as proto, Payload},
     timer::{decode_update, encode_update},
 };
+use tok_player::{SessionIdentity, TimerSpec, TimerUpdate};
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 use tonic::Code;
@@ -112,8 +112,8 @@ async fn internal_trigger_is_propagated_and_cannot_be_selected_by_client_message
     let cancel = CancellationToken::new();
     let server = tokio::spawn(endpoint.serve(listener, cancel.clone()).unwrap());
     let clients = Arc::new(RpcClients::new(Duration::from_secs(2), 2).unwrap());
-    let player_client = tok_rpc::player::Client::new(Arc::clone(&clients));
-    let business_client = tok_rpc::business::Client::new(Arc::clone(&clients));
+    let player_client = tok_game_rpc::player::Client::new(Arc::clone(&clients));
+    let business_client = tok_game_rpc::business::Client::new(Arc::clone(&clients));
     let mut context = CallContext {
         node_id: "node".into(),
         service_name: "player".into(),

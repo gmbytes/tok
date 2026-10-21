@@ -2,10 +2,10 @@
 
 use crate::protocol::GameMessage;
 use crate::protocol::v1::{GetGuildRequest, GetGuildResponse};
-use tok::rpc::{HandlerRegistry, tonic::Status};
+use tok::game_rpc::{HandlerRegistry, tonic::Status};
 
 /// 注册示例公会请求，校验消息与上下文中的业务 ID 一致。
-pub fn handlers() -> Result<HandlerRegistry, tok::rpc::Error> {
+pub fn handlers() -> Result<HandlerRegistry, tok::game_rpc::Error> {
     let mut registry = HandlerRegistry::new();
     registry.register(
         GetGuildRequest::MESSAGE_ID,
@@ -26,10 +26,10 @@ pub fn handlers() -> Result<HandlerRegistry, tok::rpc::Error> {
 pub fn locked_handler(
     namespace: &str,
     backend: std::sync::Arc<dyn tok::core::lock::Backend>,
-) -> Result<std::sync::Arc<dyn tok::rpc::CallHandler>, tok::rpc::Error> {
+) -> Result<std::sync::Arc<dyn tok::game_rpc::Handler>, tok::game_rpc::Error> {
     use std::sync::Arc;
-    use tok::rpc::{
-        CallHandler, TowerHandler, lock,
+    use tok::game_rpc::{
+        Handler, TowerHandler, lock,
         tower::{self, Layer},
     };
     let registry = Arc::new(handlers()?);

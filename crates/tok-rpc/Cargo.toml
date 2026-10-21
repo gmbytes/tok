@@ -1,6 +1,6 @@
 [package]
 name = "tok-rpc"
-description = "tok 内部 gRPC 与 Tower 中间件接入"
+description = "tok 通用 gRPC 连接、端点与执行设施"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,13 +8,9 @@ license.workspace = true
 
 [dependencies]
 tok-service.workspace = true
-tok-events.workspace = true
 tok-core.workspace = true
-tok-player.workspace = true
-tok-proto.workspace = true
 tonic.workspace = true
 tower.workspace = true
-prost.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 tokio-stream.workspace = true
@@ -23,12 +19,6 @@ tracing-opentelemetry.workspace = true
 opentelemetry.workspace = true
 metrics.workspace = true
 thiserror.workspace = true
-
-[dev-dependencies]
-tok-infra.workspace = true
-tokio = { workspace = true, features = ["test-util"] }
-opentelemetry_sdk.workspace = true
-tracing-subscriber.workspace = true
 
 [lints]
 workspace = true

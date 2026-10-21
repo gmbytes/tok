@@ -15,6 +15,7 @@ tok-core = { path = "crates/tok-core", version = "0.1.0" }
 tok-player = { path = "crates/tok-player", version = "0.1.0" }
 tok-service = { path = "crates/tok-service", version = "0.1.0" }
 tok-proto = { path = "crates/tok-proto", version = "0.1.0" }
+tok-game-rpc = { path = "crates/tok-game-rpc", version = "0.1.0" }
 tok-rpc = { path = "crates/tok-rpc", version = "0.1.0" }
 tok-events = { path = "crates/tok-events", version = "0.1.0" }
 tok-infra = { path = "crates/tok-infra", version = "0.1.0" }

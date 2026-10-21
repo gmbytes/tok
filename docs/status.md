@@ -4,7 +4,7 @@
 
 ## crate 与基础契约
 
-玩家运行契约已独立为 [tok-player](../crates/tok-player/src/lib.rs)，分库提交为 `9f32c91`；RPC 的 CallContext 位于 [tok-rpc](../crates/tok-rpc/src/context.rs)。Context / Source / StopReason 归 tok-service，Extensions 独立为 tok_core::Extensions。core 删除 tokio-util 与 tracing 依赖，当前只依赖 serde / thiserror。
+玩家运行契约已独立为 [tok-player](../crates/tok-player/src/lib.rs)，分库提交为 `9f32c91`；游戏协议 CallContext 位于 [tok-game-rpc](../crates/tok-game-rpc/src/context.rs)。Context / Source / StopReason 归 tok-service，Extensions 独立为 tok_core::Extensions。core 删除 tokio-util 与 tracing 依赖，当前只依赖 serde / thiserror。
 
 | core 范围 | 当前职责与接口 |
 | --- | --- |
@@ -36,7 +36,7 @@ AGENTS.md 已记录有官方依据的 API 组织规则：功能命名空间公�
 | 无端点服务 | ServiceConfig.endpoint 可省略，纯事件/后台服务使用同一生命周期 | 不发布网络地址，不注入 application::Binding；需要发现查询时由组装层注入 |
 | 执行与中间件 | [service::Context](../crates/tok-service/src/context.rs)、[Request / Tower Layer](../crates/tok-service/src/lib.rs) 用于 RPC、事件、timer 与网关消息链 | 保留具体协议、输入/结果类型、可信入口校验和调度边界，无通用路由器/熔断器 |
 | 服务生命周期 | Factory / Init 初始化，Builder → Prepared → Running 消费式编排；task::Supervisor 驱动有界工作 | 主任务、后台故障及退出期限由所有者监督，不创建隐藏的任务运行时 |
-| RPC | [tok-rpc](../crates/tok-rpc/src/lib.rs) 共享端点、类型化分发、追踪、请求级锁和无自动重试客户端 | RPC 工厂初始化必须安装处理链，未安装不发布；同一端点不能覆盖同名 protobuf 服务 |
+| RPC | [tok-rpc](../crates/tok-rpc/src/lib.rs) 提供连接、端点和通用执行；[tok-game-rpc](../crates/tok-game-rpc/src/lib.rs) 提供游戏消息、事件、timer 及可选请求锁 | RPC 工厂初始化必须安装处理链，未安装不发布；同一端点不能覆盖同名 protobuf 服务 |
 | 事件 | [Registry](../crates/tok-events/src/registry.rs) 本地借用及远程解码共用处理表，有序多处理者、原始错误及 Arc 保留 | 本地 dispatch 显式等待；远程发布不等待业务结果，不提供事务或隐式去重 |
 | topic / group | Event::topic 默认全局，可固定或由正文字段派生；[Pool](../crates/tok-events/src/interest.rs) 按组件/主题聚合固定与会话引用 | group 属于订阅组件；无组独立接收，同组分担不等于玩家归属路由 |
 | NATS | [Bus](../crates/tok-events/src/nats.rs) 按 namespace、topic、类型安全路由，有限 SID、建立操作、缓冲与处理预算 | Core NATS 即时事件；发布只表示接受，订阅建立有限回环就绪；没有 JetStream |
@@ -47,7 +47,7 @@ AGENTS.md 已记录有官方依据的 API 组织规则：功能命名空间公�
 
 ## 使用与失败边界
 
-普通服务的构造仍是一套 Factory / Init，RPC、事件都通过 Request 和 Tower 执行。Application::register_rpc_factory 自动按配置创建入口，将 rpc::Binding 注入工厂；在工厂内初始化状态、路由和 Layer 后安装。初始化装配用的 rpc::Binding 不保存回自身执行扩展，避免引用环。Application::bind_rpc 用于自定义 protobuf 服务，监听继续由 Application 合并管理。
+普通服务的构造仍是一套 Factory / Init，RPC、事件都通过 Request 和 Tower 执行。Application::register_rpc_factory 自动按配置创建入口，将 game_rpc::Binding 注入工厂；在工厂内初始化状态、路由和 Layer 后安装。初始化装配用的 game_rpc::Binding 不保存回自身执行扩展，避免引用环。Application::bind_rpc 用于自定义 protobuf 服务，监听继续由 Application 合并管理。
 
 网关、manager、session 通过类型化能力句柄查询和操作，不公开内部锁。Gateway::handle 的结束等待包含 ingress.finish，tasks().wait_finished 仅代表任务范围；生命周期服务的等待还包含自身清理。已接纳的 session 任务按原预算收束，停止不等于副作用回滚。
 
@@ -78,3 +78,9 @@ P1–P7 方向校正完成本轮验收，P7 随本次提交交付。后续功能
 保留调用执行、task 与 lifecycle 的职责边界及公开功能命名空间；Request 与同步 handler 移入私有实现模块，根导出不变。InitTask 更名 InitFuture，复用 core::BoxFuture；task::Task 保留监督任务语义。任务预留和提交改用 SubmitError，区分容量不足、停止、入口关闭及名称非法；任务与服务错误的 Task 变体改名 Join。执行 Error::Inner 通过标准 source 暴露原始错误，任务 panic 时完成报告保留原名称；修正通用任务范围、初始化取消及 256 字节名称限制的中文文本。调用方与 rustdoc 指南同步迁移，不保留旧名称兼容别名。本轮不做 release 构建。
 
 本轮 Windows 验收：工作区常规测试（含 12 项指南示例、2 项编译失败文档测试）、全目标 Clippy（警告视为错误）和 workspace rustdoc（警告视为错误）通过；新增标准错误链、提交失败容量释放及多任务 panic 名称保留回归测试。真实 Redis/NATS 专项未运行；本轮随本次提交交付。
+
+## RPC 协议适配分层校正（2026-10-21）
+
+通用 tok-rpc 保留 RpcClients / RpcEndpoint / Server，通过泛型请求和 Tower 接入任意协议；正常依赖移除 tok-player / tok-events / tok-proto。新增 tok-game-rpc 承载游戏 CallContext、Handler / HandlerRegistry、玩家与普通业务协议客户端、绑定槽、通知编码及 timer / 事件 / 请求锁适配。门面从 game_rpc 访问游戏协议，rpc 访问通用设施；移除通用 CallHandler 上的事件契约，不提供旧路径兼容别名。Application 的普通自定义 protobuf 绑定继续使用通用端点，游戏 register_rpc_factory 使用新协议适配。客户端 Frame、内部 protobuf、事件 topic、timer、租约和无自动重试语义保持原有约束；事件与 timer 入口仍仅供可信服务端。
+
+本轮 Windows 验收：工作区 255 项测试通过（包含 12 项指南示例和 2 项编译失败文档测试），31 项外部专项跳过；通用 RPC 新增 3 项无游戏类型执行测试，游戏 RPC 的事件入口隔离、身份、timer、共享连接、追踪及请求锁专项通过。全目标 Clippy、workspace rustdoc、application / lifecycle smoke、格式、UTF-8/LF、内部文档链接及空白检查通过。cargo tree 核对通用 RPC 的正常依赖不含玩家、事件或游戏 protobuf。不做 release 构建；未运行真实 Redis/NATS 专项或 Linux，本轮随本次提交交付。

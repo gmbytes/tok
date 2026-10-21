@@ -9,12 +9,11 @@ use std::{
 };
 use tok::{
     core::TimerTrigger,
+    game_rpc::{
+        CallContext, Handler, protocol::internal::v1::Payload, timer::decode_update, tonic::Code,
+    },
     infra::discovery::MemoryDirectory,
     player::{SessionIdentity, TimerUpdate},
-    rpc::{
-        CallContext, CallHandler, protocol::internal::v1::Payload, timer::decode_update,
-        tonic::Code,
-    },
 };
 
 fn context() -> CallContext {

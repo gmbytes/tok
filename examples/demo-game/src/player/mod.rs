@@ -16,11 +16,11 @@ use std::{
 };
 use tok::{
     core::ServiceDirectory,
-    player::{TimerSpec, TimerUpdate},
-    rpc::{
+    game_rpc::{
         CallContext, HandlerRegistry, HandlerReply, RpcClients, protocol::internal::v1::Payload,
         tonic::Status,
     },
+    player::{TimerSpec, TimerUpdate},
 };
 use tokio::sync::Mutex;
 
@@ -76,7 +76,7 @@ fn player_id(context: &CallContext) -> Result<u64, Status> {
 pub fn handlers(
     state: Arc<State>,
     directory: Arc<dyn ServiceDirectory>,
-) -> Result<HandlerRegistry, tok::rpc::Error> {
+) -> Result<HandlerRegistry, tok::game_rpc::Error> {
     let mut registry = HandlerRegistry::new();
     registry.register_with_timers(
         GetPlayerRequest::MESSAGE_ID,
@@ -165,12 +165,12 @@ pub fn handlers(
     )?;
     let production = Arc::new(
         production::dispatcher()
-            .map_err(|error| tok::rpc::Error::Configuration(error.to_string()))?,
+            .map_err(|error| tok::game_rpc::Error::Configuration(error.to_string()))?,
     );
     let events_state = Arc::clone(&state);
     registry.register_timer_service(
         ProductionFinished::MESSAGE_ID,
-        tok::rpc::tower::service_fn(
+        tok::game_rpc::tower::service_fn(
             move |request: tok::service::Request<(CallContext, ProductionFinished)>| {
                 let execution = request.context;
                 let context = request.input.0;
@@ -225,8 +225,10 @@ pub fn handlers(
             Ok(None)
         })
     })?;
-    let client =
-        tok::rpc::business::Client::new(Arc::new(RpcClients::new(Duration::from_secs(2), 16)?));
+    let client = tok::game_rpc::business::Client::new(Arc::new(RpcClients::new(
+        Duration::from_secs(2),
+        16,
+    )?));
     registry.register(
         QueryGuildRequest::MESSAGE_ID,
         QueryGuildResponse::MESSAGE_ID,

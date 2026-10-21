@@ -1,11 +1,10 @@
-//! 协议适配器共用的上下文编码、追踪、期限和指标，不持有连接缓存。
+//! 游戏协议的目标校验与正文编码；追踪、期限和指标委托通用 RpcClients。
 use crate::CallContext;
 use crate::RpcClients;
 use std::future::Future;
 use tok_core::ServiceDescriptor;
 use tok_proto::internal::v1::{self as proto, CallRequest, CallResponse, Payload};
 use tonic::{Request, Response, Status, transport::Channel};
-use tracing::Instrument;
 
 pub(crate) fn validate_target(
     target: &ServiceDescriptor,
@@ -28,32 +27,6 @@ pub(crate) fn encode_context(context: CallContext) -> proto::CallContext {
             epoch: identity.epoch,
         }),
     }
-}
-pub(crate) async fn execute<Req, Res, F, Fut>(
-    clients: &RpcClients,
-    target: &ServiceDescriptor,
-    request_id: u64,
-    mut request: Request<Req>,
-    span: tracing::Span,
-    send: F,
-) -> Result<Res, Status>
-where
-    F: FnOnce(Channel, Request<Req>) -> Fut,
-    Fut: Future<Output = Result<Response<Res>, Status>>,
-{
-    let channel = clients.channel(target)?;
-    request.set_timeout(clients.timeout());
-    crate::propagation::inject(request.metadata_mut(), &span);
-    let started = std::time::Instant::now();
-    let result = tokio::time::timeout(clients.timeout(), send(channel, request).instrument(span))
-        .await
-        .unwrap_or_else(|_| Err(Status::deadline_exceeded("内部 RPC 超时，未自动重试")));
-    metrics::histogram!("tok_rpc_client_duration_seconds", "service_name" => target.service_name.clone()).record(started.elapsed().as_secs_f64());
-    metrics::counter!("tok_rpc_client_calls_total", "service_name" => target.service_name.clone(), "result" => if result.is_ok() { "ok" } else { "error" }).increment(1);
-    if let Err(status) = &result {
-        tracing::error!(node_id = %target.node_id, service_name = %target.service_name, request_id, code = ?status.code(), "内部 RPC 失败，未自动重试");
-    }
-    Ok(result?.into_inner())
 }
 pub(crate) async fn call<F, Fut>(
     clients: &RpcClients,
@@ -79,7 +52,9 @@ where
         payload: Some(payload),
     });
     let span = tracing::info_span!("rpc_client", node_id = %target.node_id, service_name = %target.service_name, request_id);
-    let response = execute(clients, target, request_id, request, span, send).await?;
+    let response = clients
+        .execute(target, request_id, request, span, send)
+        .await?;
     if response.request_id != request_id {
         return Err(Status::data_loss("RPC 回应序号不匹配"));
     }

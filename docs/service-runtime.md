@@ -72,7 +72,7 @@ RPC 调用产生对应回应，事件产生当前 handler 的执行结果或允�
 
 本地事件在已有调用中派生事件上下文，继承预算、取消和追踪，在当前任务执行同一事件处理链，不再次获取同一 session 门锁、重新排入自身 FIFO 或重置执行预算。是否继续执行当前调用后的其他本地处理者，沿首错停止规则处理。借用 &mut 业务状态的本地执行不能为接入某个要求静态生命周期的 Tower Layer 而被隐式移入后台队列；相关 Layer 必须明确其兼容范围，适配器与借用契约在实施首步验证。
 
-构建与运行分别保持精简：构建阶段注册状态工厂、入口路由和 Layer，运行阶段由统一监督者启动所需适配器并管理停止和清理。事件专用注册表只负责事件类型分发、顺序和 fan-out，RPC 方法表只负责方法分发，二者不各自承担另一套生命周期或中间件引擎。P3 的 CallHandler 与事件 Handler 已成为各自边界适配，复用共同 Request / Layer；gateway Executor 的业务入口迁移留在 P4，不作为独立中间件引擎保留。
+构建与运行分别保持精简：构建阶段注册状态工厂、入口路由和 Layer，运行阶段由统一监督者启动所需适配器并管理停止和清理。事件专用注册表只负责事件类型分发、顺序和 fan-out，RPC 方法表只负责方法分发，二者不各自承担另一套生命周期或中间件引擎。P3 的 游戏协议 Handler 与事件 Handler 已成为各自边界适配，复用共同 Request / Layer；gateway Executor 的业务入口迁移留在 P4，不作为独立中间件引擎保留。
 
 ## P1 已验证的基础与适用边界
 
@@ -109,7 +109,7 @@ Gateway::new_in 接收 Init，继承所属服务身份、生命周期句柄和�
 
 ServiceConfig 的 factory 可选，默认按服务名查找共同 Factory；endpoint 也可省略，无端点服务仍参与初始化、运行监督与退出，但不生成或发布网络描述。网络服务保留 application::Binding 能力，事件服务可由组装层注入发现查询或其他状态。
 
-Application::register_rpc_factory 为匹配配置创建 RpcService 及一次性 rpc::Binding，按所属服务注入 Init.extensions，在同一工厂中安装真实状态、路由与 Layer。工厂结束时检查绑定是否完成，缺失安装会在发布前失败；初始化绑定不保存回自身执行扩展，防止引用环。
+Application::register_rpc_factory 为匹配配置创建 RpcService 及一次性 game_rpc::Binding，按所属服务注入 Init.extensions，在同一工厂中安装真实状态、路由与 Layer。工厂结束时检查绑定是否完成，缺失安装会在发布前失败；初始化绑定不保存回自身执行扩展，防止引用环。
 
 自定义 protobuf 通过 bind_rpc 按业务服务声明，与其他逐服务绑定在启动前合并并校验端点；高级调用可一次注册完整 RpcEndpoint，同端点不混用两种方式。重复 protobuf、错误协议或缺失端点在监听前拒绝，工厂注册失败不留下半份声明。协议转换不会自动选择锁或中间件，普通服务仍是一套 Factory 契约。
 
@@ -274,3 +274,7 @@ Registry 的本地类型注册不要求 prost::Message；远程订阅安装时�
 | 示例、旧入口清理、文档与全面验收 | P7 |
 
 JetStream、离线加载、全局去重、通用扇出中继、热配置、生产部署和任意游戏状态自动迁移不并入这七批。旧的固定类型订阅、本地主题成员和两套事件处理契约属于迁移前状态；P3 已统一执行契约，P5 已接通固定 topic 路由，P6 已进一步接通动态兴趣；P7 收敛应用组装与示例，不据此宣称后续能力已完成。
+
+## RPC 协议适配分层校正（2026-10-21）
+
+通用 tok-rpc 保留 RpcClients / RpcEndpoint / Server，通过泛型请求和 Tower 接入任意协议；正常依赖移除 tok-player / tok-events / tok-proto。新增 tok-game-rpc 承载游戏 CallContext、Handler / HandlerRegistry、玩家与普通业务协议客户端、绑定槽、通知编码及 timer / 事件 / 请求锁适配。门面从 game_rpc 访问游戏协议，rpc 访问通用设施；移除通用 CallHandler 上的事件契约，不提供旧路径兼容别名。Application 的普通自定义 protobuf 绑定继续使用通用端点，游戏 register_rpc_factory 使用新协议适配。客户端 Frame、内部 protobuf、事件 topic、timer、租约和无自动重试语义保持原有约束；事件与 timer 入口仍仅供可信服务端。

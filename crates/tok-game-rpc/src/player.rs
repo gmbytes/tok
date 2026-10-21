@@ -59,19 +59,20 @@ impl Client {
             body: event.body.clone(),
         });
         let span = tracing::info_span!("rpc_event_client", node_id = %target.node_id, service_name = %target.service_name, event_id = %event.event_id);
-        let response = call::execute(
-            &self.connections,
-            target,
-            request_id,
-            request,
-            span,
-            |channel, request| async move {
-                proto::player_rpc_client::PlayerRpcClient::new(channel)
-                    .handle_event(request)
-                    .await
-            },
-        )
-        .await?;
+        let response = self
+            .connections
+            .execute(
+                target,
+                request_id,
+                request,
+                span,
+                |channel, request| async move {
+                    proto::player_rpc_client::PlayerRpcClient::new(channel)
+                        .handle_event(request)
+                        .await
+                },
+            )
+            .await?;
         if response.request_id != request_id {
             return Err(Status::data_loss("内部事件回应无效"));
         }

@@ -1,6 +1,6 @@
 //! 将端点的业务入口与工厂初始化结果绑定；共享端点仍由 Application 一次监听。
 use crate::CallContext;
-use crate::{CallHandler, CallTask, EventTask};
+use crate::{CallTask, EventTask, Handler};
 use std::sync::{Arc, OnceLock};
 use tok_core::{Extensions, service::Identity};
 use tok_proto::internal::v1::Payload;
@@ -11,7 +11,7 @@ use tok_service::{
 use tonic::Status;
 
 struct Installed {
-    handler: Arc<dyn CallHandler>,
+    handler: Arc<dyn Handler>,
     service: Handle,
     extensions: Extensions,
 }
@@ -33,7 +33,7 @@ impl Binding {
         self.installed.get().is_some()
     }
     /// 在所属服务工厂中安装实际 handler、生命周期与能力；拒绝错误身份和重复安装。
-    pub fn install(&self, init: &Init, handler: Arc<dyn CallHandler>) -> Result<(), crate::Error> {
+    pub fn install(&self, init: &Init, handler: Arc<dyn Handler>) -> Result<(), crate::Error> {
         if init.identity != self.identity {
             return Err(crate::Error::Configuration(
                 "RPC 绑定与初始化服务身份不匹配".into(),
@@ -69,7 +69,7 @@ impl Binding {
         Ok(installed)
     }
 }
-impl CallHandler for Binding {
+impl Handler for Binding {
     fn call(&self, mut request: Request<(CallContext, Payload)>) -> CallTask<'_> {
         Box::pin(async move {
             let installed = self.prepare(&mut request)?;

@@ -511,3 +511,9 @@ AGENTS.md 记录项目采用的 Rust 公开 API 组织规则及官方依据：�
 本次 Windows 验收：全目标 Clippy、workspace rustdoc、格式与 12 项指南文档测试通过；指南验证 Identity 根导入。检查生成的 tok-core 文档确认根页提供 Identity、私有 error 模块不作为公开入口，公开 Error 页保留完整分类表。198 个仓库文本文件 UTF-8/LF、84 处内部文档链接与锚点及空白检查通过。本次仅调整公开入口与文档，未重复完整工作区、外部专项或 smoke；未做 release 构建，全部待审阅改动仍未提交。
 
 以上上下文归属、锁契约、BoxFuture、错误分类及公开 API 规则的调整随本次提交统一交付；各段“未提交”描述保留为实施时点记录。最终公开路径与能力以当前状态和 Rust 用户指南为准。
+
+## 通用 RPC 与游戏协议适配分离（2026-10-21）
+
+以 `437ad4d` 为基线新增 tok-game-rpc，迁移游戏 CallContext、HandlerRegistry、玩家/普通业务客户端、事件/timer/请求锁及初始化绑定；tok-rpc 仅提供连接、共享端点和泛型 Server / execute。原 CallHandler 不再作为通用 RPC 入口，其游戏契约改名为上层 Handler；门面导入分为 rpc / game_rpc。内部 protobuf 与客户端 Frame 不变，不提供旧 Rust 路径兼容别名。
+
+Windows 工作区测试 255 项通过、31 项外部专项跳过，Clippy、rustdoc、application / lifecycle smoke、格式与 UTF-8/LF 检查通过。未做 release 构建、Linux 或真实 Redis/NATS 专项。本轮随本次提交交付。
