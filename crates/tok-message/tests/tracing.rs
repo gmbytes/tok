@@ -13,64 +13,34 @@ use tok_core::ServiceDescriptor;
 use tok_grpc::{Client, Listener};
 use tok_proto::internal::v1::{CallResponse, Payload};
 use tok_session::logic::rpc::CallContext;
-use tok_session::logic::rpc::{CallTask, Handler, Service as RpcService};
+use tok_session::logic::rpc::Service as RpcService;
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 use tracing_subscriber::layer::SubscriberExt;
 
+#[derive(Clone)]
 struct Capture(Arc<Mutex<Option<opentelemetry::trace::TraceId>>>);
-impl Handler for Capture {
-    fn event(
-        &self,
-        request: tok_execution::Request<(CallContext, Arc<tok_events::Message>)>,
-    ) -> tok_session::logic::rpc::EventTask<'_> {
-        let context = request.input.0;
-        Box::pin(async move {
-            *self.0.lock().unwrap() = Some(
-                tracing::Span::current()
-                    .context()
-                    .span()
-                    .span_context()
-                    .trace_id(),
-            );
-            Ok(tok_execution::Response::new(
-                tok_proto::internal::v1::EventResponse {
-                    request_id: context.request_id,
-                    ..Default::default()
-                },
-            ))
-        })
+impl tower::Service<tok_execution::Request<(tok_message::rpc::CallContext, Payload)>> for Capture {
+    type Response = tok_execution::Response<CallResponse>;
+    type Error = tonic::Status;
+    type Future = std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<Self::Response, Self::Error>> + Send>,
+    >;
+    fn poll_ready(
+        &mut self,
+        _: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), Self::Error>> {
+        std::task::Poll::Ready(Ok(()))
     }
-
-    fn call(&self, request: tok_execution::Request<(CallContext, Payload)>) -> CallTask<'_> {
-        let (context, payload) = request.input;
-        Box::pin(async move {
-            *self.0.lock().unwrap() = Some(
-                tracing::Span::current()
-                    .context()
-                    .span()
-                    .span_context()
-                    .trace_id(),
-            );
-            Ok(tok_execution::Response::new(CallResponse {
-                request_id: context.request_id,
-                payload: Some(payload),
-                error: None,
-                timers: None,
-            }))
-        })
-    }
-}
-
-impl tok_message::rpc::Handler for Capture {
     fn call(
-        &self,
+        &mut self,
         request: tok_execution::Request<(tok_message::rpc::CallContext, Payload)>,
-    ) -> tok_message::rpc::CallTask<'_> {
+    ) -> Self::Future {
         let (context, payload) = request.input;
+        let observed = Arc::clone(&self.0);
         Box::pin(async move {
-            *self.0.lock().unwrap() = Some(
+            *observed.lock().unwrap() = Some(
                 tracing::Span::current()
                     .context()
                     .span()
@@ -105,20 +75,54 @@ async fn trace_context_is_propagated_across_the_network_call() {
     let endpoint = Listener::new()
         .add_service(
             "guild",
-            tok_message::rpc::Service::new(
-                "local",
-                "guild",
-                Arc::new(Capture(Arc::clone(&observed))),
-            )
-            .unwrap()
-            .into_business(),
+            tok_message::rpc::Service::new("local", "guild", Capture(Arc::clone(&observed)))
+                .unwrap()
+                .into_business(),
         )
         .unwrap()
         .add_service(
             "player",
-            RpcService::new("local", "player", Arc::new(Capture(Arc::clone(&observed))))
-                .unwrap()
-                .into_logic(),
+            RpcService::new("local", "player", {
+                let capture = Arc::new(Capture(Arc::clone(&observed)));
+                tower::service_fn(
+                    move |request: tok_execution::Request<tok_session::logic::rpc::Input>| {
+                        let capture = Arc::clone(&capture);
+                        async move {
+                            use tok_session::logic::rpc::{Input, Output};
+                            *capture.0.lock().unwrap() = Some(
+                                tracing::Span::current()
+                                    .context()
+                                    .span()
+                                    .span_context()
+                                    .trace_id(),
+                            );
+                            let output = match request.input {
+                                Input::Message(call, payload) => Output::Message(CallResponse {
+                                    request_id: call.request_id,
+                                    payload: Some(payload),
+                                    error: None,
+                                    timers: None,
+                                }),
+                                Input::Timer(call, payload) => Output::Timer(CallResponse {
+                                    request_id: call.request_id,
+                                    payload: Some(payload),
+                                    error: None,
+                                    timers: None,
+                                }),
+                                Input::Event(call, _) => {
+                                    Output::Event(tok_proto::internal::v1::EventResponse {
+                                        request_id: call.request_id,
+                                        ..Default::default()
+                                    })
+                                }
+                            };
+                            Ok::<_, tonic::Status>(tok_execution::Response::new(output))
+                        }
+                    },
+                )
+            })
+            .unwrap()
+            .into_logic(),
         )
         .unwrap();
     endpoint.readiness().set("player", true);
@@ -129,7 +133,7 @@ async fn trace_context_is_propagated_across_the_network_call() {
         let root = tracing::info_span!("client_root");
         root.set_parent(context.clone()).unwrap();
         let clients = Arc::new(Client::new(Duration::from_secs(2), 1).unwrap());
-        let business_client = tok_message::rpc::business::Client::new(Arc::clone(&clients));
+        let business_client = tok_message::rpc::Client::new(Arc::clone(&clients));
         let target = ServiceDescriptor {
             node_id: "local".into(),
             service_name: "guild".into(),

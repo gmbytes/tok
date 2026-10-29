@@ -1,5 +1,5 @@
-use super::{CallContext, Handler};
-use std::{sync::Arc, time::Duration};
+use super::{CallContext, Chain, Input, Output};
+use std::time::Duration;
 use tok_core::service::Identity;
 use tok_proto::internal::v1::{self as proto, CallRequest, CallResponse};
 use tonic::{Request, Response, Status};
@@ -9,17 +9,21 @@ use tonic::{Request, Response, Status};
 pub struct Service {
     node_id: String,
     service_name: String,
-    handler: Arc<dyn Handler>,
+    handler: Chain,
     server: tok_grpc::Server,
 }
 
 impl Service {
     /// 显式绑定节点和业务服务名，拒绝空身份。
-    pub fn new(
+    pub fn new<S>(
         node_id: impl Into<String>,
         service_name: impl Into<String>,
-        handler: Arc<dyn Handler>,
-    ) -> Result<Self, super::Error> {
+        handler: S,
+    ) -> Result<Self, super::Error>
+    where
+        S: tower::Service<Input, Response = Output, Error = Status> + Clone + Send + Sync + 'static,
+        S::Future: Send + 'static,
+    {
         let node_id = node_id.into();
         let service_name = service_name.into();
         if node_id.trim().is_empty() || service_name.trim().is_empty() {
@@ -28,7 +32,7 @@ impl Service {
         Ok(Self {
             node_id: node_id.clone(),
             service_name: service_name.clone(),
-            handler,
+            handler: Chain::new(handler),
             server: tok_grpc::Server::new(Identity {
                 node_id: node_id.clone(),
                 service_name: service_name.clone(),
@@ -46,11 +50,7 @@ impl Service {
             service_name: service_name.into(),
         };
         let binding = super::Binding::new(identity.clone());
-        let service = Self::new(
-            identity.node_id,
-            identity.service_name,
-            Arc::new(binding.clone()),
-        )?;
+        let service = Self::new(identity.node_id, identity.service_name, binding.clone())?;
         Ok((service, binding))
     }
     /// 绑定本服务的执行预算、取消与能力；默认预算为 30 秒，远端超时只会缩短它。
@@ -91,7 +91,7 @@ impl Service {
             return Err(Status::invalid_argument("普通业务入口不能接受计时触发"));
         }
         if context.session.is_some() {
-            return Err(Status::invalid_argument("普通业务入口不能接受玩家会话身份"));
+            return Err(Status::invalid_argument("普通业务入口不能接受逻辑会话身份"));
         }
         Ok(CallContext {
             node_id: context.node_id,
@@ -120,17 +120,7 @@ impl Service {
             self.server
                 .request(&metadata, operation, (context.clone(), payload))?;
         execution.extensions_mut().insert(context.clone());
-        let handler = Arc::clone(&self.handler);
-        let mut response = self
-            .server
-            .execute(
-                execution,
-                tower::service_fn(move |request| {
-                    let handler = Arc::clone(&handler);
-                    async move { handler.call(request).await }
-                }),
-            )
-            .await?;
+        let mut response = self.server.execute(execution, self.handler.clone()).await?;
         response.output.request_id = request_id;
         Ok(Response::new(response.output))
     }

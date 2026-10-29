@@ -103,6 +103,8 @@ verify: fmt-check clippy test
 # 需要真实 NATS；TOK_TEST_NATS_URL 默认本机 4222
 nats-test:
     cargo test -p tok-events --test nats --locked -- --ignored
+    cargo test -p tok --test service_events --locked -- --ignored
+    cargo test -p tok-session --test service_events --locked -- --ignored
     cargo test -p tok-gateway --test player_tcp --locked -- --ignored nats_independent_gateways
 
 # 使用真实 NATS、TCP 与内部 RPC 验证转发与广播

@@ -76,9 +76,13 @@ async fn event_handlers_are_inaccessible_to_requests_and_timers_and_require_sess
     let endpoint = Listener::new()
         .add_service(
             "player",
-            RpcService::new("node", "player", Arc::new(registry))
-                .unwrap()
-                .into_logic(),
+            RpcService::new(
+                "node",
+                "player",
+                tok_session::logic::rpc::RegistryService::new(Arc::new(registry)),
+            )
+            .unwrap()
+            .into_logic(),
         )
         .unwrap();
     endpoint.readiness().set("player", true);
@@ -304,14 +308,19 @@ async fn ordered_event_handlers_compose_timer_effects_without_client_payloads() 
             session: None,
             timer: None,
         };
-        let response = tok_session::logic::rpc::Handler::event(
-            &registry,
-            tok_execution::Request::new(execution, (call, event)),
-        )
-        .await
-        .unwrap();
+        use tower::ServiceExt;
+        let response = tok_session::logic::rpc::RegistryService::new(Arc::new(registry))
+            .oneshot(tok_execution::Request::new(
+                execution,
+                tok_session::logic::rpc::Input::Event(call, event),
+            ))
+            .await
+            .unwrap();
+        let tok_session::logic::rpc::Output::Event(response) = response.output else {
+            panic!("事件结果类型错误")
+        };
         assert_eq!(
-            tok_session::logic::rpc::timer::decode_update(response.output.timers.unwrap()).unwrap(),
+            tok_session::logic::rpc::timer::decode_update(response.timers.unwrap()).unwrap(),
             expected
         );
     }

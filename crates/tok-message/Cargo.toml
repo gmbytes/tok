@@ -1,6 +1,6 @@
 [package]
 name = "tok-message"
-description = "tok 编号业务消息处理与玩家 RPC 协议适配"
+description = "tok 编号消息处理与普通业务 RPC 适配"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

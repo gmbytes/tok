@@ -8,6 +8,8 @@ pub mod interest;
 mod message;
 pub mod nats;
 mod registry;
+/// 服务工厂中声明和监督事件订阅。
+pub mod service;
 mod subscriber;
 mod topic;
 

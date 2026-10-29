@@ -45,17 +45,16 @@ pub fn handlers() -> Result<Registry<u64, (), Error>, tok::message::Error> {
 pub fn locked_handler(
     namespace: &str,
     backend: std::sync::Arc<dyn tok::core::lock::Backend>,
-) -> Result<std::sync::Arc<dyn tok::message::rpc::Handler>, tok::message::rpc::Error> {
+) -> Result<
+    tok::message::rpc::lock::Service<tok::message::rpc::RegistryHandler<u64, Error>>,
+    tok::message::rpc::Error,
+> {
     use std::sync::Arc;
-    use tok::message::rpc::{
-        Handler, TowerHandler, business, lock,
-        tonic::Status,
-        tower::{self, Layer},
-    };
+    use tok::message::rpc::{RegistryHandler, lock, tonic::Status, tower::Layer};
     let registry = Arc::new(
         handlers().map_err(|error| tok::message::rpc::Error::Configuration(error.to_string()))?,
     );
-    let adapter = Arc::new(business::Handler::new(
+    let adapter = RegistryHandler::new(
         registry,
         |context| {
             context
@@ -65,11 +64,7 @@ pub fn locked_handler(
                 .ok_or_else(|| Status::invalid_argument("公会调用需要有效目标 ID"))
         },
         |error: Error| Status::invalid_argument(error.to_string()),
-    ));
-    let service = tower::service_fn(move |request| {
-        let adapter = Arc::clone(&adapter);
-        async move { adapter.call(request).await }
-    });
+    );
     let layer = lock::Layer::new(backend, namespace, tok::execution::lock::Config::default())?;
-    Ok(Arc::new(TowerHandler(layer.layer(service))))
+    Ok(layer.layer(adapter))
 }

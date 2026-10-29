@@ -12,7 +12,8 @@ use tok_events::{Envelope, Event, EventId, Input};
 use tok_execution::{Context, Request};
 use tok_session::logic::rpc::CallContext;
 use tok_session::logic::rpc::{
-    Handler, HandlerRegistry, HandlerReply, Service as RpcService,
+    HandlerRegistry, HandlerReply, Input as LogicInput, Output as LogicOutput, RegistryService,
+    Service as RpcService,
     protocol::internal::v1::{self as proto, Payload},
 };
 use tokio_util::sync::CancellationToken;
@@ -134,20 +135,6 @@ async fn one_layer_and_one_event_registration_serve_rpc_timer_local_and_encoded_
         message_id: 1,
         body: Value { value: 7 }.encode_to_vec(),
     };
-    let response = registry
-        .call(request((call(), payload.clone())))
-        .await
-        .unwrap();
-    assert_eq!(response.output.payload.unwrap().message_id, 2);
-    let timer = tok_session::TimerTrigger {
-        timer_id: "tick".into(),
-        scheduled_at_ms: 1,
-        fired_at_ms: 2,
-    };
-    let mut timer_call = call();
-    timer_call.timer = Some(timer.clone());
-    let response = registry.call(request((timer_call, payload))).await.unwrap();
-    assert!(response.output.payload.is_none());
     let envelope = Envelope::new(EventId::new("same-event").unwrap(), Value { value: 7 }).unwrap();
     let result = registry
         .events()
@@ -155,9 +142,39 @@ async fn one_layer_and_one_event_registration_serve_rpc_timer_local_and_encoded_
         .await
         .unwrap();
     assert_eq!(result.output.len(), 1);
+    let mut service = RegistryService::new(Arc::new(registry));
+    let response = service
+        .call(request(LogicInput::Message(call(), payload.clone())))
+        .await
+        .unwrap();
+    let LogicOutput::Message(response) = response.output else {
+        panic!("消息结果类型错误")
+    };
+    assert_eq!(response.payload.unwrap().message_id, 2);
+    let timer = tok_session::TimerTrigger {
+        timer_id: "tick".into(),
+        scheduled_at_ms: 1,
+        fired_at_ms: 2,
+    };
+    let mut timer_call = call();
+    timer_call.timer = Some(timer.clone());
+    let response = service
+        .call(request(LogicInput::Timer(timer_call, payload)))
+        .await
+        .unwrap();
+    let LogicOutput::Timer(response) = response.output else {
+        panic!("计时结果类型错误")
+    };
+    assert!(response.payload.is_none());
     let event = Arc::new(tok_events::Message::new(&envelope).unwrap());
-    let response = registry.event(request((call(), event))).await.unwrap();
-    assert!(response.output.timers.is_none());
+    let response = service
+        .call(request(LogicInput::Event(call(), event)))
+        .await
+        .unwrap();
+    let LogicOutput::Event(response) = response.output else {
+        panic!("事件结果类型错误")
+    };
+    assert!(response.timers.is_none());
     assert_eq!(calls.load(Ordering::SeqCst), 4);
 }
 fn wire_request(timeout: Option<&str>) -> tonic::Request<proto::CallRequest> {
@@ -210,7 +227,12 @@ async fn rpc_budget_and_malformed_timeout_are_enforced_before_accepting_results(
             },
         )
         .unwrap();
-    let rpc = RpcService::new("node", "test", Arc::new(registry)).unwrap();
+    let rpc = RpcService::new(
+        "node",
+        "test",
+        tok_session::logic::rpc::RegistryService::new(Arc::new(registry)),
+    )
+    .unwrap();
     for value in ["", "123456789S", "1X", "-1S"] {
         assert_eq!(
             proto::logic_rpc_server::LogicRpc::call(&rpc, wire_request(Some(value)))
@@ -289,9 +311,9 @@ async fn deferred_rpc_is_initialized_once_by_its_own_factory_and_stops_with_serv
                     Ok(tok_execution::Response::new(v))
                 },
             )?;
-            let handler: Arc<dyn Handler> = Arc::new(registry);
-            assert!(binding.install(&wrong, Arc::clone(&handler)).is_err());
-            binding.install(&init, Arc::clone(&handler))?;
+            let handler = tok_session::logic::rpc::RegistryService::new(Arc::new(registry));
+            assert!(binding.install(&wrong, handler.clone()).is_err());
+            binding.install(&init, handler.clone())?;
             assert!(binding.install(&init, handler).is_err());
             Ok(Box::pin(async move {
                 init.service.cancellation().cancelled().await;
@@ -340,7 +362,10 @@ fn initialization_binding_is_not_retained_in_its_own_execution_extensions() {
         extensions,
     };
     binding
-        .install(&init, Arc::new(HandlerRegistry::new()))
+        .install(
+            &init,
+            tok_session::logic::rpc::RegistryService::new(Arc::new(HandlerRegistry::new())),
+        )
         .unwrap();
     assert!(binding.is_installed());
     drop(init);

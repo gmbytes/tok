@@ -1,6 +1,6 @@
 //! 普通业务 RPC 的请求锁适配；取键、回应判断和 Status 映射留在协议边界。
-//! 时间预算与持锁执行由 tok_execution::lock 提供，不自动安装到 player 或 GatewayRpc。
-use super::{CallContext, CallTask, Error};
+//! 时间预算与持锁执行由 tok_execution::lock 提供，不自动安装到 logic 或 GatewayRpc。
+use super::{CallContext, Error};
 use std::{
     sync::Arc,
     task::{Context, Poll},
@@ -82,7 +82,8 @@ where
 {
     type Response = Response<CallResponse>;
     type Error = Status;
-    type Future = CallTask<'static>;
+    type Future =
+        std::pin::Pin<Box<dyn std::future::Future<Output = Result<Self::Response, Status>> + Send>>;
     fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Status>> {
         self.inner.poll_ready(cx).map_err(status)
     }

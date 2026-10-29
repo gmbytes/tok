@@ -122,9 +122,13 @@ async fn internal_trigger_is_propagated_and_cannot_be_selected_by_client_message
     let endpoint = Listener::new()
         .add_service(
             "player",
-            RpcService::new("node", "player", Arc::new(registry))
-                .unwrap()
-                .into_logic(),
+            RpcService::new(
+                "node",
+                "player",
+                tok_session::logic::rpc::RegistryService::new(Arc::new(registry)),
+            )
+            .unwrap()
+            .into_logic(),
         )
         .unwrap();
     endpoint.readiness().set("player", true);

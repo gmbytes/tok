@@ -12,12 +12,13 @@ use tok_execution::registry::DispatchError;
 use tok_execution::{Context, Request};
 use tok_grpc::{Client, Listener};
 use tok_message::protobuf;
-use tok_message::rpc::{Handler as _, Service as RpcService, business};
+use tok_message::rpc::{Client as BusinessClient, RegistryHandler, Service as RpcService};
 use tok_message::{Message, Registry, Reply};
 use tok_proto::internal::v1::Payload;
-use tok_session::logic::rpc::{CallContext, Handler as _};
+use tok_session::logic::rpc::CallContext;
 use tokio_util::sync::CancellationToken;
 use tonic::{Code, Status};
+use tower::Service as _;
 
 #[derive(Clone, PartialEq, prost::Message)]
 struct Value {
@@ -112,7 +113,7 @@ async fn local_and_rpc_share_one_chain_and_map_errors_only_at_rpc_boundary() {
         denied,
         tok_execution::Error::Inner(DispatchError::Handler(protobuf::Error::Handler(Denied)))
     ));
-    let adapter = Arc::new(business::Handler::new(
+    let adapter = RegistryHandler::new(
         Arc::clone(&registry),
         |call| {
             call.bid
@@ -121,7 +122,7 @@ async fn local_and_rpc_share_one_chain_and_map_errors_only_at_rpc_boundary() {
                 .ok_or_else(|| Status::invalid_argument("目标 ID 无效"))
         },
         |_| Status::permission_denied("业务拒绝"),
-    ));
+    );
     assert_eq!(calls.load(Ordering::SeqCst), 2);
     let mut extensions = Extensions::default();
     extensions.insert(42u64);
@@ -137,7 +138,7 @@ async fn local_and_rpc_share_one_chain_and_map_errors_only_at_rpc_boundary() {
     assert!(endpoint.readiness().set("custom", true));
     let stop = CancellationToken::new();
     let task = tokio::spawn(endpoint.serve(listener, stop.clone()).unwrap());
-    let client = business::Client::new(Arc::new(Client::new(Duration::from_secs(1), 1).unwrap()));
+    let client = BusinessClient::new(Arc::new(Client::new(Duration::from_secs(1), 1).unwrap()));
     let target = ServiceDescriptor {
         node_id: "node".into(),
         service_name: "custom".into(),
@@ -475,7 +476,7 @@ async fn custom_registry_flows_through_message_codec_and_business_rpc_with_origi
         matches!(failure, tok_execution::Error::Inner(RegistryFailure::Backend(error)) if Arc::ptr_eq(&error, &backend.failure))
     );
     let erased: Arc<Erased> = Arc::new(backend.clone());
-    let adapter = business::Handler::from_registry(
+    let mut adapter = RegistryHandler::from_registry(
         Arc::new(Registry::from_shared_registry(erased)),
         |_| Ok(5),
         |error| match error {
@@ -551,8 +552,14 @@ async fn player_adapter_can_replace_message_registry_without_routing_timers_thro
             Ok(tok_execution::Response::new(request.input.1))
         })
         .unwrap();
-    let response = registry
-        .call(request((
+    registry
+        .register_timer(7, |_: Request<(CallContext, Value)>| async {
+            Ok(tok_execution::Response::new(None))
+        })
+        .unwrap();
+    let mut service = registry.into_service();
+    let response = service
+        .call(request(tok_session::logic::rpc::Input::Message(
             call(),
             Payload {
                 message_id: 7,
@@ -561,10 +568,13 @@ async fn player_adapter_can_replace_message_registry_without_routing_timers_thro
         )))
         .await
         .unwrap();
-    assert_eq!(response.output.payload.unwrap().message_id, 2);
+    let tok_session::logic::rpc::Output::Message(response) = response.output else {
+        panic!("消息结果类型错误")
+    };
+    assert_eq!(response.payload.unwrap().message_id, 2);
     assert_eq!(backend.calls.load(Ordering::SeqCst), 1);
-    let failure = registry
-        .call(request((
+    let failure = service
+        .call(request(tok_session::logic::rpc::Input::Message(
             call(),
             Payload {
                 message_id: 11,
@@ -575,31 +585,25 @@ async fn player_adapter_can_replace_message_registry_without_routing_timers_thro
         .unwrap_err();
     assert_eq!(failure.code(), Code::Unavailable);
     let before_timer = backend.calls.load(Ordering::SeqCst);
-    registry
-        .register_timer(7, |_: Request<(CallContext, Value)>| async {
-            Ok(tok_execution::Response::new(None))
-        })
-        .unwrap();
     let mut timer = call();
     timer.timer = Some(tok_session::TimerTrigger {
         timer_id: "tick".into(),
         scheduled_at_ms: 1,
         fired_at_ms: 2,
     });
-    assert!(
-        registry
-            .call(request((
-                timer,
-                Payload {
-                    message_id: 7,
-                    body: vec![]
-                }
-            )))
-            .await
-            .unwrap()
-            .output
-            .payload
-            .is_none()
-    );
+    let result = service
+        .call(request(tok_session::logic::rpc::Input::Timer(
+            timer,
+            Payload {
+                message_id: 7,
+                body: vec![],
+            },
+        )))
+        .await
+        .unwrap();
+    let tok_session::logic::rpc::Output::Timer(result) = result.output else {
+        panic!("计时结果类型错误")
+    };
+    assert!(result.payload.is_none());
     assert_eq!(backend.calls.load(Ordering::SeqCst), before_timer);
 }

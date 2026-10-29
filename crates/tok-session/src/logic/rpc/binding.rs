@@ -1,15 +1,16 @@
 //! 将端点的业务入口与工厂初始化结果绑定；共享端点仍由 Application 一次监听。
-use super::CallContext;
-use super::{CallTask, EventTask, Handler};
-use std::sync::{Arc, OnceLock};
+use super::{Chain, Request, Response};
+use std::{
+    sync::{Arc, OnceLock},
+    task::{Context, Poll},
+};
 use tok_core::{Extensions, service::Identity};
-use tok_execution::Request;
 use tok_lifecycle::{Handle, Init};
-use tok_proto::internal::v1::Payload;
 use tonic::Status;
+use tower::ServiceExt;
 
 struct Installed {
-    handler: Arc<dyn Handler>,
+    handler: Chain,
     service: Handle,
     extensions: Extensions,
 }
@@ -31,7 +32,15 @@ impl Binding {
         self.installed.get().is_some()
     }
     /// 在所属服务工厂中安装实际 handler、生命周期与能力；拒绝错误身份和重复安装。
-    pub fn install(&self, init: &Init, handler: Arc<dyn Handler>) -> Result<(), super::Error> {
+    pub fn install<S>(&self, init: &Init, handler: S) -> Result<(), super::Error>
+    where
+        S: tower::Service<Request, Response = Response, Error = Status>
+            + Clone
+            + Send
+            + Sync
+            + 'static,
+        S::Future: Send + 'static,
+    {
         if init.identity != self.identity {
             return Err(super::Error::Configuration(
                 "RPC 绑定与初始化服务身份不匹配".into(),
@@ -42,13 +51,13 @@ impl Binding {
         drop(extensions.remove::<Self>());
         self.installed
             .set(Installed {
-                handler,
+                handler: Chain::new(handler),
                 service: init.service.clone(),
                 extensions,
             })
             .map_err(|_| super::Error::Configuration("RPC 服务处理者已安装".into()))
     }
-    fn prepare<T>(&self, request: &mut Request<T>) -> Result<&Installed, Status> {
+    fn prepare(&self, request: &mut Request) -> Result<&Installed, Status> {
         if request.context.service() != &self.identity {
             return Err(Status::failed_precondition("RPC 执行服务与绑定不匹配"));
         }
@@ -61,33 +70,29 @@ impl Binding {
         Ok(installed)
     }
 }
-impl Handler for Binding {
-    fn call(&self, mut request: Request<(CallContext, Payload)>) -> CallTask<'_> {
-        Box::pin(async move {
-            let installed = self.prepare(&mut request)?;
-            let call = request.input.0.clone();
-            request.extensions_mut().insert(call);
-            let stop = installed.service.cancellation();
-            let cancellation = request.context.cancellation();
-            tokio::select! { biased;
-                ()=stop.cancelled()=> {cancellation.cancel();Err(Status::cancelled("服务正在退出"))},
-                result=installed.handler.call(request)=>result,
-            }
-        })
+impl tower::Service<Request> for Binding {
+    type Response = Response;
+    type Error = Status;
+    type Future =
+        std::pin::Pin<Box<dyn std::future::Future<Output = Result<Response, Status>> + Send>>;
+    fn poll_ready(&mut self, _: &mut Context<'_>) -> Poll<Result<(), Status>> {
+        Poll::Ready(Ok(()))
     }
-    fn event(
-        &self,
-        mut request: Request<(CallContext, Arc<tok_events::Message>)>,
-    ) -> EventTask<'_> {
+    fn call(&mut self, mut request: Request) -> Self::Future {
+        let binding = self.clone();
         Box::pin(async move {
-            let installed = self.prepare(&mut request)?;
-            let call = request.input.0.clone();
+            let installed = binding.prepare(&mut request)?;
+            let call = match &request.input {
+                super::Input::Message(call, _)
+                | super::Input::Timer(call, _)
+                | super::Input::Event(call, _) => call.clone(),
+            };
             request.extensions_mut().insert(call);
             let stop = installed.service.cancellation();
             let cancellation = request.context.cancellation();
             tokio::select! { biased;
                 ()=stop.cancelled()=> {cancellation.cancel();Err(Status::cancelled("服务正在退出"))},
-                result=installed.handler.event(request)=>result,
+                result=installed.handler.clone().oneshot(request)=>result,
             }
         })
     }

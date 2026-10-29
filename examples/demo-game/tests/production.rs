@@ -7,13 +7,49 @@ use std::{
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
+use tok::message::rpc::tower::ServiceExt;
 use tok::{
     infra::discovery::MemoryDirectory,
     session::TimerTrigger,
     session::logic::rpc::timer::decode_update,
-    session::logic::rpc::{CallContext, Handler, protocol::internal::v1::Payload, tonic::Code},
+    session::logic::rpc::{
+        CallContext, Input, Output,
+        protocol::internal::v1::{CallResponse, Payload},
+        tonic::{Code, Status},
+    },
     session::{SessionIdentity, TimerUpdate},
 };
+
+struct TestRegistry<S>(S);
+impl<S> TestRegistry<S>
+where
+    S: tok::message::rpc::tower::Service<
+            tok::execution::Request<Input>,
+            Response = tok::execution::Response<Output>,
+            Error = Status,
+        > + Clone,
+{
+    async fn call(
+        &self,
+        request: tok::execution::Request<(CallContext, Payload)>,
+    ) -> Result<tok::execution::Response<CallResponse>, Status> {
+        let request = request.map(|(context, payload)| {
+            if context.timer.is_some() {
+                Input::Timer(context, payload)
+            } else {
+                Input::Message(context, payload)
+            }
+        });
+        self.0
+            .clone()
+            .oneshot(request)
+            .await?
+            .try_map(|output| match output {
+                Output::Message(response) | Output::Timer(response) => Ok(response),
+                Output::Event(_) => Err(Status::internal("结果类型不匹配")),
+            })
+    }
+}
 
 fn context() -> CallContext {
     CallContext {
@@ -32,11 +68,14 @@ fn context() -> CallContext {
 
 #[tokio::test]
 async fn production_rules_are_not_taken_from_client_timer_or_reward_fields() {
-    let registry = player::handlers(
-        Arc::new(player::State::new(4).unwrap()),
-        Arc::new(MemoryDirectory::default()),
-    )
-    .unwrap();
+    let registry = TestRegistry(
+        player::handlers(
+            Arc::new(player::State::new(4).unwrap()),
+            Arc::new(MemoryDirectory::default()),
+        )
+        .unwrap()
+        .into_service(),
+    );
     let context = context();
     let before = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -162,11 +201,14 @@ async fn production_rules_are_not_taken_from_client_timer_or_reward_fields() {
 
 #[tokio::test]
 async fn local_production_error_reaches_the_original_call_without_partial_state_updates() {
-    let registry = player::handlers(
-        Arc::new(player::State::new(4).unwrap()),
-        Arc::new(MemoryDirectory::default()),
-    )
-    .unwrap();
+    let registry = TestRegistry(
+        player::handlers(
+            Arc::new(player::State::new(4).unwrap()),
+            Arc::new(MemoryDirectory::default()),
+        )
+        .unwrap()
+        .into_service(),
+    );
     let context = context();
     registry
         .call(execution((

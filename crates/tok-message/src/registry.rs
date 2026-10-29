@@ -2,7 +2,7 @@ use std::{future::Future, sync::Arc};
 use tok_execution::{Request, Response};
 use tower::{Service, ServiceExt};
 
-/// 编号消息的参数或注册错误。
+/// 编号消息的注册配置错误，不表示派发或处理失败。
 #[derive(Debug, thiserror::Error)]
 pub enum Error<E = tok_execution::registry::Error<u32>> {
     /// 消息编号必须非零。
@@ -17,6 +17,7 @@ pub enum Error<E = tok_execution::registry::Error<u32>> {
 ///
 /// C 是调用状态，O 是附加结果，E 是业务错误。请求和回应编号必须非零；
 /// 编解码、就绪等待和处理链执行共用原始执行预算，不构造 RPC 信封。
+/// 非零约束在注册时检查；自定义底层注册器的派发语义由其实现定义。
 /// 可直接交给 ServiceBuilder 安装公共 Layer；输入为 `Request<(C, Message)>`。
 /// poll_ready 仅代表分发入口可接收调用，目标就绪在调用范围内等待。
 pub struct Registry<

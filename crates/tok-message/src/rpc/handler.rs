@@ -1,36 +1,5 @@
-use super::CallContext;
-use std::{future::Future, pin::Pin};
-use tok_execution::{Request, Response, StopReason};
-use tok_proto::internal::v1::{CallResponse, Payload};
+use tok_execution::StopReason;
 use tonic::Status;
-use tower::{Service, ServiceExt};
-
-/// RPC 边界处理结果，保留输出扩展。
-pub type CallTask<'a> =
-    Pin<Box<dyn Future<Output = Result<Response<CallResponse>, Status>> + Send + 'a>>;
-/// 普通业务 RPC 的调用处理入口。
-pub trait Handler: Send + Sync {
-    /// 处理已校验调用，保留执行范围。
-    fn call(&self, request: Request<(CallContext, Payload)>) -> CallTask<'_>;
-}
-/// 将 Tower 处理链接入普通业务 RPC。
-pub struct TowerHandler<S>(
-    /// 克隆应共享需要共享的中间件状态。
-    pub S,
-);
-impl<S> Handler for TowerHandler<S>
-where
-    S: Service<Request<(CallContext, Payload)>, Response = Response<CallResponse>, Error = Status>
-        + Clone
-        + Send
-        + Sync
-        + 'static,
-    S::Future: Send,
-{
-    fn call(&self, request: Request<(CallContext, Payload)>) -> CallTask<'_> {
-        Box::pin(self.0.clone().oneshot(request))
-    }
-}
 fn execution_status(error: tok_execution::Error<Status>) -> Status {
     match error {
         tok_execution::Error::Inner(error) => error,

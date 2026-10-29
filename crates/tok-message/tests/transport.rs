@@ -15,20 +15,42 @@ use tok_proto::internal::v1::{
 };
 use tok_session::SessionIdentity;
 use tok_session::logic::rpc::CallContext;
-use tok_session::logic::rpc::{CallTask, Handler, HandlerRegistry};
+use tok_session::logic::rpc::{HandlerRegistry, Input as LogicInput, Output as LogicOutput};
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 use tonic::Code;
+use tower::ServiceExt;
 
 // 本测试覆盖同一监听端点的不同协议，测试处理器仅用于观察共享传输行为。
-struct BusinessBridge(Arc<dyn Handler>);
-impl tok_message::rpc::Handler for BusinessBridge {
+#[derive(Clone)]
+struct BusinessBridge(
+    tower::util::BoxCloneSyncService<
+        tok_execution::Request<LogicInput>,
+        tok_execution::Response<LogicOutput>,
+        tonic::Status,
+    >,
+);
+impl tower::Service<tok_execution::Request<(tok_message::rpc::CallContext, Payload)>>
+    for BusinessBridge
+{
+    type Response = tok_execution::Response<CallResponse>;
+    type Error = tonic::Status;
+    type Future = std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<Self::Response, Self::Error>> + Send>,
+    >;
+    fn poll_ready(
+        &mut self,
+        _: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), Self::Error>> {
+        std::task::Poll::Ready(Ok(()))
+    }
     fn call(
-        &self,
+        &mut self,
         request: tok_execution::Request<(tok_message::rpc::CallContext, Payload)>,
-    ) -> tok_message::rpc::CallTask<'_> {
-        self.0.call(request.map(|(context, payload)| {
-            (
+    ) -> Self::Future {
+        let handler = self.0.clone();
+        let request = request.map(|(context, payload)| {
+            LogicInput::Message(
                 CallContext {
                     node_id: context.node_id,
                     service_name: context.service_name,
@@ -39,7 +61,14 @@ impl tok_message::rpc::Handler for BusinessBridge {
                 },
                 payload,
             )
-        }))
+        });
+        Box::pin(async move {
+            let response = handler.oneshot(request).await?;
+            response.try_map(|output| match output {
+                LogicOutput::Message(output) => Ok(output),
+                _ => Err(tonic::Status::internal("结果类型不匹配")),
+            })
+        })
     }
 }
 #[derive(Clone)]
@@ -48,14 +77,22 @@ struct RpcService {
     business: tok_message::rpc::Service,
 }
 impl RpcService {
-    fn new(node: &str, service: &str, handler: Arc<dyn Handler>) -> Result<Self, tok_grpc::Error> {
+    fn new<S>(node: &str, service: &str, handler: S) -> Result<Self, tok_grpc::Error>
+    where
+        S: tower::Service<
+                tok_execution::Request<LogicInput>,
+                Response = tok_execution::Response<LogicOutput>,
+                Error = tonic::Status,
+            > + Clone
+            + Send
+            + Sync
+            + 'static,
+        S::Future: Send + 'static,
+    {
+        let handler = tower::util::BoxCloneSyncService::new(handler);
         Ok(Self {
-            player: tok_session::logic::rpc::Service::new(node, service, Arc::clone(&handler))?,
-            business: tok_message::rpc::Service::new(
-                node,
-                service,
-                Arc::new(BusinessBridge(handler)),
-            )?,
+            player: tok_session::logic::rpc::Service::new(node, service, handler.clone())?,
+            business: tok_message::rpc::Service::new(node, service, BusinessBridge(handler))?,
         })
     }
     fn into_logic(
@@ -71,10 +108,10 @@ impl RpcService {
         self.business.into_business()
     }
 }
-struct BusinessClient(tok_message::rpc::business::Client);
+struct BusinessClient(tok_message::rpc::Client);
 impl BusinessClient {
     fn new(client: Arc<Client>) -> Self {
-        Self(tok_message::rpc::business::Client::new(client))
+        Self(tok_message::rpc::Client::new(client))
     }
     async fn call(
         &self,
@@ -166,14 +203,14 @@ async fn shared_endpoint_dispatches_and_rejects_unready_malformed_and_wrong_targ
     let endpoint = Listener::new()
         .add_service(
             "player",
-            RpcService::new("local", "player", Arc::new(handler()))
+            RpcService::new("local", "player", handler().into_service())
                 .unwrap()
                 .into_logic(),
         )
         .unwrap()
         .add_service(
             "guild",
-            RpcService::new("local", "guild", Arc::new(handler()))
+            RpcService::new("local", "guild", handler().into_service())
                 .unwrap()
                 .into_business(),
         )
@@ -301,21 +338,40 @@ async fn shared_endpoint_dispatches_and_rejects_unready_malformed_and_wrong_targ
     TcpListener::bind(address).await.unwrap();
 }
 
+#[derive(Clone)]
 struct Slow {
     calls: Arc<AtomicUsize>,
 }
-impl Handler for Slow {
-    fn call(&self, request: tok_execution::Request<(CallContext, Payload)>) -> CallTask<'_> {
-        let context = request.input.0;
+impl tower::Service<tok_execution::Request<LogicInput>> for Slow {
+    type Response = tok_execution::Response<LogicOutput>;
+    type Error = tonic::Status;
+    type Future = std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<Self::Response, Self::Error>> + Send>,
+    >;
+    fn poll_ready(
+        &mut self,
+        _: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), Self::Error>> {
+        std::task::Poll::Ready(Ok(()))
+    }
+    fn call(&mut self, request: tok_execution::Request<LogicInput>) -> Self::Future {
+        let context = match request.input {
+            LogicInput::Message(context, _)
+            | LogicInput::Timer(context, _)
+            | LogicInput::Event(context, _) => context,
+        };
+        let calls = Arc::clone(&self.calls);
         Box::pin(async move {
-            self.calls.fetch_add(1, Ordering::SeqCst);
+            calls.fetch_add(1, Ordering::SeqCst);
             tokio::time::sleep(Duration::from_secs(10)).await;
-            Ok(tok_execution::Response::new(CallResponse {
-                request_id: context.request_id,
-                payload: None,
-                error: None,
-                timers: None,
-            }))
+            Ok(tok_execution::Response::new(LogicOutput::Message(
+                CallResponse {
+                    request_id: context.request_id,
+                    payload: None,
+                    error: None,
+                    timers: None,
+                },
+            )))
         })
     }
 }
@@ -331,9 +387,9 @@ async fn timeout_does_not_retry_business_execution() {
             RpcService::new(
                 "local",
                 "guild",
-                Arc::new(Slow {
+                Slow {
                     calls: Arc::clone(&calls),
-                }),
+                },
             )
             .unwrap()
             .into_business(),
@@ -399,7 +455,7 @@ fn duplicate_message_and_proto_service_bindings_are_rejected() {
             )
             .is_err()
     );
-    let service = RpcService::new("local", "guild", Arc::new(handler())).unwrap();
+    let service = RpcService::new("local", "guild", handler().into_service()).unwrap();
     assert!(
         Listener::new()
             .add_service("guild", service.clone().into_business())
@@ -417,8 +473,11 @@ async fn user_tower_concurrency_limit_is_preserved_across_handler_clones() {
     let service = tok_session::logic::rpc::tower::ServiceBuilder::new()
         .concurrency_limit(1)
         .service(tok_session::logic::rpc::tower::service_fn(
-            move |request: tok_execution::Request<(CallContext, Payload)>| {
-                let (context, payload) = request.input;
+            move |request: tok_execution::Request<LogicInput>| {
+                let (context, payload) = match request.input {
+                    LogicInput::Message(context, payload) => (context, payload),
+                    _ => panic!("此测试只发送消息"),
+                };
                 let active = Arc::clone(&active);
                 let peak = Arc::clone(&tracked_peak);
                 async move {
@@ -426,12 +485,14 @@ async fn user_tower_concurrency_limit_is_preserved_across_handler_clones() {
                     peak.fetch_max(count, Ordering::SeqCst);
                     tokio::time::sleep(Duration::from_millis(20)).await;
                     active.fetch_sub(1, Ordering::SeqCst);
-                    Ok::<_, tonic::Status>(tok_execution::Response::new(CallResponse {
-                        request_id: context.request_id,
-                        payload: Some(payload),
-                        error: None,
-                        timers: None,
-                    }))
+                    Ok::<_, tonic::Status>(tok_execution::Response::new(LogicOutput::Message(
+                        CallResponse {
+                            request_id: context.request_id,
+                            payload: Some(payload),
+                            error: None,
+                            timers: None,
+                        },
+                    )))
                 }
             },
         ));
@@ -440,13 +501,9 @@ async fn user_tower_concurrency_limit_is_preserved_across_handler_clones() {
     let endpoint = Listener::new()
         .add_service(
             "guild",
-            RpcService::new(
-                "local",
-                "guild",
-                Arc::new(tok_session::logic::rpc::TowerHandler(service)),
-            )
-            .unwrap()
-            .into_business(),
+            RpcService::new("local", "guild", service)
+                .unwrap()
+                .into_business(),
         )
         .unwrap();
     endpoint.readiness().set("guild", true);
@@ -481,7 +538,7 @@ async fn user_tower_concurrency_limit_is_preserved_across_handler_clones() {
 
 #[test]
 fn endpoint_binding_errors_identify_the_invalid_configuration() {
-    let service = RpcService::new("local", "guild", Arc::new(handler())).unwrap();
+    let service = RpcService::new("local", "guild", handler().into_service()).unwrap();
     let error = Listener::new()
         .add_service(" ", service.clone().into_business())
         .err()
@@ -515,9 +572,9 @@ async fn custom_client_uri_and_server_transport_timeout_are_applied() {
             RpcService::new(
                 "local",
                 "guild",
-                Arc::new(Slow {
+                Slow {
                     calls: Arc::clone(&calls),
-                }),
+                },
             )
             .unwrap()
             .into_business(),
@@ -581,14 +638,14 @@ async fn listener_tower_layers_cover_shared_routes_and_preserve_readiness() {
     let endpoint = Listener::from_server(tonic::transport::Server::builder().layer(layers))
         .add_service(
             "guild",
-            RpcService::new("local", "guild", Arc::new(handler()))
+            RpcService::new("local", "guild", handler().into_service())
                 .unwrap()
                 .into_business(),
         )
         .unwrap()
         .add_service(
             "player",
-            RpcService::new("local", "player", Arc::new(handler()))
+            RpcService::new("local", "player", handler().into_service())
                 .unwrap()
                 .into_logic(),
         )

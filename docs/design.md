@@ -18,6 +18,8 @@ RPC、客户端业务消息、本地/NATS 事件及 timer 是触发服务执行�
 
 RPC 返回回应，事件返回当前处理阶段的结果，不自动生成客户端 Response；发布成功不表示接收侧 handler 完成。本地 dispatch 在当前任务等待处理完成，远程 publish 只等待传输接受。协议类型、完成边界和错误映射不能为统一而混淆。
 
+服务可组合消息 RPC 与服务级事件订阅，事件入口不依赖消息 RPC 或 session。logic 服务既可通过 gateway 的 session FIFO 接收针对主体的事件，也可直接订阅服务级事件并更新服务自身状态；后者不伪造 session 身份或继承发布者已结束的调用范围。两者共用执行与事件契约，不要求相同传输路径或队列。统一装配与待实施边界见[服务运行模型](service-runtime.md#服务级事件与-session-事件)和[专项计划](implementation-plan.md#服务入口与事件统一专项计划)。
+
 ## 框架核心与扩展分层
 
 “tok 核心”指通用架构职责，不意味着所有基础设施放入名为 tok 的门面 crate。tok 已依赖 tok-gateway，gateway 不能再反向依赖 tok 获得共同设施。

@@ -67,7 +67,7 @@ async fn two_services_on_one_endpoint_share_a_tcp_connection() {
     let server = tokio::spawn(endpoint.serve(listener, shutdown.clone()).unwrap());
     let clients = Arc::new(Client::new(Duration::from_secs(2), 1).unwrap());
     let player_client = tok_session::logic::rpc::Client::new(Arc::clone(&clients));
-    let business_client = tok_message::rpc::business::Client::new(Arc::clone(&clients));
+    let business_client = tok_message::rpc::Client::new(Arc::clone(&clients));
     for (name, player) in [("player", true), ("guild", false)] {
         let target = ServiceDescriptor {
             node_id: "local".into(),

@@ -240,10 +240,7 @@ pub fn handlers(
             Ok(tok::execution::Response::new(None))
         })
     })?;
-    let client = tok::message::rpc::business::Client::new(Arc::new(Client::new(
-        Duration::from_secs(2),
-        16,
-    )?));
+    let client = tok::message::rpc::Client::new(Arc::new(Client::new(Duration::from_secs(2), 16)?));
     registry.register(
         QueryGuildRequest::MESSAGE_ID,
         QueryGuildResponse::MESSAGE_ID,

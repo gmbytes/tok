@@ -18,6 +18,43 @@
 
 先完成 P1 的可编译最小模型，再决定公共模块/crate 的承载位置。不是先新增一批空 trait 或移动所有目录。每批结束都必须有可运行示例、有效测试和同步文档，后续批次不以“接口已存在”代替完成。
 
+## 服务入口与事件统一专项计划
+
+P1–P7 的既有验收保留在下文。以下专项承接此后的边界调整；状态记录以实际代码为准。具体契约见[服务运行模型](service-runtime.md#rpc-入口统一为-tower-service)和[服务级事件与 session 事件](service-runtime.md#服务级事件与-session-事件)。本轮没有新建 `tok-registry`；现有执行、消息、事件与服务组装能力已覆盖当前用例。
+
+| 批次 | 目标 | 依赖 | 状态 |
+| --- | --- | --- | --- |
+| 1 | 普通消息 RPC 直接安装 Tower 处理链 | 当前 execution / grpc 执行保护 | 已实施并完成本地验收 |
+| 2 | logic RPC 单一处理链与注册便捷接口 | 批次 1 的入口和擦除模式 | 已实施；本地验收通过 |
+| 3 | 服务级事件订阅与统一生命周期组装 | 批次 1、现有 tok-events | 已实施；本地与真实 NATS 验收通过 |
+| 4 | 跨服务注册体验校准与端到端验收 | 批次 2、3 | 已实施；Windows 验收范围见下文 |
+
+### 批次 1：普通 RPC 使用 Tower 入口
+
+交付：普通消息 RPC 的 Service / Binding 接收已组装的 Tower Service，内部使用经过验证的类型擦除，保留服务身份校验、一次性安装、生命周期停止与扩展注入。注册器可作为末端，用户也能直接提供自定义 Service；移除不再需要的公开 RPC Handler / TowerHandler，迁移示例与 rustdoc。与 tok-grpc、tok-execution 现有保护明确分工，对已包装执行错误使用 flatten；不新增平行执行器或静默改变协议错误。
+
+验收：真实 RPC 路径覆盖自定义 Service、注册器和 Layer 组合、同一 Service 实例的 readiness 与 call、就绪等待超时/取消、服务停止、共享限流状态、输入/输出扩展和原 Context；检查 Binding 安装失败、重复安装、错误身份及无引用环。同步现有本地派发、消息编号和请求锁回归。
+
+### 批次 2：logic 单入口及注册接口
+
+交付：logic 接收一条 Tower Service 链，使用明确类型表达业务消息、可信服务器事件和内部 timer 的来源及对应结果；现有 wire 方法适配进入同一处理链，不为统一强制合并协议。提供可组合的注册便捷接口，复用 tok-message 和 tok-events 已有能力；事件是可选、可替换的扩展，消息 / 事件 / timer 的路由和结果规则保持隔离，用户可提供自己的 Service 或注册器。logic session FIFO、所有权及 gateway 的连接与交接状态机保持现有职责。
+
+验收：三种来源经过同一服务级 Layer，并可分别配置路由级处理；事件缺省返回明确错误，自定义扩展生效；客户端不能伪造事件或 timer，来源与结果不匹配被拒绝。覆盖普通业务回应、事件结果、timer 更新、预算/取消/追踪和输入输出扩展；完整验证 session FIFO、交接和不自动重试。以可编译业务示例确认注册 API，最终名称和泛型由原型决定。
+
+### 批次 3：服务级事件入口及生命周期
+
+交付：任何服务可以声明服务级事件处理与订阅，包括没有 RPC 的服务；事件契约、Registry 与本地/NATS 适配复用 tok-events，组装层统一注入本地状态、建立消费执行范围并协调订阅就绪、任务监督和退出。topic / group 由用户或组件配置，支持每实例独立接收和同组分担，不按服务名或主体自动推断。订阅失败或启动中断不得发布部分就绪服务，退出须撤销并有界收束；不要求为此新增 tok-registry 或让 tok-message 依赖事件总线。
+
+验收：普通服务、仅事件服务和 logic 服务都可使用同一事件注册和执行契约；logic 同时处理服务级配置更新和经 session 转发的主体事件，两者的身份、状态能力、预算和停止关系不混淆。覆盖订阅就绪失败与回滚、停止、独立执行范围、追踪关联、扩展筛选和业务错误；实际 NATS 验证每实例接收与同组分担。Core NATS 只提供即时投递；测试不把发布成功当处理完成，不承诺离线补收或所有节点必达。
+
+### 批次 4：跨服务组装体验与验收
+
+交付：以公共服务和 logic 服务的真实示例检查注册方式是否同构、状态与 Layer 如何共享、不同入口如何组合；只在重复职责和明确使用价值得到证明时提取共同 builder 或调整 crate，避免为形式统一创建新抽象。同步总体设计、实现状态、用户指南、示例及审查记录，保留历史批次事实。
+
+验收：覆盖公共服务本地及 RPC 消息、服务自身事件订阅，logic 服务主体事件和服务级事件，以及仅事件服务；确认公共服务不依赖 session、客户端无法发布内部事件、事件结果不生成客户端回应。执行工作区测试、Clippy、rustdoc、格式与 LF 检查和适用 smoke；真实 NATS / Redis 按涉及的边界明确运行或记录缺口，按用户要求不执行 release 构建。每批结束可独立检查与评审，不把后续能力写成已实现。
+
+**本轮 Windows 验收：** 工作区测试、全目标 Clippy、rustdoc、格式与 LF 检查通过；RPC、客户端、事件和应用组装 smoke 通过。真实 NATS 覆盖两种消费组模式、网关动态兴趣、服务级 Tower 与注册表装配、公共服务共享事件与 RPC 状态、logic 服务的服务级事件与主体事件隔离。初始化超时、丢弃和服务关闭覆盖订阅任务释放。Redis 多进程专项及 Linux 本轮未运行，release 构建按要求未执行；不能据此推断这些环境已验证。
+
 ## P1 验证统一执行抽象
 
 **目标：** 用最小代码证明同一执行协议能同时承载 RPC、事件、timer 以及借用状态的本地执行。
@@ -647,5 +684,15 @@ protobuf 是当前默认正文适配，不宣称其他编码已经实现。tok-p
 tok-player 更名为 tok-session，现有 session 驱动入口称为 logic，gateway 接入与共享 RPC 分别为 gateway::logic 和 session::logic::rpc。框架身份使用 subject_id，由认证组件定义其业务含义；游戏协议仍可使用玩家等业务词汇。scene session、场景转发和公共服务 reminder 均为后续工作，不能将它们写成已实现或默认共用 logic 的状态机。旧配置、Rust 路径和 gRPC 服务名不提供兼容；protobuf 字段编号及令牌二进制编码保持不变。
 
 验证：workspace 测试、Clippy、无警告 rustdoc、格式和 LF 检查、RPC 与事件 smoke 通过；未运行真实 Redis / NATS、Linux 或 release 构建。
+
+### tok-message 模块组织校正（2026-10-29）
+
+将普通业务 RPC 客户端和注册器适配器收束到 rpc::Client 与 rpc::RegistryHandler；业务处理契约、Tower 适配、服务装配和请求锁保留各自边界。根 Registry 继续使用默认 protobuf 适配与注册时非零编号检查，不预先引入无实际使用场景的通用 codec。logic 会话专项测试迁至 tok-session，普通消息与跨入口集成测试继续在原处。Rust 路径不提供兼容别名。
+
+验证：workspace 测试、全目标 Clippy、无警告 rustdoc、格式与 LF 检查及 RPC smoke 通过；未运行真实 Redis / NATS、Linux 或 release 构建。
+
+### RPC Tower 入口统一（方案记录）
+
+总体方案见[服务运行模型](service-runtime.md#rpc-入口统一为-tower-service)，实施和验收见[服务入口与事件统一专项计划](#服务入口与事件统一专项计划)。普通 RPC 和 logic RPC 各安装一条 Tower Service 链；logic 将业务消息、服务器事件和 timer 作为同一入口的不同来源，事件处理为可选扩展。服务级事件的 Tower 链和生命周期装配由 tok-events 提供。
 
 本次阶段验证：Windows 全工作区串行测试 345 项通过、32 项外部专项默认跳过；全目标 Clippy、无警告 workspace rustdoc、格式及空白检查通过。未运行真实 Redis/NATS、Linux 或 release 构建。

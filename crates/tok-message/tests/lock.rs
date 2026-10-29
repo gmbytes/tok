@@ -289,7 +289,7 @@ fn invalid_budgets_are_rejected_before_backend_access() {
 async fn business_rpc_on_two_nodes_shares_locks_after_target_validation() {
     use std::{collections::BTreeMap, sync::Mutex};
     use tok_core::ServiceDescriptor;
-    use tok_message::rpc::{Service as RpcService, TowerHandler};
+    use tok_message::rpc::Service as RpcService;
     use tokio::net::TcpListener;
     use tokio_util::sync::CancellationToken;
 
@@ -345,13 +345,9 @@ async fn business_rpc_on_two_nodes_shares_locks_after_target_validation() {
         let endpoint = Listener::new()
             .add_service(
                 "guild",
-                RpcService::new(
-                    node,
-                    "guild",
-                    Arc::new(TowerHandler(layer(Arc::clone(&backend)).layer(handler))),
-                )
-                .unwrap()
-                .into_business(),
+                RpcService::new(node, "guild", layer(Arc::clone(&backend)).layer(handler))
+                    .unwrap()
+                    .into_business(),
             )
             .unwrap();
         endpoint.readiness().set("guild", true);
@@ -361,7 +357,7 @@ async fn business_rpc_on_two_nodes_shares_locks_after_target_validation() {
         nodes.push(target);
     }
     let clients = Arc::new(Client::new(Duration::from_secs(2), 4).unwrap());
-    let business_client = tok_message::rpc::business::Client::new(Arc::clone(&clients));
+    let business_client = tok_message::rpc::Client::new(Arc::clone(&clients));
     let context_for = |node: &ServiceDescriptor, bid: &str| CallContext {
         node_id: node.node_id.clone(),
         bid: Some(bid.into()),
@@ -472,7 +468,8 @@ struct NeverReady;
 impl tower::Service<tok_execution::Request<(CallContext, Payload)>> for NeverReady {
     type Response = tok_execution::Response<CallResponse>;
     type Error = Status;
-    type Future = tok_message::rpc::CallTask<'static>;
+    type Future =
+        std::pin::Pin<Box<dyn std::future::Future<Output = Result<Self::Response, Status>> + Send>>;
     fn poll_ready(
         &mut self,
         _: &mut std::task::Context<'_>,

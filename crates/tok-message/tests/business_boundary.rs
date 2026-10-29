@@ -5,7 +5,7 @@ use tok_core::{Extensions, Identity, ServiceDescriptor};
 use tok_execution::{Context, Request, Response};
 use tok_message::{
     Registry, Reply,
-    rpc::{self, business},
+    rpc::{self, Client as BusinessClient, RegistryHandler},
 };
 use tok_proto::internal::v1::{
     CallRequest, Payload, TimerTrigger, business_rpc_client::BusinessRpcClient,
@@ -33,7 +33,7 @@ async fn business_rpc_preserves_extensions_and_rejects_timer() {
             }))
         })
         .unwrap();
-    let handler = business::Handler::new(
+    let handler = RegistryHandler::new(
         Arc::new(registry),
         |call| {
             call.bid
@@ -45,7 +45,7 @@ async fn business_rpc_preserves_extensions_and_rejects_timer() {
     );
     let mut extensions = Extensions::default();
     extensions.insert(42_u64);
-    let service = rpc::Service::new("node", "guild", Arc::new(handler))
+    let service = rpc::Service::new("node", "guild", handler)
         .unwrap()
         .with_execution(Duration::from_secs(1), CancellationToken::new(), extensions)
         .unwrap();
@@ -79,7 +79,7 @@ async fn business_rpc_preserves_extensions_and_rejects_timer() {
         CancellationToken::new(),
     )
     .unwrap();
-    let client = business::Client::new(Arc::new(
+    let client = BusinessClient::new(Arc::new(
         tok_grpc::Client::new(Duration::from_secs(1), 2).unwrap(),
     ));
     let result = client

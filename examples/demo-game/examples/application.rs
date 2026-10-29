@@ -26,7 +26,7 @@ use tok::{
     message::{
         Registry as MessageRegistry, Reply,
         rpc::{
-            CallContext, Service as RpcService, business, protocol::internal::v1::Payload,
+            CallContext, RegistryHandler, Service as RpcService, protocol::internal::v1::Payload,
             tonic::Status,
         },
     },
@@ -145,11 +145,11 @@ async fn main() -> Result<(), BoxError> {
                         )),
                     )?;
                     let handler =
-                        business::Handler::new(Arc::new(handlers), |_| Ok(()), |status| status);
+                        RegistryHandler::new(Arc::new(handlers), |_| Ok(()), |status| status);
                     init.extensions
                         .get::<tok::message::rpc::Binding>()
                         .ok_or_else(|| std::io::Error::other("缺少 RPC 绑定"))?
-                        .install(&init, Arc::new(handler))?;
+                        .install(&init, handler)?;
                     Ok(Box::pin(async move {
                         init.service.cancellation().cancelled().await;
                         Ok(())
@@ -180,7 +180,7 @@ async fn main() -> Result<(), BoxError> {
             {
                 return Err(std::io::Error::other("无端点服务不应发布地址"));
             }
-            let client = tok::message::rpc::business::Client::new(Arc::new(
+            let client = tok::message::rpc::Client::new(Arc::new(
                 Client::new(Duration::from_secs(2), 4).map_err(std::io::Error::other)?,
             ));
             let response = client

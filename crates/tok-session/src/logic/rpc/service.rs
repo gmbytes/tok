@@ -1,4 +1,4 @@
-use super::{CallContext, Handler};
+use super::{CallContext, Chain, Input, Output};
 use crate::{SessionIdentity, TimerTrigger};
 use std::{sync::Arc, time::Duration};
 use tok_core::service::Identity;
@@ -10,17 +10,25 @@ use tonic::{Request, Response, Status};
 pub struct Service {
     node_id: String,
     service_name: String,
-    handler: Arc<dyn Handler>,
+    handler: Chain,
     server: tok_grpc::Server,
 }
 
 impl Service {
     /// 显式绑定节点和业务服务名，拒绝空身份。
-    pub fn new(
+    pub fn new<S>(
         node_id: impl Into<String>,
         service_name: impl Into<String>,
-        handler: Arc<dyn Handler>,
-    ) -> Result<Self, super::Error> {
+        handler: S,
+    ) -> Result<Self, super::Error>
+    where
+        S: tower::Service<super::Request, Response = super::Response, Error = Status>
+            + Clone
+            + Send
+            + Sync
+            + 'static,
+        S::Future: Send + 'static,
+    {
         let node_id = node_id.into();
         let service_name = service_name.into();
         if node_id.trim().is_empty() || service_name.trim().is_empty() {
@@ -29,7 +37,7 @@ impl Service {
         Ok(Self {
             node_id: node_id.clone(),
             service_name: service_name.clone(),
-            handler,
+            handler: Chain::new(handler),
             server: tok_grpc::Server::new(Identity {
                 node_id: node_id.clone(),
                 service_name: service_name.clone(),
@@ -47,11 +55,7 @@ impl Service {
             service_name: service_name.into(),
         };
         let binding = super::Binding::new(identity.clone());
-        let service = Self::new(
-            identity.node_id,
-            identity.service_name,
-            Arc::new(binding.clone()),
-        )?;
+        let service = Self::new(identity.node_id, identity.service_name, binding.clone())?;
         Ok((service, binding))
     }
     /// 绑定本服务的执行预算、取消与能力；默认预算为 30 秒，远端超时只会缩短它。
@@ -146,26 +150,24 @@ impl Service {
             },
             payload.message_id
         );
-        let mut execution =
-            self.server
-                .request(&metadata, operation, (context.clone(), payload))?;
+        let is_timer = context.timer.is_some();
+        let input = if is_timer {
+            Input::Timer(context.clone(), payload)
+        } else {
+            Input::Message(context.clone(), payload)
+        };
+        let mut execution = self.server.request(&metadata, operation, input)?;
         execution.extensions_mut().insert(context.clone());
         if let Some(trigger) = &context.timer {
             execution.extensions_mut().insert(trigger.clone());
         }
-        let handler = Arc::clone(&self.handler);
-        let mut response = self
-            .server
-            .execute(
-                execution,
-                tower::service_fn(move |request| {
-                    let handler = Arc::clone(&handler);
-                    async move { handler.call(request).await }
-                }),
-            )
-            .await?;
-        response.output.request_id = request_id;
-        Ok(Response::new(response.output))
+        let response = self.server.execute(execution, self.handler.clone()).await?;
+        let mut output = match (is_timer, response.output) {
+            (false, Output::Message(output)) | (true, Output::Timer(output)) => output,
+            _ => return Err(Status::internal("logic 调用结果与来源不匹配")),
+        };
+        output.request_id = request_id;
+        Ok(Response::new(output))
     }
 }
 
@@ -200,25 +202,19 @@ impl proto::logic_rpc_server::LogicRpc for Service {
         let mut execution = self.server.request(
             &metadata,
             format!("event/{}", event.event_type),
-            (context.clone(), Arc::clone(&event)),
+            Input::Event(context.clone(), Arc::clone(&event)),
         )?;
         execution.extensions_mut().insert(context.clone());
         execution.extensions_mut().insert(event.event_id.clone());
         execution.extensions_mut().insert(event.topic.clone());
         execution.extensions_mut().insert(Arc::clone(&event));
-        let handler = Arc::clone(&self.handler);
-        let mut response = self
-            .server
-            .execute(
-                execution,
-                tower::service_fn(move |request| {
-                    let handler = Arc::clone(&handler);
-                    async move { handler.event(request).await }
-                }),
-            )
-            .await?;
-        response.output.request_id = request_id;
-        Ok(Response::new(response.output))
+        let response = self.server.execute(execution, self.handler.clone()).await?;
+        let mut output = match response.output {
+            Output::Event(output) => output,
+            _ => return Err(Status::internal("logic 事件结果与来源不匹配")),
+        };
+        output.request_id = request_id;
+        Ok(Response::new(output))
     }
 
     async fn call(&self, request: Request<CallRequest>) -> Result<Response<CallResponse>, Status> {

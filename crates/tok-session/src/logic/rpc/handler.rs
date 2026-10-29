@@ -9,48 +9,12 @@ use tonic::Status;
 use tower::{Layer as _, Service, ServiceExt};
 
 /// RPC 边界处理结果；通用处理链保留各自业务错误，边界映射为 Status。
-pub type CallTask<'a> =
+pub(crate) type CallTask<'a> =
     Pin<Box<dyn Future<Output = Result<Response<CallResponse>, Status>> + Send + 'a>>;
 /// 内部事件执行结果，不含客户端业务回应。
-pub type EventTask<'a> =
+pub(crate) type EventTask<'a> =
     Pin<Box<dyn Future<Output = Result<Response<proto::EventResponse>, Status>> + Send + 'a>>;
 
-/// 游戏协议处理入口；请求、timer 与服务器事件保持各自语义和结果类型。
-///
-/// 这是上层游戏协议契约，不属于通用 RPC 设施。
-pub trait Handler: Send + Sync {
-    /// 处理已校验的调用，不重置预算或自行入队。
-    fn call(&self, request: ExecutionRequest<(CallContext, Payload)>) -> CallTask<'_>;
-    /// 处理独立的服务器事件，不进入请求或 timer 分发表。
-    fn event(
-        &self,
-        _request: ExecutionRequest<(CallContext, Arc<tok_events::Message>)>,
-    ) -> EventTask<'_> {
-        Box::pin(async { Err(Status::unimplemented("内部事件入口尚未实现")) })
-    }
-}
-
-/// 将已安装中间件的上下文 Tower Service 适配为 RPC handler，不添加重试或默认锁。
-pub struct TowerHandler<S>(
-    /// 克隆应共享所需并发或限流状态的 Service。
-    pub S,
-);
-impl<S> Handler for TowerHandler<S>
-where
-    S: Service<
-            ExecutionRequest<(CallContext, Payload)>,
-            Response = Response<CallResponse>,
-            Error = Status,
-        > + Clone
-        + Send
-        + Sync
-        + 'static,
-    S::Future: Send,
-{
-    fn call(&self, request: ExecutionRequest<(CallContext, Payload)>) -> CallTask<'_> {
-        Box::pin(self.0.clone().oneshot(request))
-    }
-}
 type RegisteredHandler =
     dyn Fn(ExecutionRequest<(CallContext, Vec<u8>)>) -> CallTask<'static> + Send + Sync;
 
@@ -105,6 +69,10 @@ impl<G: tok_execution::Registry + ?Sized> HandlerRegistry<G> {
     }
 }
 impl<G: tok_execution::Registry> HandlerRegistry<G> {
+    /// 完成注册，构建消息、事件和 timer 共用的 Tower Service。
+    pub fn into_service(self) -> super::RegistryService<G> {
+        super::RegistryService::new(Arc::new(self))
+    }
     /// 注入自定义消息注册器与派发错误映射，保留游戏调用、事件和 timer 的协议约束。
     pub fn from_registry(
         registry: G,
@@ -307,7 +275,7 @@ impl<G: tok_execution::Registry + ?Sized> HandlerRegistry<G> {
         Ok(())
     }
 }
-impl<G: ?Sized> Handler for HandlerRegistry<G>
+impl<G: ?Sized> HandlerRegistry<G>
 where
     G: tok_execution::Registry<
             Key = u32,
@@ -320,7 +288,7 @@ where
         > + 'static,
     G::DispatchError: Send + 'static,
 {
-    fn event(
+    pub(super) fn event(
         &self,
         request: ExecutionRequest<(CallContext, Arc<tok_events::Message>)>,
     ) -> EventTask<'_> {
@@ -346,7 +314,7 @@ where
             }))
         })
     }
-    fn call(&self, request: ExecutionRequest<(CallContext, Payload)>) -> CallTask<'_> {
+    pub(super) fn call(&self, request: ExecutionRequest<(CallContext, Payload)>) -> CallTask<'_> {
         Box::pin(async move {
             let (request_context, (call, payload), mut extensions) = request.into_parts();
             extensions.insert(call.clone());

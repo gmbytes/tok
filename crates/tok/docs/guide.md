@@ -471,7 +471,7 @@ assert_eq!(Value::decode(result.output.message.body.as_slice())?.value, 42);
 
 `registry::Handler` 擦除具体 Service 类型，每次调用仅克隆一次 Service，并通过 Call::new 保护就绪等待与执行。new 接入原始业务错误；[`from_execution_service`](execution::registry::Handler::from_execution_service) 接入已返回共同执行错误的链，保留 Stopped / Inner 的单层结构。自定义派发须接续 Request / Response、原期限、取消和追踪；`registry::Service::new(Arc<G>, key)` 同时保护取键与整个自定义派发过程，允许 G 为 dyn Registry。注册错误保留实现自己的类型，不能通过包装静默放大预算或自动重试。
 
-protobuf::Registry / message::Registry 的最后一个泛型参数 G 是底层 Registry，默认值仍使用静态 Table；from_registry 注入自有实现，from_shared_registry 接受共享实现或 trait 对象。调用时不要求 G 可克隆；通过这两个适配器注册新路由时要求 G: Clone，以便在共享状态下明确按实现的克隆语义更新。普通业务 RPC 的 business::Handler 和玩家 HandlerRegistry 同样支持自定义底层注册器；自定义构造使用 business::Handler::from_registry 或 HandlerRegistry::from_registry / from_shared_registry，并显式注入 G::DispatchError 到 Status 的映射；默认 new 保留默认表的映射。timer 和服务器事件继续走各自隔离入口。
+protobuf::Registry / message::Registry 的最后一个泛型参数 G 是底层 Registry，默认值仍使用静态 Table；from_registry 注入自有实现，from_shared_registry 接受共享实现或 trait 对象。调用时不要求 G 可克隆；通过这两个适配器注册新路由时要求 G: Clone，以便在共享状态下明确按实现的克隆语义更新。普通业务 RPC 的 RegistryHandler 和玩家 HandlerRegistry 同样支持自定义底层注册器；自定义构造使用 RegistryHandler::from_registry 或 HandlerRegistry::from_registry / from_shared_registry，并显式注入 G::DispatchError 到 Status 的映射；默认 new 保留默认表的映射。timer 和服务器事件继续走各自隔离入口。
 
 这次抽象的是通用按键消息注册与派发。protobuf / message 的 Registry 是其协议适配器；events::Registry 仍负责借用状态的事件 fan-out，不强行纳入单目标消息表，也不新增内建热更新管理或远端路由功能。
 
@@ -480,6 +480,8 @@ protobuf::Registry / message::Registry 的最后一个泛型参数 G 是底层 R
 [`message::protobuf`] 提供正文编解码适配，封装上述通用分发表；消息键 K 仍为泛型，不把 protobuf 放入执行核心。
 `protobuf::Registry<K, C, O, E>` 的 C 是业务状态，O 是附加结果；`message::Reply` 包含回应消息和附加结果，`message::Message<K>` 包含键和编码正文，类型不指定编码格式，默认键为 u32。protobuf 模块同时重导出这两个类型。
 [`message::Registry<C, O, E>`] 在其上限定 u32 非零请求与回应编号，Message 是编号消息，Reply 仍保留泛型附加结果。以下示例使用该编号消息表；本地调用不依赖 Tonic 类型。
+
+`message::Registry` 当前的注册 API 使用 protobuf 正文编解码，非零检查发生在注册请求及回应编号时；注入自定义底层注册器后，其直接派发行为由该实现定义。`message::Error` 表达注册配置错误，派发失败保留底层派发错误与执行停止原因。
 
 protobuf 派发路径直接借用 Message.key 调用底层 Registry，不要求键实现 Clone；自定义底层实现和 trait 对象可以使用不可克隆的键。注册回应键与默认静态 Table 的 Clone 约束保持不变，不代表默认表也支持不可克隆的键。
 
@@ -528,13 +530,13 @@ let reply = service.oneshot(Request::new(context, (42, Message {
 assert_eq!(Value::decode(reply.output.message.body.as_slice())?.value, 42);
 
 // 游戏线协议明确使用 u32 消息 ID；同一分发表由本地和 RPC 共用。
-let adapter = message::rpc::business::Handler::new(
+let adapter = message::rpc::RegistryHandler::new(
     registry,
     |call| call.bid.as_deref().and_then(|id| id.parse::<u64>().ok())
         .ok_or_else(|| message::rpc::tonic::Status::invalid_argument("目标 ID 无效")),
     |error: std::io::Error| message::rpc::tonic::Status::invalid_argument(error.to_string()),
 );
-let rpc = message::rpc::Service::new("local", "custom", Arc::new(adapter))?;
+let rpc = message::rpc::Service::new("local", "custom", adapter)?;
 # drop(rpc);
 # Ok(())
 # }
@@ -593,7 +595,8 @@ assert_eq!(response.output, "42");
 
 自定义 protobuf 不需要依赖游戏协议：用 [`grpc::Client::execute`] 包装生成客户端；服务端由 [`grpc::Server::request`] 建立预算、追踪和取消范围并安装本地请求扩展，再用 [`grpc::Server::execute`] 调用任意类型化 Tower Service。协议适配器负责认证、输入校验、操作名和类型化元信息，Server 不负责解码或决定业务入口。
 
-普通业务用 [`message::Registry`] 和 [`message::rpc::business::Handler`] 组装，再以 [`message::rpc::Service`] 绑定；logic 业务用 [`session::logic::rpc::HandlerRegistry`] 和 [`session::logic::rpc::Service`]。
+普通业务用 [`message::Registry`] 和 [`message::rpc::RegistryHandler`] 组装，再以 [`message::rpc::Service`] 绑定；logic 业务用 [`session::logic::rpc::HandlerRegistry`] 和 [`session::logic::rpc::Service`]。
+普通业务出站使用 [`message::rpc::Client`]；接收端直接安装 Tower Service，[`message::rpc::RegistryHandler`] 将编号消息注册表适配为 Service。[`message::rpc::Error`] 用于 RPC 适配器的构造和配置，调用失败由具体 gRPC 状态表达。
 玩家服务使用 `into_logic`，普通业务服务使用 `into_business`，两者使用不同的 protobuf 服务。
 其他业务也可以使用自己生成的 gRPC 服务，通过 [`grpc::Listener::add_service`] 绑定。
 同一端点不能重复注册同一个 protobuf 服务；多个普通业务服务共享端点时，应分别定义不同的 protobuf 服务。
@@ -603,7 +606,7 @@ assert_eq!(response.output, "42");
 
 ```rust,no_run
 use std::sync::Arc;
-use tok::{AppConfig, message::{Registry, Reply, rpc::{business, Service}}, application::{Application, shutdown_signal}, lifecycle::{Init, InitFuture, task::Task}};
+use tok::{AppConfig, message::{Registry, Reply, rpc::{RegistryHandler, Service}}, application::{Application, shutdown_signal}, lifecycle::{Init, InitFuture, task::Task}};
 
 #[derive(Clone, PartialEq, prost::Message)]
 struct ReadGuild {
@@ -636,13 +639,13 @@ endpoint = "internal-rpc"
                 }
                 Ok(tok::execution::Response::new(Reply { message: request, output: () }))
             })?;
-            let handler = business::Handler::new(Arc::new(handlers), |call| {
+            let handler = RegistryHandler::new(Arc::new(handlers), |call| {
                 call.bid.as_deref().and_then(|id| id.parse::<u64>().ok())
                     .ok_or_else(|| tok::message::rpc::tonic::Status::invalid_argument("业务 ID 无效"))
             }, |status| status);
             init.extensions.get::<tok::message::rpc::Binding>()
                 .ok_or_else(|| std::io::Error::other("缺少 RPC 初始化绑定"))?
-                .install(&init, Arc::new(handler))?;
+                .install(&init, handler)?;
             Ok(Box::pin(async move {
                 init.service.cancellation().cancelled().await;
                 Ok(())
@@ -665,7 +668,7 @@ Application::register_rpc_factory 按配置的 factory（默认服务名）建�
 调用方通过 [`application::Application::service_directory`] 或 [`application::Binding::directory`]
 查询服务，再用 [`infra::routing::route`] 按 bid 选点。
 [`grpc::Client`] 管理共享连接、缓存撤销、默认期限及通用调用执行，不包含 Player 或 Business 方法。
-[`session::logic::rpc::Client`] 提供 call / handle_event，[`message::rpc::business::Client`] 提供普通业务 call；
+[`session::logic::rpc::Client`] 提供 call / handle_event，[`message::rpc::Client`] 提供普通业务 call；
 构造时分别传入同一个 `Arc<Client>`，协议适配器共享连接但保持各自的调用约束。call 接收 `execution::Request<(CallContext, Payload)>`，handle_event 接收 `execution::Request<(CallContext, Arc<events::Message>)>`；协议 CallContext 表示远端关联与目标，外层 Context.service 保留本地执行身份。
 自定义 protobuf 客户端推荐通过 Client::execute 传入 `execution::Request<tonic::Request<T>>`，接续本地调用范围和扩展；也可以使用 Client::channel 取得 Channel，自行管理调用预算和协议适配。
 Client 的期限上限须大于零且不超过一天。execute 保留上游原截止点、取消和更短的请求 grpc-timeout，准备与发送共用本地截止点，超期结果不会成功返回；这不会中断阻塞代码或回滚远端副作用。
@@ -777,7 +780,7 @@ Channel 缓存有界，按 LRU 淘汰最久未访问的连接；命中会刷新�
 上下文校验检查目标和字段一致性，不能代替内部调用身份认证或全局 session 所有权校验。
 
 每次调用配置期限且不自动重试。超时不表示远端业务已回滚；未知结果由游戏处理。
-用户可通过 [`message::rpc::TowerHandler`] 注入自行组装的 Tower Service，选择并发限制、过载和锁策略。
+用户可直接注入自行组装的 Tower Service，选择并发限制、过载和锁策略。
 普通业务入口不会自动加锁。
 [`session::notification`] 编码强类型通知，真正下行序号和补发由后续网关 session 分配。
 
@@ -840,24 +843,20 @@ assert_eq!(service.oneshot(Request::new(context, 41)).await?.output, 42);
 
 通用 Config 只定义时间预算，命名空间来自取键函数。`lock::Error<E>` 区分取键、后端获取、整体获取超时、剩余租期不足、业务执行超时、原始业务错误、释放失败与原上下文停止。获取、执行和释放共用原 Context 的期限、取消和追踪；内层 Service 的 readiness 也计入持锁执行预算。释放失败时保留原始 Err，以及结果判断函数判为失败的 Ok 回应，只覆盖业务成功。
 
-[`message::rpc::lock::Layer`] 通过 [`message::rpc::TowerHandler`] 在普通业务 RPC 的上下文校验之后包住 handler。
+[`message::rpc::lock::Layer`] 在普通业务 RPC 的上下文校验之后包住业务 Service。
 按逻辑服务名与上下文 bid 加锁，空 bid 拒绝执行，不同服务隔离；节点名不进入锁键。
 由 Rust 组装代码按服务显式安装，不需要 `ServiceConfig` 开关：
 
 ```rust
 use std::sync::Arc;
-use tok::{core::lock::Backend, infra::locks, message::{Registry, rpc::{business, Handler, Service, TowerHandler, lock, tower::{self, Layer}}}};
+use tok::{core::lock::Backend, infra::locks, message::{Registry, rpc::{RegistryHandler, Service, lock, tower::Layer}}};
 
 # fn example() -> Result<(), Box<dyn std::error::Error>> {
 let backend: Arc<dyn Backend> = Arc::new(locks::Memory::new(1024)?);
 let routes = Arc::new(Registry::<()>::new()); // 在此注册业务 handler。
-let registry = Arc::new(business::Handler::new(routes, |_| Ok(()), |error: std::convert::Infallible| match error {}));
-let service = tower::service_fn(move |request| {
-    let registry = Arc::clone(&registry);
-    async move { registry.call(request).await }
-});
+let service = RegistryHandler::new(routes, |_| Ok(()), |error: std::convert::Infallible| match error {});
 let layer = lock::Layer::new(backend, "guild", tok::execution::lock::Config::default())?;
-let rpc = Service::new("node-a", "guild", Arc::new(TowerHandler(layer.layer(service))))?
+let rpc = Service::new("node-a", "guild", layer.layer(service))?
     .into_business();
 # drop(rpc);
 # Ok(())
@@ -1330,7 +1329,7 @@ handlers.register_timer(3, |request: tok::execution::Request<(tok::session::logi
 [`session::logic::rpc::HandlerRegistry::register_timer`] 独立于客户端请求分发表；`CallContext.timer` 由内部 RPC 信封传递，
 客户端不能通过填写 timer 的消息 ID 进入该处理函数。它包含 ID、预定与实际触发时刻，仍需遵循部署侧的内部调用身份约定。
 业务正文只包含游戏参数，timer 更新和触发来源不直接发送客户端。
-直接构造 [`session::logic::rpc::CallContext`] 的普通调用需填写 `timer: None`；自定义 Handler 和 Tower 中间件可以读取该字段识别内部计时来源。
+直接构造 [`session::logic::rpc::CallContext`] 的普通调用需填写 `timer: None`；统一 logic Tower 输入通过不同变体区分消息、事件与 timer 来源。
 
 session 建立时对齐 UTC 与单调时钟，此后按同一基准等待，墙钟调整不会重放已调度的周期。
 每个 session 使用一个调度 future，与执行循环共同受网关监督，不为每个 timer 创建任务。
@@ -1361,7 +1360,7 @@ let factory = move |init: Init| -> InitFuture {
     let binding = binding.clone();
     Box::pin(async move {
         let registry = HandlerRegistry::new(); // 在此创建状态、注册路由和安装 Layer。
-        binding.install(&init, Arc::new(registry))?;
+        binding.install(&init, registry.into_service())?;
         Ok(Box::pin(async move {
             init.service.cancellation().cancelled().await;
             Ok(())
@@ -1433,6 +1432,39 @@ ID 限制为 1 到 128 个可打印 ASCII 非空白字节，追踪头每字段�
 ## Core NATS 即时事件
 
 本节介绍当前按 topic 和类型建立的固定兴趣订阅。P5 已接通传输路由，本地与远程注册表及 gateway/session 处理链沿用共同协议；P6 已提供按组件绑定的会话兴趣聚合，不按 subject_id 自动订阅。
+
+服务工厂可用 [`events::service::install`] 安装服务级 Tower 事件链，订阅就绪后才完成初始化；无 RPC 的服务也可以使用。下面的处理链直接接收编码事件；也可用 [`events::service::RegistryService`] 将启用 protobuf 解码的事件注册表作为末端，再叠加业务 Layer。
+
+```rust,no_run
+use std::{sync::Arc, time::Duration};
+use tok::{events::{self, Message, Outcome, TopicFilter}, execution::{Request, Response}, lifecycle::{Init, InitFuture, task::Task}};
+fn factory(bus: Arc<events::nats::Bus>) -> impl Fn(Init) -> InitFuture + Send + Sync {
+    move |init| {
+        let bus = Arc::clone(&bus);
+        Box::pin(async move {
+            let chain = tower::service_fn(|request: Request<Arc<Message>>| async move {
+                // 根据 request.context 和 request.input 更新本服务状态。
+                let _ = request;
+                Ok::<_, events::Error>(Response::new(Outcome::Handled))
+            });
+            events::service::install(&init, bus.as_ref(), events::service::Config {
+                name: "configuration-events".into(),
+                event_types: vec!["game.config.changed.v1".into()],
+                topics: TopicFilter::All,
+                group: None,
+                extensions: Default::default(),
+                timeout: Duration::from_secs(5),
+            }, chain).await?;
+            Ok(Box::pin(async move {
+                init.service.cancellation().cancelled().await;
+                Ok(())
+            }) as Task)
+        })
+    }
+}
+```
+
+`extensions` 只安装明确选择的本服务能力；不自动继承发布方或 session 能力。传输为每次消费建立独立预算和追踪范围，业务结果不返回发布者。`group: None` 表示各实例独立接收；同名 group 的订阅者分担匹配事件。初始化失败、取消或超时不会发布部分就绪服务；服务停止时通知消费任务退出，整体收束受服务关闭期限约束。
 
 调用链内使用 [`events::nats::Bus::publish_request`] 传入 `Request<Envelope<E>>`，或使用 [`events::nats::Bus::publisher`] 组合 `Service<Request<Message>>`；保留本地期限、取消与追踪，Extensions 不进入网络。原生 [`events::nats::Bus::publish_event`] / publish 仍供显式独立传输出口使用。任何服务都可以发布，用 [`events::Registry`] 订阅自己关心的类型。
 目标由业务正文表达，订阅者自行解释；总线不要求 player、session 或 RPC。
@@ -1532,7 +1564,7 @@ Ingress 不依赖 NATS，也不限制只能安装一个事件消费任务；可�
 
 需要会话内定制处理时，注入自己的 [`gateway::logic::Executor`]，实现 execute_event 并委托其他来源给 RpcExecutor。
 事件仍先进入会话 FIFO，续租并检查所有权后执行；默认 RPC 适配调用 LogicRpc.HandleEvent，返回独立 EventResponse（序号、错误、timer 更新），类型上没有客户端 payload。
-[`session::logic::rpc::HandlerRegistry::register_event`] 与普通请求、timer 表隔离；自定义 Handler 可实现 event，TowerHandler 适配携带共同 Request 的 Call 输入，事件路由通过同一事件 Registry 安装 Layer。
+[`session::logic::rpc::HandlerRegistry::register_event`] 与普通请求、timer 表隔离；注册器通过 `into_service` 提供统一 Tower 入口，事件路由通过同一事件 Registry 安装 Layer。
 GatewayIngress、Handler、SessionManager 服务器 API、Executor 分别覆盖接入、网关事件编排、会话筛选和串行执行扩展。
 游戏附加内存状态不会自动迁移，若需跨网关恢复，应另外设计快照与恢复规则。
 

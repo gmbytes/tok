@@ -53,6 +53,147 @@ impl Handler for Interest {
 
 #[tokio::test]
 #[ignore = "需要真实 NATS；通过 just nats-test 显式运行"]
+async fn service_install_runs_tower_chain_and_stops_with_service() {
+    let bus = Arc::new(Bus::connect(config()).await.unwrap());
+    let (seen, mut received) = tokio::sync::mpsc::unbounded_channel();
+    let factory_bus = Arc::clone(&bus);
+    let factory = Arc::new(
+        move |init: tok_lifecycle::Init| -> tok_lifecycle::InitFuture {
+            let bus = Arc::clone(&factory_bus);
+            let seen = seen.clone();
+            Box::pin(async move {
+                let chain =
+                    tower::service_fn(move |request: tok_execution::Request<Arc<Message>>| {
+                        let seen = seen.clone();
+                        async move {
+                            seen.send((
+                                request.context.service().clone(),
+                                request.input.event_type.clone(),
+                            ))
+                            .unwrap();
+                            Ok::<_, tok_events::Error>(tok_execution::Response::new(
+                                Outcome::Handled,
+                            ))
+                        }
+                    });
+                tok_events::service::install(
+                    &init,
+                    bus.as_ref(),
+                    tok_events::service::Config {
+                        name: "service-events".into(),
+                        event_types: vec![Changed::NAME.into()],
+                        topics: tok_events::TopicFilter::All,
+                        group: None,
+                        extensions: Default::default(),
+                        timeout: Duration::from_secs(2),
+                    },
+                    chain,
+                )
+                .await?;
+                let stop = init.service.cancellation();
+                Ok(Box::pin(async move {
+                    stop.cancelled().await;
+                    Ok(())
+                }) as tok_lifecycle::task::Task)
+            })
+        },
+    );
+    let identity = tok_core::service::Identity {
+        node_id: "node".into(),
+        service_name: "service-events".into(),
+    };
+    let builder =
+        tok_lifecycle::Builder::new(identity.clone(), 2, CancellationToken::new()).unwrap();
+    let prepared = builder
+        .build(factory, Default::default(), Duration::from_secs(3))
+        .await
+        .unwrap();
+    let running = prepared.start();
+    let handle = running.handle();
+    let run = tokio::spawn(running.run(Duration::from_secs(2)));
+    bus.publish(&message()).await.unwrap();
+    let (service, event_type) = tokio::time::timeout(Duration::from_secs(2), received.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(service, identity);
+    assert_eq!(event_type, Changed::NAME);
+    handle.request_stop();
+    run.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+#[ignore = "需要真实 NATS；通过 just nats-test 显式运行"]
+async fn service_install_uses_the_same_typed_registry_as_local_dispatch() {
+    let bus = Arc::new(Bus::connect(config()).await.unwrap());
+    let (seen, mut received) = tokio::sync::mpsc::unbounded_channel();
+    let mut registry = tok_events::Registry::new(2).unwrap();
+    registry
+        .register::<Changed, _>(move |request| {
+            let seen = seen.clone();
+            Box::pin(async move {
+                seen.send(request.input.event.payload.value).unwrap();
+                Ok(tok_execution::Response::new(Outcome::Handled))
+            })
+        })
+        .unwrap();
+    registry.enable_protobuf::<Changed>().unwrap();
+    let chain = tok_events::service::RegistryService::new(Arc::new(registry));
+    let types = chain.event_types();
+    let factory_bus = Arc::clone(&bus);
+    let factory = Arc::new(
+        move |init: tok_lifecycle::Init| -> tok_lifecycle::InitFuture {
+            let bus = Arc::clone(&factory_bus);
+            let chain = chain.clone();
+            let event_types = types.clone();
+            Box::pin(async move {
+                tok_events::service::install(
+                    &init,
+                    bus.as_ref(),
+                    tok_events::service::Config {
+                        name: "typed-events".into(),
+                        event_types,
+                        topics: tok_events::TopicFilter::All,
+                        group: None,
+                        extensions: Default::default(),
+                        timeout: Duration::from_secs(2),
+                    },
+                    chain,
+                )
+                .await?;
+                let stop = init.service.cancellation();
+                Ok(Box::pin(async move {
+                    stop.cancelled().await;
+                    Ok(())
+                }) as tok_lifecycle::task::Task)
+            })
+        },
+    );
+    let identity = tok_core::service::Identity {
+        node_id: "node".into(),
+        service_name: "typed".into(),
+    };
+    let prepared = tok_lifecycle::Builder::new(identity, 2, CancellationToken::new())
+        .unwrap()
+        .build(factory, Default::default(), Duration::from_secs(3))
+        .await
+        .unwrap();
+    let running = prepared.start();
+    let handle = running.handle();
+    let run = tokio::spawn(running.run(Duration::from_secs(2)));
+    bus.publish(&message()).await.unwrap();
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(2), received.recv())
+            .await
+            .unwrap(),
+        Some(7)
+    );
+    handle.request_stop();
+    run.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+#[ignore = "需要真实 NATS；通过 just nats-test 显式运行"]
 async fn groups_share_within_each_group_and_independent_subscribers_receive_every_event() {
     let bus = Bus::connect(Config {
         max_message_bytes: 4096,

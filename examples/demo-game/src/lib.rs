@@ -153,7 +153,7 @@ pub fn application_with_locks(
                 init.extensions
                     .get::<tok::session::logic::rpc::Binding>()
                     .ok_or_else(|| std::io::Error::other("服务缺少 RPC 绑定"))?
-                    .install(&init, Arc::new(handlers))?;
+                    .install(&init, handlers.into_service())?;
                 Ok(Box::pin(async move {
                     init.service.cancellation().cancelled().await;
                     Ok(())
@@ -189,7 +189,7 @@ pub async fn rpc_smoke(directory: &dyn ServiceDirectory) -> Result<(), Error> {
     let guild = tok::infra::routing::route(directory, "guild", "7")?;
     let clients = Arc::new(Client::new(Duration::from_secs(2), 8)?);
     let player_client = tok::session::logic::rpc::Client::new(Arc::clone(&clients));
-    let business_client = tok::message::rpc::business::Client::new(clients);
+    let business_client = tok::message::rpc::Client::new(clients);
     let response = player_client
         .call(
             &player,

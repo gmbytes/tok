@@ -1,15 +1,17 @@
 //! 将端点的业务入口与工厂初始化结果绑定；共享端点仍由 Application 一次监听。
-use super::CallContext;
-use super::{CallTask, Handler};
-use std::sync::{Arc, OnceLock};
+use super::{Chain, Input, Output};
+use std::{
+    sync::{Arc, OnceLock},
+    task::{Context, Poll},
+};
 use tok_core::{Extensions, service::Identity};
 use tok_execution::Request;
 use tok_lifecycle::{Handle, Init};
-use tok_proto::internal::v1::Payload;
 use tonic::Status;
+use tower::ServiceExt;
 
 struct Installed {
-    handler: Arc<dyn Handler>,
+    handler: Chain,
     service: Handle,
     extensions: Extensions,
 }
@@ -31,7 +33,11 @@ impl Binding {
         self.installed.get().is_some()
     }
     /// 在所属服务工厂中安装实际 handler、生命周期与能力；拒绝错误身份和重复安装。
-    pub fn install(&self, init: &Init, handler: Arc<dyn Handler>) -> Result<(), super::Error> {
+    pub fn install<S>(&self, init: &Init, handler: S) -> Result<(), super::Error>
+    where
+        S: tower::Service<Input, Response = Output, Error = Status> + Clone + Send + Sync + 'static,
+        S::Future: Send + 'static,
+    {
         if init.identity != self.identity {
             return Err(super::Error::Configuration(
                 "RPC 绑定与初始化服务身份不匹配".into(),
@@ -42,7 +48,7 @@ impl Binding {
         drop(extensions.remove::<Self>());
         self.installed
             .set(Installed {
-                handler,
+                handler: Chain::new(handler),
                 service: init.service.clone(),
                 extensions,
             })
@@ -61,17 +67,27 @@ impl Binding {
         Ok(installed)
     }
 }
-impl Handler for Binding {
-    fn call(&self, mut request: Request<(CallContext, Payload)>) -> CallTask<'_> {
+impl tower::Service<Input> for Binding {
+    type Response = Output;
+    type Error = Status;
+    type Future =
+        std::pin::Pin<Box<dyn std::future::Future<Output = Result<Output, Status>> + Send>>;
+
+    fn poll_ready(&mut self, _: &mut Context<'_>) -> Poll<Result<(), Status>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, mut request: Input) -> Self::Future {
+        let binding = self.clone();
         Box::pin(async move {
-            let installed = self.prepare(&mut request)?;
+            let installed = binding.prepare(&mut request)?;
             let call = request.input.0.clone();
             request.extensions_mut().insert(call);
             let stop = installed.service.cancellation();
             let cancellation = request.context.cancellation();
             tokio::select! { biased;
                 ()=stop.cancelled()=> {cancellation.cancel();Err(Status::cancelled("服务正在退出"))},
-                result=installed.handler.call(request)=>result,
+                result=installed.handler.clone().oneshot(request)=>result,
             }
         })
     }

@@ -81,22 +81,26 @@ impl lifecycle::Factory for Factory {
 fn config(address: std::net::SocketAddr) -> AppConfig {
     AppConfig::from_toml(&format!("node_id='local'\ndiscovery='memory'\n[[endpoints]]\nname='internal'\nprotocol='grpc'\naddress='{address}'\n[[services]]\nservice_name='player'\nendpoint='internal'\n[[services]]\nservice_name='guild'\nendpoint='internal'")).unwrap()
 }
-fn business_handler() -> Arc<dyn tok::message::rpc::Handler> {
+fn business_handler() -> tok::message::rpc::RegistryHandler<(), std::convert::Infallible> {
     let registry = Arc::new(tok::message::Registry::<()>::new());
-    Arc::new(tok::message::rpc::business::Handler::new(
+    tok::message::rpc::RegistryHandler::new(
         registry,
         |_| Ok(()),
         |error: std::convert::Infallible| match error {},
-    ))
+    )
 }
 
 fn endpoint() -> Listener {
     Listener::new()
         .add_service(
             "player",
-            RpcService::new("local", "player", Arc::new(HandlerRegistry::new()))
-                .unwrap()
-                .into_logic(),
+            RpcService::new(
+                "local",
+                "player",
+                tok::session::logic::rpc::RegistryService::new(Arc::new(HandlerRegistry::new())),
+            )
+            .unwrap()
+            .into_logic(),
         )
         .unwrap()
         .add_service(
@@ -236,9 +240,13 @@ async fn configuration_requires_complete_and_unique_endpoint_bindings() {
     let incomplete = Listener::new()
         .add_service(
             "player",
-            RpcService::new("local", "player", Arc::new(HandlerRegistry::new()))
-                .unwrap()
-                .into_logic(),
+            RpcService::new(
+                "local",
+                "player",
+                tok::session::logic::rpc::RegistryService::new(Arc::new(HandlerRegistry::new())),
+            )
+            .unwrap()
+            .into_logic(),
         )
         .unwrap();
     assert!(app.register_rpc_endpoint("internal", incomplete).is_err());
@@ -250,7 +258,10 @@ fn installing_factory(init: Init) -> InitFuture {
     Box::pin(async move {
         if let Some(binding) = init.extensions.get::<tok::session::logic::rpc::Binding>() {
             assert!(!binding.is_installed());
-            binding.install(&init, Arc::new(HandlerRegistry::new()))?;
+            binding.install(
+                &init,
+                tok::session::logic::rpc::RegistryService::new(Arc::new(HandlerRegistry::new())),
+            )?;
             assert!(binding.is_installed());
         } else {
             let binding = init.extensions.get::<tok::message::rpc::Binding>().unwrap();
@@ -348,17 +359,25 @@ async fn rpc_factory_validation_is_atomic_and_custom_bindings_can_complete_the_s
     .unwrap();
     app.bind_rpc(
         "player",
-        RpcService::new("local", "player", Arc::new(HandlerRegistry::new()))
-            .unwrap()
-            .into_logic(),
+        RpcService::new(
+            "local",
+            "player",
+            tok::session::logic::rpc::RegistryService::new(Arc::new(HandlerRegistry::new())),
+        )
+        .unwrap()
+        .into_logic(),
     )
     .unwrap();
     assert!(
         app.bind_rpc(
             "guild",
-            RpcService::new("local", "guild", Arc::new(HandlerRegistry::new()))
-                .unwrap()
-                .into_logic()
+            RpcService::new(
+                "local",
+                "guild",
+                tok::session::logic::rpc::RegistryService::new(Arc::new(HandlerRegistry::new()))
+            )
+            .unwrap()
+            .into_logic()
         )
         .is_err()
     );
@@ -437,9 +456,15 @@ async fn application_accepts_listener_layers_without_generic_registration() {
         Listener::from_server(tok::grpc::tonic::transport::Server::builder().layer(layer))
             .add_service(
                 "player",
-                RpcService::new("local", "player", Arc::new(HandlerRegistry::new()))
-                    .unwrap()
-                    .into_logic(),
+                RpcService::new(
+                    "local",
+                    "player",
+                    tok::session::logic::rpc::RegistryService::new(
+                        Arc::new(HandlerRegistry::new()),
+                    ),
+                )
+                .unwrap()
+                .into_logic(),
             )
             .unwrap()
             .add_service(
@@ -474,7 +499,7 @@ async fn application_accepts_listener_layers_without_generic_registration() {
         })
         .await
         .unwrap();
-        let client = tok::message::rpc::business::Client::new(Arc::new(
+        let client = tok::message::rpc::Client::new(Arc::new(
             tok::grpc::Client::new(Duration::from_secs(1), 1).unwrap(),
         ));
         let error = client

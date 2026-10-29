@@ -820,4 +820,8 @@ TLS 导出器初始化与关闭；保留真实 HTTP Collector 导出回归。
 
 tok-player 更名为 tok-session，gateway::player 更名为 gateway::logic，逻辑 RPC 改为 session::logic::rpc 和 LogicRpc。框架的业务主体字段改为 subject_id；具体游戏协议仍可使用 player_id。场景接入和公共服务 reminder 尚未实现；不保留旧配置、Rust 路径或 gRPC 服务名，令牌 protobuf 二进制编码保持不变。
 
+### tok-message 模块组织校正（2026-10-29）
+
+普通业务 RPC 客户端与注册器适配器调整为 rpc::Client 和 rpc::RegistryHandler；保留 Handler、TowerHandler 和可选锁适配。明确根 Registry 使用默认 protobuf 及注册时编号约束，将 logic 事件、timer、执行专项测试迁至 tok-session，并同步更新示例与指南。
+
 本次阶段验证：Windows 全工作区串行测试 345 项通过、32 项外部专项默认跳过；全目标 Clippy、无警告 workspace rustdoc、格式及空白检查通过。未运行真实 Redis/NATS、Linux 或 release 构建。

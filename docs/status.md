@@ -220,7 +220,7 @@ Listener::from_server 已支持带 Tower Layer 的 Tonic Server。内部改为 R
 | 优先顺序 | 修复前代码与事实 | 契约差异及调整方向 |
 | --- | --- | --- |
 | 1 | [gRPC 客户端输入](../crates/tok-grpc/src/client/call.rs)、[执行 Layer](../crates/tok-grpc/src/client/middleware.rs)、[PreparedCall](../crates/tok-grpc/src/client/call.rs) 和 [便捷入口](../crates/tok-grpc/src/client.rs)：Call 只带目标、序号、请求和 Span，Layer 根据 Client timeout / metadata 新建本地截止点，PreparedCall 没有 execution Context | 在本地出站处理链承接 Request<T> / Context，保留适用扩展和取消，并以已有截止点和客户端配置共同限制预算。保留目标独立于 Context.service；根调用须显式建立范围，便捷入口不能要求调用方拆散后再拼接上游 Context。现有外层 execution Layer 可约束本地结果，但不能让被丢弃的扩展重新可见，也不能保证远端取得上游剩余预算 |
-| 2 | [游戏 RPC 编码](../crates/tok-message/src/rpc/call.rs)、[普通业务客户端](../crates/tok-message/src/rpc/business.rs)、[玩家客户端](../crates/tok-session/src/logic/rpc/client.rs)：只接收协议 CallContext / payload，自建发送 Span；[RpcExecutor](../crates/tok-gateway/src/logic/executor.rs) 取 request.input 后不传 request.context | 游戏客户端承接执行请求，在编码正文时保留本地 Context，并交给通用 gRPC 出站适配。CallContext 继续表达远端目标、玩家与协议关联，不代替执行 Context。请求、事件、timer 三条 RpcExecutor 路径均需迁移，避免只修普通 call |
+| 2 | [游戏 RPC 编码](../crates/tok-message/src/rpc/call.rs)、[普通业务客户端](../crates/tok-message/src/rpc/client.rs)、[玩家客户端](../crates/tok-session/src/logic/rpc/client.rs)：只接收协议 CallContext / payload，自建发送 Span；[RpcExecutor](../crates/tok-gateway/src/logic/executor.rs) 取 request.input 后不传 request.context | 游戏客户端承接执行请求，在编码正文时保留本地 Context，并交给通用 gRPC 出站适配。CallContext 继续表达远端目标、玩家与协议关联，不代替执行 Context。请求、事件、timer 三条 RpcExecutor 路径均需迁移，避免只修普通 call |
 | 3 | [玩家准入链](../crates/tok-gateway/src/logic/pipeline.rs) 的 admission 输出仅 LogicalMessage；[BoundSession::submit](../crates/tok-gateway/src/logic/session/handle.rs) 准入后只将正文入队；[RequestJob / worker](../crates/tok-gateway/src/logic/session/worker.rs) 出队后重建执行 Context | 准入中写入的自定义扩展无法进入请求执行链；队列没有携带截止点，执行预算从出队后重新开始。需要保留执行承载并明确准入与已接受工作的范围边界；保留断线后在途业务收束的既有语义，不能直接将连接取消令牌替换为所有阶段共同取消令牌。即使声明准入与执行为独立范围，也须明确扩展转移及预算起点，不能静默丢弃 |
 | 4 | [事件转发/通知组件](../crates/tok-gateway/src/logic/events.rs) 调 deliver 时只传 Delivery；[SessionManager::deliver](../crates/tok-gateway/src/logic/session/events.rs) 不接收 Context；EventJob 只保留事件与当前 Span；[下行入口](../crates/tok-gateway/src/logic/session/handle.rs) 每次新建 Context | 事件中间件写入的本地扩展与消费期限无法接续到投递/下行；异步玩家事件执行只继承部分追踪。应将投递与下行适配接入共同执行承载，区分当前订阅者等待的准入范围与成功入队后的独立 session 工作。跨 session fan-out 由目标安装自身能力并显式筛选源元信息，不复制源 SessionHandle；补发仍不重复执行新下行中间件 |
 | 5 | [GatewayRpcService](../crates/tok-gateway/src/rpc.rs) 四个交接方法直接 into_inner，再调用 SessionManager；[交接协调](../crates/tok-gateway/src/logic/session/handoff.rs) 直接使用生成的 GatewayRpcClient 与 timeout_at | 内部交接服务未通过 Server::context / 共同执行链，接收端丢弃 metadata，出站与接收入口缺少一致的本地能力、追踪和预算适配。现有 budget_ms、handoff deadline、租约和补偿状态机必须保留；接入 Context 后合并限制，不能将已有取消/完成补偿简单绑定到已失效的原调用 |
@@ -435,5 +435,17 @@ tok-player 新增公共消息、gRPC、事件和生命周期设施的依赖，�
 本次为未发布协议的破坏性命名变更：旧 Rust 路径、配置键和 gRPC 服务名不提供兼容。protobuf 字段编号及令牌载荷的二进制编码不变；相同密钥、有效期和所有权条件下，旧签名令牌仍可验证，旧 gRPC 服务名则不可继续使用。迁移后的 tok-session 尚待用户最终审查确认。
 
 Windows 验证：workspace 测试（含 21 项指南示例）、全目标 Clippy、无警告 rustdoc、格式和 LF 检查，以及 RPC、事件 smoke 通过；示例业务字段恢复后补跑示例测试。真实 Redis / NATS、Linux 与 release 构建未运行。
+
+### tok-message 模块组织校正（2026-10-29）
+
+普通业务 RPC 的客户端和注册器适配器从 business 命名空间移到 rpc::Client 和 rpc::RegistryHandler；Handler trait、TowerHandler、Service、Binding 和可选 lock 保持各自职责。根 Registry 仍为默认 protobuf 编号消息注册器，注册时检查非零编号，自定义底层注册器自行定义派发行为；根 Error 是注册错误，rpc::Error 用于构造和配置。专门验证 logic 会话事件、timer 和执行的集成测试迁入 tok-session，跨入口组合测试继续保留。旧 Rust 路径不提供兼容别名。
+
+验证：Windows workspace 测试（含 21 项指南示例）、全目标 Clippy、无警告 rustdoc、格式和 LF 检查，以及共享端点 RPC smoke 通过；未运行真实 Redis / NATS、Linux 或 release 构建。
+
+普通 RPC 的 Service / Binding 直接接收 Tower Service，内部以 Tower 类型擦除并维持原执行范围，旧普通 RPC Handler / TowerHandler 已移除。logic RPC 的 Service / Binding 使用统一的消息、事件与 timer Tower 输入及对应结果，注册器通过 RegistryService 适配并提供 into_service，旧公开 Handler / TowerHandler 已移除。真实 gRPC 测试覆盖预算及 Binding 停止期间的就绪等待。
+
+服务级事件通过 `tok_events::service::install` 在服务初始化期间预留受监督任务容量、等待传输订阅就绪，并把消费任务纳入服务生命周期；topic、group 和注入的本地能力由组装方显式配置。`RegistryService` 将现有远程事件注册器接入 Tower，用户也可以提供自己的处理链。服务级事件不自动转发到所有 session。四批实施与验收范围见[专项计划](implementation-plan.md#服务入口与事件统一专项计划)；未新增 tok-registry。
+
+本轮 Windows 的真实 NATS 验证覆盖服务级直接 Tower 链及强类型注册表装配、处理和停止、独立订阅、竞争消费组和网关动态兴趣；公共服务的 RPC 与事件共享状态，logic 服务的服务级和主体事件分别执行。真实 Redis 多进程专项、Linux 与 release 构建本轮未运行。
 
 本次阶段验证：Windows 全工作区串行测试 345 项通过、32 项外部专项默认跳过；全目标 Clippy、无警告 workspace rustdoc、格式及空白检查通过。未运行真实 Redis/NATS、Linux 或 release 构建。
