@@ -10,15 +10,99 @@ use std::{
 };
 use tok_core::ServiceDescriptor;
 use tok_grpc::{Client, Listener};
-use tok_message::rpc::CallContext;
-use tok_message::rpc::{CallTask, Handler, HandlerRegistry, Service as RpcService};
 use tok_player::SessionIdentity;
+use tok_player::rpc::CallContext;
+use tok_player::rpc::{CallTask, Handler, HandlerRegistry};
 use tok_proto::internal::v1::{
     CallRequest, CallResponse, Payload, player_rpc_client::PlayerRpcClient,
 };
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 use tonic::Code;
+
+// 本测试覆盖同一监听端点的不同协议，测试处理器仅用于观察共享传输行为。
+struct BusinessBridge(Arc<dyn Handler>);
+impl tok_message::rpc::Handler for BusinessBridge {
+    fn call(
+        &self,
+        request: tok_execution::Request<(tok_message::rpc::CallContext, Payload)>,
+    ) -> tok_message::rpc::CallTask<'_> {
+        self.0.call(request.map(|(context, payload)| {
+            (
+                CallContext {
+                    node_id: context.node_id,
+                    service_name: context.service_name,
+                    bid: context.bid,
+                    request_id: context.request_id,
+                    session: None,
+                    timer: None,
+                },
+                payload,
+            )
+        }))
+    }
+}
+#[derive(Clone)]
+struct RpcService {
+    player: tok_player::rpc::Service,
+    business: tok_message::rpc::Service,
+}
+impl RpcService {
+    fn new(node: &str, service: &str, handler: Arc<dyn Handler>) -> Result<Self, tok_grpc::Error> {
+        Ok(Self {
+            player: tok_player::rpc::Service::new(node, service, Arc::clone(&handler))?,
+            business: tok_message::rpc::Service::new(
+                node,
+                service,
+                Arc::new(BusinessBridge(handler)),
+            )?,
+        })
+    }
+    fn into_player(
+        self,
+    ) -> tok_proto::internal::v1::player_rpc_server::PlayerRpcServer<tok_player::rpc::Service> {
+        self.player.into_player()
+    }
+    fn into_business(
+        self,
+    ) -> tok_proto::internal::v1::business_rpc_server::BusinessRpcServer<tok_message::rpc::Service>
+    {
+        self.business.into_business()
+    }
+}
+struct BusinessClient(tok_message::rpc::business::Client);
+impl BusinessClient {
+    fn new(client: Arc<Client>) -> Self {
+        Self(tok_message::rpc::business::Client::new(client))
+    }
+    async fn call(
+        &self,
+        target: &ServiceDescriptor,
+        request: tok_execution::Request<(CallContext, Payload)>,
+    ) -> Result<tok_execution::Response<CallResponse>, tonic::Status> {
+        if request.input.0.timer.is_some() {
+            return Err(tonic::Status::invalid_argument(
+                "普通业务入口不能接受计时触发",
+            ));
+        }
+        self.0
+            .call(
+                target,
+                request.map(|(context, payload)| {
+                    (
+                        tok_message::rpc::CallContext {
+                            node_id: context.node_id,
+                            service_name: context.service_name,
+                            bid: context.bid,
+                            request_id: context.request_id,
+                        },
+                        payload,
+                    )
+                }),
+            )
+            .await
+    }
+}
 
 #[derive(Clone, PartialEq, Message)]
 struct Data {
@@ -57,7 +141,7 @@ fn payload(value: u64) -> Payload {
 fn handler() -> HandlerRegistry {
     let mut registry = HandlerRegistry::new();
     registry
-        .register(1, 2, |execution_request: tok_execution::Request<(tok_message::rpc::CallContext, Data)>| async move { let (_, data) = execution_request.input;
+        .register(1, 2, |execution_request: tok_execution::Request<(tok_player::rpc::CallContext, Data)>| async move { let (_, data) = execution_request.input;
             Ok(tok_execution::Response::new(Data {
                 value: data.value + 1,
             }))
@@ -89,8 +173,8 @@ async fn shared_endpoint_dispatches_and_rejects_unready_malformed_and_wrong_targ
     let shutdown = CancellationToken::new();
     let server = tokio::spawn(endpoint.serve(listener, shutdown.clone()).unwrap());
     let clients = Arc::new(Client::new(Duration::from_secs(2), 1).unwrap());
-    let player_client = tok_message::rpc::player::Client::new(Arc::clone(&clients));
-    let business_client = tok_message::rpc::business::Client::new(Arc::clone(&clients));
+    let player_client = tok_player::rpc::Client::new(Arc::clone(&clients));
+    let business_client = BusinessClient::new(Arc::clone(&clients));
     let player = target(address, "player");
     let guild = target(address, "guild");
     assert_eq!(
@@ -251,7 +335,7 @@ async fn timeout_does_not_retry_business_execution() {
     let server = tokio::spawn(endpoint.serve(listener, shutdown.clone()).unwrap());
     let target = target(address, "guild");
     let clients = Arc::new(Client::new(Duration::from_millis(150), 1).unwrap());
-    let business_client = tok_message::rpc::business::Client::new(Arc::clone(&clients));
+    let business_client = BusinessClient::new(Arc::clone(&clients));
     let error = business_client
         .call(
             &target,
@@ -282,7 +366,7 @@ fn duplicate_message_and_proto_service_bindings_are_rejected() {
                 1,
                 3,
                 |execution_request: tok_execution::Request<(
-                    tok_message::rpc::CallContext,
+                    tok_player::rpc::CallContext,
                     Data
                 )>| async move {
                     let (_, data) = execution_request.input;
@@ -297,7 +381,7 @@ fn duplicate_message_and_proto_service_bindings_are_rejected() {
                 0,
                 3,
                 |execution_request: tok_execution::Request<(
-                    tok_message::rpc::CallContext,
+                    tok_player::rpc::CallContext,
                     Data
                 )>| async move {
                     let (_, data) = execution_request.input;
@@ -321,9 +405,9 @@ async fn user_tower_concurrency_limit_is_preserved_across_handler_clones() {
     let active = Arc::new(AtomicUsize::new(0));
     let peak = Arc::new(AtomicUsize::new(0));
     let tracked_peak = Arc::clone(&peak);
-    let service = tok_message::rpc::tower::ServiceBuilder::new()
+    let service = tok_player::rpc::tower::ServiceBuilder::new()
         .concurrency_limit(1)
-        .service(tok_message::rpc::tower::service_fn(
+        .service(tok_player::rpc::tower::service_fn(
             move |request: tok_execution::Request<(CallContext, Payload)>| {
                 let (context, payload) = request.input;
                 let active = Arc::clone(&active);
@@ -350,7 +434,7 @@ async fn user_tower_concurrency_limit_is_preserved_across_handler_clones() {
             RpcService::new(
                 "local",
                 "guild",
-                Arc::new(tok_message::rpc::TowerHandler(service)),
+                Arc::new(tok_player::rpc::TowerHandler(service)),
             )
             .unwrap()
             .into_business(),
@@ -360,7 +444,7 @@ async fn user_tower_concurrency_limit_is_preserved_across_handler_clones() {
     let shutdown = CancellationToken::new();
     let server = tokio::spawn(endpoint.serve(listener, shutdown.clone()).unwrap());
     let clients = Arc::new(Client::new(Duration::from_secs(2), 1).unwrap());
-    let business_client = tok_message::rpc::business::Client::new(Arc::clone(&clients));
+    let business_client = BusinessClient::new(Arc::clone(&clients));
     let target = target(address, "guild");
     let (first, second) = tokio::join!(
         business_client.call(
@@ -441,7 +525,7 @@ async fn custom_client_uri_and_server_transport_timeout_are_applied() {
                 "http://{address}"
             ))?)
         });
-    let client = tok_message::rpc::business::Client::new(Arc::new(client));
+    let client = BusinessClient::new(Arc::new(client));
     let target = target("127.0.0.1:1".parse().unwrap(), "guild");
     // 服务端传输期限应先于客户端三秒预算生效。
     let error = tokio::time::timeout(
@@ -555,7 +639,7 @@ async fn listener_tower_layers_cover_shared_routes_and_preserve_readiness() {
         42
     );
     let player = target(address, "player");
-    let player_client = tok_message::rpc::player::Client::new(Arc::new(client));
+    let player_client = tok_player::rpc::Client::new(Arc::new(client));
     assert_eq!(
         player_client
             .call(

@@ -5,7 +5,7 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
     task::{Context, Poll},
 };
-use tok::message::rpc::tower::{Layer, Service, ServiceExt};
+use tok::player::rpc::tower::{Layer, Service, ServiceExt};
 use tok::{core::Extensions, execution::Request};
 use tok::{
     gateway::{

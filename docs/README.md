@@ -9,6 +9,7 @@
 | [总体设计](design.md) | 服务模型、分层、术语、系统边界 | 已确认的架构约定 |
 | [服务运行模型](service-runtime.md) | 执行上下文、中间件、统一事件、动态 topic、生命周期 | 契约与当前实现边界 |
 | [实现状态](status.md) | 当前代码能做什么、尚缺什么 | 当前事实与代码依据 |
+| [Crate 审查确认记录](crate-review.md) | 已确认与待明确确认的 crate | 确认范围、审查依据与后续维护 |
 | [实施计划](implementation-plan.md) | 七个校正批次、依赖、交付物与验收 | 批次、依赖与验收记录 |
 | [客户端与会话协议](client-session.md) | Frame v3、认证、序号、恢复、timer 和交接约束 | 当前协议及迁移不变量 |
 | [Rust 用户指南](../crates/tok/docs/guide.md) | 已实现 API、组装示例和开发操作 | 用户使用说明，示例受 rustdoc 验证 |

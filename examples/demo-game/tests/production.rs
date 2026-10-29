@@ -9,10 +9,9 @@ use std::{
 };
 use tok::{
     infra::discovery::MemoryDirectory,
-    message::rpc::{
-        CallContext, Handler, protocol::internal::v1::Payload, timer::decode_update, tonic::Code,
-    },
     player::TimerTrigger,
+    player::rpc::timer::decode_update,
+    player::rpc::{CallContext, Handler, protocol::internal::v1::Payload, tonic::Code},
     player::{SessionIdentity, TimerUpdate},
 };
 

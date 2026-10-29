@@ -17,7 +17,7 @@ use std::{
 use tok::grpc::Client;
 use tok::{
     core::ServiceDirectory,
-    message::rpc::{
+    player::rpc::{
         CallContext, HandlerRegistry, HandlerReply, protocol::internal::v1::Payload, tonic::Status,
     },
     player::{TimerSpec, TimerUpdate},
@@ -77,7 +77,7 @@ fn player_id(context: &CallContext) -> Result<u64, Status> {
 pub fn handlers(
     state: Arc<State>,
     directory: Arc<dyn ServiceDirectory>,
-) -> Result<HandlerRegistry, tok::message::rpc::Error> {
+) -> Result<HandlerRegistry, tok::player::rpc::Error> {
     let mut registry = HandlerRegistry::new();
     registry.register_with_timers(
         GetPlayerRequest::MESSAGE_ID,
@@ -85,7 +85,7 @@ pub fn handlers(
         {
             let state = Arc::clone(&state);
             move |execution_request: tok::execution::Request<(
-                tok::message::rpc::CallContext,
+                tok::player::rpc::CallContext,
                 GetPlayerRequest,
             )>| {
                 let (context, _request) = execution_request.input;
@@ -122,7 +122,7 @@ pub fn handlers(
         {
             let state = Arc::clone(&state);
             move |execution_request: tok::execution::Request<(
-                tok::message::rpc::CallContext,
+                tok::player::rpc::CallContext,
                 SetPlayerRequest,
             )>| {
                 let (context, request) = execution_request.input;
@@ -148,7 +148,7 @@ pub fn handlers(
         {
             let state = Arc::clone(&state);
             move |execution_request: tok::execution::Request<(
-                tok::message::rpc::CallContext,
+                tok::player::rpc::CallContext,
                 StartProductionRequest,
             )>| {
                 let (context, _request) = execution_request.input;
@@ -178,12 +178,12 @@ pub fn handlers(
     )?;
     let production = Arc::new(
         production::dispatcher()
-            .map_err(|error| tok::message::rpc::Error::Configuration(error.to_string()))?,
+            .map_err(|error| tok::player::rpc::Error::Configuration(error.to_string()))?,
     );
     let events_state = Arc::clone(&state);
     registry.register_timer_service(
         ProductionFinished::MESSAGE_ID,
-        tok::message::rpc::tower::service_fn(
+        tok::player::rpc::tower::service_fn(
             move |request: tok::execution::Request<(CallContext, ProductionFinished)>| {
                 let (execution, (context, _), extensions) = request.into_parts();
                 let state = Arc::clone(&state);
@@ -248,7 +248,7 @@ pub fn handlers(
         QueryGuildRequest::MESSAGE_ID,
         QueryGuildResponse::MESSAGE_ID,
         move |execution_request: tok::execution::Request<(
-            tok::message::rpc::CallContext,
+            tok::player::rpc::CallContext,
             QueryGuildRequest,
         )>| {
             let (execution, (context, request), extensions) = execution_request.into_parts();
@@ -267,13 +267,11 @@ pub fn handlers(
                         tok::execution::Request::from_parts(
                             execution,
                             (
-                                CallContext {
-                                    timer: None,
+                                tok::message::rpc::CallContext {
                                     node_id: target.node_id.clone(),
                                     service_name: target.service_name.clone(),
                                     bid: Some(request.guild_id.to_string()),
                                     request_id: context.request_id,
-                                    session: None,
                                 },
                                 Payload {
                                     message_id: GetGuildRequest::MESSAGE_ID,

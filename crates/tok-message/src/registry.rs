@@ -23,14 +23,14 @@ pub struct Registry<
     C = (),
     O = (),
     E = std::convert::Infallible,
-    G: ?Sized = tok_protobuf::Table<u32, C, O, E>,
+    G: ?Sized = crate::protobuf::Table<u32, C, O, E>,
 > {
-    inner: tok_protobuf::Registry<u32, C, O, E, G>,
+    inner: crate::protobuf::Registry<u32, C, O, E, G>,
 }
 impl<C, O, E> Default for Registry<C, O, E> {
     fn default() -> Self {
         Self {
-            inner: tok_protobuf::Registry::default(),
+            inner: crate::protobuf::Registry::default(),
         }
     }
 }
@@ -51,7 +51,7 @@ impl<C, O, E, G: ?Sized> Registry<C, O, E, G> {
     /// 注入共享自定义注册器；允许使用运行时选择的 dyn Registry。
     pub fn from_shared_registry(registry: Arc<G>) -> Self {
         Self {
-            inner: tok_protobuf::Registry::from_shared_registry(registry),
+            inner: crate::protobuf::Registry::from_shared_registry(registry),
         }
     }
 }
@@ -59,7 +59,7 @@ impl<C, O, E, G> Registry<C, O, E, G> {
     /// 注入底层自定义注册器，仍保留非零消息编号及 protobuf 编解码规则。
     pub fn from_registry(registry: G) -> Self {
         Self {
-            inner: tok_protobuf::Registry::from_registry(registry),
+            inner: crate::protobuf::Registry::from_registry(registry),
         }
     }
 }
@@ -71,8 +71,8 @@ where
     G: tok_execution::Registry<
             Key = u32,
             Input = (C, Vec<u8>),
-            Output = tok_protobuf::Reply<tok_protobuf::Message<u32>, O>,
-            HandlerError = tok_protobuf::Error<E>,
+            Output = crate::protobuf::Reply<crate::protobuf::Message<u32>, O>,
+            HandlerError = crate::protobuf::Error<E>,
         > + Clone
         + 'static,
 {
@@ -87,7 +87,7 @@ where
         Req: prost::Message + Default + Send + 'static,
         Resp: prost::Message + Send + 'static,
         F: Fn(Request<(C, Req)>) -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = Result<Response<tok_protobuf::Reply<Resp, O>>, E>> + Send + 'static,
+        Fut: Future<Output = Result<Response<crate::protobuf::Reply<Resp, O>>, E>> + Send + 'static,
     {
         let handler = Arc::new(handler);
         self.register_service(
@@ -109,8 +109,11 @@ where
     where
         Req: prost::Message + Default + Send + 'static,
         Resp: prost::Message + Send + 'static,
-        S: Service<Request<(C, Req)>, Response = Response<tok_protobuf::Reply<Resp, O>>, Error = E>
-            + Clone
+        S: Service<
+                Request<(C, Req)>,
+                Response = Response<crate::protobuf::Reply<Resp, O>>,
+                Error = E,
+            > + Clone
             + Send
             + Sync
             + 'static,
@@ -132,24 +135,25 @@ where
     G: tok_execution::Registry<
             Key = u32,
             Input = (C, Vec<u8>),
-            Output = tok_protobuf::Reply<tok_protobuf::Message<u32>, O>,
-            HandlerError = tok_protobuf::Error<E>,
+            Output = crate::protobuf::Reply<crate::protobuf::Message<u32>, O>,
+            HandlerError = crate::protobuf::Error<E>,
         > + 'static,
     G::DispatchError: Send + 'static,
 {
     /// 本地分发编号消息；不将业务错误转换为传输状态码。
     pub async fn dispatch(
         &self,
-        request: Request<(C, tok_protobuf::Message<u32>)>,
+        request: Request<(C, crate::protobuf::Message<u32>)>,
     ) -> Result<
-        Response<tok_protobuf::Reply<tok_protobuf::Message<u32>, O>>,
+        Response<crate::protobuf::Reply<crate::protobuf::Message<u32>, O>>,
         tok_execution::Error<G::DispatchError>,
     > {
         self.clone().oneshot(request).await
     }
 }
 
-impl<C, O, E, G: ?Sized> Service<Request<(C, tok_protobuf::Message<u32>)>> for Registry<C, O, E, G>
+impl<C, O, E, G: ?Sized> Service<Request<(C, crate::protobuf::Message<u32>)>>
+    for Registry<C, O, E, G>
 where
     C: Send + 'static,
     O: Send + 'static,
@@ -157,15 +161,15 @@ where
     G: tok_execution::Registry<
             Key = u32,
             Input = (C, Vec<u8>),
-            Output = tok_protobuf::Reply<tok_protobuf::Message<u32>, O>,
-            HandlerError = tok_protobuf::Error<E>,
+            Output = crate::protobuf::Reply<crate::protobuf::Message<u32>, O>,
+            HandlerError = crate::protobuf::Error<E>,
         > + 'static,
     G::DispatchError: Send + 'static,
 {
-    type Response = Response<tok_protobuf::Reply<tok_protobuf::Message<u32>, O>>;
+    type Response = Response<crate::protobuf::Reply<crate::protobuf::Message<u32>, O>>;
     type Error = tok_execution::Error<G::DispatchError>;
-    type Future = <tok_protobuf::Registry<u32, C, O, E, G> as Service<
-        Request<(C, tok_protobuf::Message<u32>)>,
+    type Future = <crate::protobuf::Registry<u32, C, O, E, G> as Service<
+        Request<(C, crate::protobuf::Message<u32>)>,
     >>::Future;
     fn poll_ready(
         &mut self,
@@ -173,7 +177,7 @@ where
     ) -> std::task::Poll<Result<(), Self::Error>> {
         self.inner.poll_ready(cx)
     }
-    fn call(&mut self, request: Request<(C, tok_protobuf::Message<u32>)>) -> Self::Future {
+    fn call(&mut self, request: Request<(C, crate::protobuf::Message<u32>)>) -> Self::Future {
         self.inner.call(request)
     }
 }

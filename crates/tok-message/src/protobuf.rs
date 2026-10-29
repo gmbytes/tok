@@ -7,22 +7,8 @@ use tok_execution::registry;
 use tok_execution::{Request, Response};
 use tower::{Service, ServiceExt};
 
-/// 已编码的正文与调用方定义的消息键。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Message<K> {
-    /// 分发或回应键，合法性由协议边界判断。
-    pub key: K,
-    /// protobuf 编码正文。
-    pub body: Vec<u8>,
-}
-/// 强类型或已编码的回应与调用方定义的附加结果。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Reply<M, O = ()> {
-    /// 回应消息。
-    pub message: M,
-    /// 交给调用方消费的附加结果。
-    pub output: O,
-}
+pub use crate::{Message, Reply};
+
 /// 正文编解码适配错误；业务错误仍保留原类型。
 #[derive(Debug, thiserror::Error)]
 pub enum Error<E> {

@@ -9,8 +9,8 @@ use std::{
 use tok_core::ServiceDescriptor;
 use tok_events::{Event, EventId};
 use tok_grpc::{Client, Listener};
-use tok_message::rpc::CallContext;
-use tok_message::rpc::{HandlerRegistry, Service as RpcService, protocol::internal::v1::Payload};
+use tok_player::rpc::CallContext;
+use tok_player::rpc::{HandlerRegistry, Service as RpcService, protocol::internal::v1::Payload};
 use tok_player::{SessionIdentity, TimerUpdate};
 use tokio_util::sync::CancellationToken;
 #[derive(Clone, PartialEq, prost::Message)]
@@ -83,7 +83,7 @@ async fn event_handlers_are_inaccessible_to_requests_and_timers_and_require_sess
     let stop = CancellationToken::new();
     let server = tokio::spawn(endpoint.serve(listener, stop.clone()).unwrap());
     let clients = Arc::new(Client::new(Duration::from_secs(2), 2).unwrap());
-    let player_client = tok_message::rpc::player::Client::new(Arc::clone(&clients));
+    let player_client = tok_player::rpc::Client::new(Arc::clone(&clients));
     let target = ServiceDescriptor {
         node_id: "node".into(),
         service_name: "player".into(),
@@ -217,7 +217,7 @@ async fn event_handlers_are_inaccessible_to_requests_and_timers_and_require_sess
         .unwrap();
     assert_eq!(response.output.request_id, 1);
     assert!(
-        matches!(tok_message::rpc::timer::decode_update(response.output.timers.unwrap()).unwrap(),TimerUpdate::ReplaceAll(timers) if timers.is_empty())
+        matches!(tok_player::rpc::timer::decode_update(response.output.timers.unwrap()).unwrap(),TimerUpdate::ReplaceAll(timers) if timers.is_empty())
     );
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     stop.cancel();
@@ -302,14 +302,14 @@ async fn ordered_event_handlers_compose_timer_effects_without_client_payloads() 
             session: None,
             timer: None,
         };
-        let response = tok_message::rpc::Handler::event(
+        let response = tok_player::rpc::Handler::event(
             &registry,
             tok_execution::Request::new(execution, (call, event)),
         )
         .await
         .unwrap();
         assert_eq!(
-            tok_message::rpc::timer::decode_update(response.output.timers.unwrap()).unwrap(),
+            tok_player::rpc::timer::decode_update(response.output.timers.unwrap()).unwrap(),
             expected
         );
     }

@@ -18,7 +18,7 @@
 
 本批统一工作的根本目标是建立框架通用的“服务 + 处理链”基础设施。tok-gateway 是复用该设施的内置扩展实例，面向通用游戏运行时提供连接和 session 等能力；不是要求其他服务继承或依赖的核心基类。普通 RPC/事件服务、gateway 和游戏自定义服务使用相同的构建、上下文、中间件和生命周期扩展契约。
 
-当前 tok crate 承担统一导出与 Application 组装，已经依赖 tok-gateway。共同设施必须位于二者可共同依赖的下层：通用基础契约归 tok-core，调用执行设施由 tok-execution 承载，服务构建、生命周期和任务监督由 tok-lifecycle 承载；玩家会话、消息、计时需求、所有权与恢复凭证独立归 tok-player。tok-player 只依赖 tok-core，tok-execution、tok-lifecycle 和 tok-events 不依赖玩家契约。禁止通过 gateway 依赖 tok 门面形成循环，也不在 gateway 内复制共同执行器来绕过分层。完整职责表见[框架核心与扩展分层](design.md#框架核心与扩展分层)。
+当前 tok crate 承担统一导出与 Application 组装，已经依赖 tok-gateway。共同设施必须位于二者可共同依赖的下层：通用基础契约归 tok-core，调用执行设施由 tok-execution 承载，服务构建、生命周期和任务监督由 tok-lifecycle 承载；玩家会话、计时需求、所有权、恢复凭证与玩家 RPC 归 tok-player。tok-player 复用 tok-message 及 gRPC、事件与生命周期设施；tok-execution、tok-lifecycle 和 tok-events 不依赖玩家契约。禁止通过 gateway 依赖 tok 门面形成循环，也不在 gateway 内复制共同执行器来绕过分层。完整职责表见[框架核心与扩展分层](design.md#框架核心与扩展分层)。
 
 构建时以普通服务和 gateway 两个最小样例验证：共同设施不导入 player/scene 或网关线协议；gateway 通过组合增加连接和会话能力；游戏从 tok 门面取得便捷组装入口，无需理解内部拆分。通用任务监督和生命周期由基础设施复用，各接入状态机继续承担自己的职责。
 
@@ -139,7 +139,7 @@ Gateway::new_in 接收 Init，继承所属服务身份、生命周期句柄和�
 
 ServiceConfig 的 factory 可选，默认按服务名查找共同 Factory；endpoint 也可省略，无端点服务仍参与初始化、运行监督与退出，但不生成或发布网络描述。网络服务保留 application::Binding 能力，事件服务可由组装层注入发现查询或其他状态。
 
-Application::register_rpc_factory 为匹配配置创建 message::rpc::Service 及一次性 message::rpc::Binding，按所属服务注入 Init.extensions，在同一工厂中安装真实状态、路由与 Layer。工厂结束时检查绑定是否完成，缺失安装会在发布前失败；初始化绑定不保存回自身执行扩展，防止引用环。
+Application::register_rpc_factory 根据入口类型为匹配配置创建普通业务或玩家 RPC Service，将相应的一次性 Binding 注入 Init.extensions，在同一工厂中安装真实状态、路由与 Layer。工厂结束时检查绑定是否完成，缺失安装会在发布前失败；初始化绑定不保存回自身执行扩展，防止引用环。RpcEntry / RpcBinding 提供入口和绑定的扩展契约。
 
 自定义 protobuf 通过 bind_rpc 按业务服务声明，与其他逐服务绑定在启动前合并并校验端点；高级调用可一次注册完整 Listener，同端点不混用两种方式。重复 protobuf、错误协议或缺失端点在监听前拒绝，工厂注册失败不留下半份声明。协议转换不会自动选择锁或中间件，普通服务仍是一套 Factory 契约。
 
@@ -307,7 +307,7 @@ JetStream、离线加载、全局去重、通用扇出中继、热配置、生�
 
 ## RPC 协议适配分层校正（2026-10-21）
 
-通用 tok-grpc 保留 Client / Listener / Server，通过泛型请求和 Tower 接入任意生成的 gRPC 服务；正常依赖移除 tok-player / tok-events / tok-proto。新增 tok-message 承载游戏 CallContext、Handler / HandlerRegistry、玩家与普通业务协议客户端、绑定槽、通知编码及 timer / 事件 / 请求锁适配。门面从 message::rpc 访问游戏协议，grpc 访问 gRPC 设施；移除通用 CallHandler 上的事件契约，不提供旧路径兼容别名。Application 的普通自定义 protobuf 绑定继续使用通用端点，游戏 register_rpc_factory 使用新协议适配。客户端 Frame、内部 protobuf、事件 topic、timer、租约和无自动重试语义保持原有约束；事件与 timer 入口仍仅供可信服务端。
+通用 tok-grpc 保留 Client / Listener / Server，通过泛型请求和 Tower 接入任意生成的 gRPC 服务；不依赖 tok-player / tok-events / tok-proto。普通业务协议适配位于 message::rpc，玩家调用、事件与 timer 适配位于 player::rpc。Application 的自定义 protobuf 绑定继续使用通用端点，两类消息 RPC 使用同一工厂装配入口。事件与 timer 入口仍仅供可信服务端。
 
 ## 调用执行与生命周期分库（2026-10-21）
 
@@ -345,7 +345,7 @@ Client::with_endpoint_factory 接收从 ServiceDescriptor 创建 Tonic Endpoint 
 
 tok-execution::Registry 定义按键派发契约，默认 Table<K, T, R, E> 根据 K 选择 Tower Service<Request<T>, Response=Response<R>, Error=E>，就绪等待和执行共用原 Context。默认 Table 的 K 需 Ord + Clone；枚举、字符串和自定义键均可用，不限定 u32、数字非零或 Display。注册错误 registry::Error 保留重复键，运行错误 registry::DispatchError 区分 Unknown / Handler，执行停止使用外层 execution::Error::Stopped 并保留原始业务错误，不生成协议状态码。
 
-protobuf 正文适配位于 tok-protobuf，包装上述通用表，不让 tok-execution 依赖 prost。适配器 Registry<K, C, O, E> 根据键解码请求、执行强类型处理链、编码回应；编解码也处于原预算内。业务状态和附加结果为自有 Send + static 类型，借用调用仍可直接使用 execution 或事件处理。
+protobuf 正文适配现位于 tok-message::protobuf，包装上述通用表，不让 tok-execution 依赖 prost。适配器 Registry<K, C, O, E> 根据键解码请求、执行强类型处理链、编码回应；编解码也处于原预算内。业务状态和附加结果为自有 Send + static 类型，借用调用仍可直接使用 execution 或事件处理。
 
 游戏 RPC 明确选择 u32 消息 ID：HandlerRegistry 注册时校验请求与回应 ID 非零，business::Handler 拒绝零请求消息 ID 或零回应消息 ID。上下文转换、request_id 回应关联、计时来源隔离和 Status 映射均留在游戏协议边界。公会处理函数使用自身错误和业务目标，同一表可被本地和真实 RPC 调用；请求锁、玩家组合与通知的后续迁移不计入本批完成范围。
 
@@ -365,9 +365,9 @@ registry 注册错误定名为 Error<K>，运行失败定名为 DispatchError<K,
 
 ## 消息与传输边界校正（2026-10-21）
 
-tok-game-rpc 已调整为 tok-message，通用正文适配独立为 tok-protobuf，tok-rpc 更名为 tok-grpc。生成协议仍在 tok-proto，不依赖执行层。门面提供 tok::protobuf、tok::message 与 tok::grpc；旧 crate 与门面路径不再提供。
+tok-game-rpc 已调整为 tok-message，tok-rpc 更名为 tok-grpc；通用 protobuf 正文适配现集成于 tok-message::protobuf。生成协议仍在 tok-proto，不依赖执行层。门面提供 tok::message 与 tok::grpc，不再提供独立 tok::protobuf。
 
-tok-message 根 Registry 提供不依赖 Tonic 的非零编号注册、本地分发与原始业务错误；玩家身份、事件/timer RPC 组合、线协议结果与 Status 映射集中于 message::rpc。公会示例和本地/RPC 共用处理链采用根 Registry。通用 protobuf 表继续允许字符串及零键，RPC 不自动添加锁或重试，事件与 timer 仍只能由可信服务器触发。
+tok-message 根 Registry 提供非零编号注册、本地分发与原始业务错误；普通业务 RPC 位于 message::rpc，玩家身份及事件/timer RPC 适配位于 player::rpc。公会示例和本地/RPC 共用处理链采用根 Registry。通用 protobuf 表继续允许字符串及零键，RPC 不自动添加锁或重试，事件与 timer 仍只能由可信服务器触发。
 
 本轮只校正库与命名空间边界，不宣称通用请求锁泛化、玩家结果模型及通知构造后续批次已经完成。请求锁执行已迁入 execution::lock，message::rpc::lock 只保留协议策略与映射，仍按有限 TTL 和执行预算约束运行。
 

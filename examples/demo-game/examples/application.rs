@@ -23,9 +23,12 @@ use tok::{
         Init, InitFuture,
         task::{BoxError, Task},
     },
-    message::rpc::{
-        CallContext, HandlerRegistry, HandlerReply, Service as RpcService,
-        protocol::internal::v1::Payload, tonic::Status,
+    message::{
+        Registry as MessageRegistry, Reply,
+        rpc::{
+            CallContext, Service as RpcService, business, protocol::internal::v1::Payload,
+            tonic::Status,
+        },
     },
 };
 use tokio::sync::{mpsc, watch};
@@ -115,12 +118,12 @@ async fn main() -> Result<(), BoxError> {
                 let events = events.clone();
                 let count = count.clone();
                 Box::pin(async move {
-                    let mut handlers = HandlerRegistry::new();
+                    let mut handlers = MessageRegistry::<(), (), Status>::new();
                     handlers.register_service(
                         GetGuildRequest::MESSAGE_ID,
                         GetGuildResponse::MESSAGE_ID,
                         count.layer(tower::service_fn(
-                            move |request: Request<(CallContext, GetGuildRequest)>| {
+                            move |request: Request<((), GetGuildRequest)>| {
                                 let events = events.clone();
                                 async move {
                                     let guild_id = request.input.1.guild_id;
@@ -133,18 +136,20 @@ async fn main() -> Result<(), BoxError> {
                                         )
                                         .await
                                         .map_err(|_| Status::unavailable("审计服务已停止"))?;
-                                    Ok(tok::execution::Response::new(HandlerReply {
+                                    Ok(tok::execution::Response::new(Reply {
                                         message: GetGuildResponse { guild_id },
-                                        timers: None,
+                                        output: (),
                                     }))
                                 }
                             },
                         )),
                     )?;
+                    let handler =
+                        business::Handler::new(Arc::new(handlers), |_| Ok(()), |status| status);
                     init.extensions
                         .get::<tok::message::rpc::Binding>()
                         .ok_or_else(|| std::io::Error::other("缺少 RPC 绑定"))?
-                        .install(&init, Arc::new(handlers))?;
+                        .install(&init, Arc::new(handler))?;
                     Ok(Box::pin(async move {
                         init.service.cancellation().cancelled().await;
                         Ok(())
@@ -188,8 +193,6 @@ async fn main() -> Result<(), BoxError> {
                                 service_name: "guild".into(),
                                 bid: Some("7".into()),
                                 request_id: 1,
-                                session: None,
-                                timer: None,
                             },
                             Payload {
                                 message_id: GetGuildRequest::MESSAGE_ID,

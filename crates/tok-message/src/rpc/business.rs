@@ -23,9 +23,6 @@ impl Client {
         target: &ServiceDescriptor,
         request: tok_execution::Request<(CallContext, Payload)>,
     ) -> Result<tok_execution::Response<CallResponse>, Status> {
-        if request.input.0.timer.is_some() {
-            return Err(Status::invalid_argument("计时触发只能调用 player 入口"));
-        }
         call::call(
             &self.connections,
             target,
@@ -46,7 +43,11 @@ type ContextFactory<C> = dyn Fn(&CallContext) -> Result<C, Status> + Send + Sync
 ///
 /// 上下文转换器负责提取业务状态；默认构造映射原始业务错误，自定义构造映射注册器派发错误。
 /// 此适配器不接受 timer 或服务器事件，也不添加锁、队列或重试。
-pub struct Handler<C, E, G: tok_execution::Registry + ?Sized = tok_protobuf::Table<u32, C, (), E>> {
+pub struct Handler<
+    C,
+    E,
+    G: tok_execution::Registry + ?Sized = crate::protobuf::Table<u32, C, (), E>,
+> {
     registry: Arc<crate::Registry<C, (), E, G>>,
     context: Box<ContextFactory<C>>,
     error: Box<dyn Fn(G::DispatchError) -> Status + Send + Sync>,
@@ -90,24 +91,20 @@ where
     G: tok_execution::Registry<
             Key = u32,
             Input = (C, Vec<u8>),
-            Output = tok_protobuf::Reply<tok_protobuf::Message<u32>>,
-            HandlerError = tok_protobuf::Error<E>,
+            Output = crate::protobuf::Reply<crate::protobuf::Message<u32>>,
+            HandlerError = crate::protobuf::Error<E>,
         > + 'static,
     G::DispatchError: Send + 'static,
 {
     fn call(&self, request: tok_execution::Request<(CallContext, Payload)>) -> super::CallTask<'_> {
         Box::pin(async move {
             let (context, (call, payload), mut extensions) = request.into_parts();
-            if call.timer.is_some() {
-                return Err(Status::invalid_argument("普通业务入口不能接受计时触发"));
-            }
             if payload.message_id == 0 {
                 return Err(Status::invalid_argument("业务请求消息 ID 必须非零"));
             }
             let state = (self.context)(&call)?;
             let id = call.request_id;
             extensions.insert(call);
-            drop(extensions.remove::<tok_player::TimerTrigger>());
             let reply = self
                 .registry
                 .as_ref()
@@ -116,7 +113,7 @@ where
                     context,
                     (
                         state,
-                        tok_protobuf::Message {
+                        crate::protobuf::Message {
                             key: payload.message_id,
                             body: payload.body,
                         },

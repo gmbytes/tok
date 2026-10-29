@@ -1,6 +1,6 @@
 //! 将端点的业务入口与工厂初始化结果绑定；共享端点仍由 Application 一次监听。
 use super::CallContext;
-use super::{CallTask, EventTask, Handler};
+use super::{CallTask, Handler};
 use std::sync::{Arc, OnceLock};
 use tok_core::{Extensions, service::Identity};
 use tok_execution::Request;
@@ -72,22 +72,6 @@ impl Handler for Binding {
             tokio::select! { biased;
                 ()=stop.cancelled()=> {cancellation.cancel();Err(Status::cancelled("服务正在退出"))},
                 result=installed.handler.call(request)=>result,
-            }
-        })
-    }
-    fn event(
-        &self,
-        mut request: Request<(CallContext, Arc<tok_events::Message>)>,
-    ) -> EventTask<'_> {
-        Box::pin(async move {
-            let installed = self.prepare(&mut request)?;
-            let call = request.input.0.clone();
-            request.extensions_mut().insert(call);
-            let stop = installed.service.cancellation();
-            let cancellation = request.context.cancellation();
-            tokio::select! { biased;
-                ()=stop.cancelled()=> {cancellation.cancel();Err(Status::cancelled("服务正在退出"))},
-                result=installed.handler.event(request)=>result,
             }
         })
     }

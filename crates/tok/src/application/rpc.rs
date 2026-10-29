@@ -9,7 +9,6 @@ use tok_grpc::{
 };
 use tok_lifecycle as lifecycle;
 use tok_lifecycle::Factory;
-use tok_message::rpc::Service as RpcService;
 
 type EndpointBinding = Box<dyn FnOnce(Listener) -> Result<Listener, tok_grpc::Error> + Send>;
 pub(super) struct Registration {
@@ -18,11 +17,54 @@ pub(super) struct Registration {
     protocol: &'static str,
     bind: EndpointBinding,
 }
-struct FactoryBinding {
-    factory: Arc<dyn Factory>,
-    bindings: BTreeMap<String, tok_message::rpc::Binding>,
+/// 能注入服务工厂并检查处理链安装状态的 RPC 绑定。
+pub trait RpcBinding: Clone + Send + Sync + 'static {
+    /// 查询工厂是否已安装处理链。
+    fn is_installed(&self) -> bool;
 }
-impl Factory for FactoryBinding {
+impl RpcBinding for tok_message::rpc::Binding {
+    fn is_installed(&self) -> bool {
+        self.is_installed()
+    }
+}
+impl RpcBinding for tok_player::rpc::Binding {
+    fn is_installed(&self) -> bool {
+        self.is_installed()
+    }
+}
+/// 可由应用构建并延迟安装处理链的 RPC 入口。
+pub trait RpcEntry: Sized {
+    /// 与入口配对的工厂绑定。
+    type Binding: RpcBinding;
+    /// 创建入口与对应的未安装绑定。
+    fn deferred(
+        node_id: &str,
+        service_name: &str,
+    ) -> Result<(Self, Self::Binding), tok_grpc::Error>;
+}
+impl RpcEntry for tok_message::rpc::Service {
+    type Binding = tok_message::rpc::Binding;
+    fn deferred(
+        node_id: &str,
+        service_name: &str,
+    ) -> Result<(Self, Self::Binding), tok_grpc::Error> {
+        Self::deferred(node_id, service_name)
+    }
+}
+impl RpcEntry for tok_player::rpc::Service {
+    type Binding = tok_player::rpc::Binding;
+    fn deferred(
+        node_id: &str,
+        service_name: &str,
+    ) -> Result<(Self, Self::Binding), tok_grpc::Error> {
+        Self::deferred(node_id, service_name)
+    }
+}
+struct FactoryBinding<B> {
+    factory: Arc<dyn Factory>,
+    bindings: BTreeMap<String, B>,
+}
+impl<B: RpcBinding> Factory for FactoryBinding<B> {
     fn initialize(&self, mut init: lifecycle::Init) -> lifecycle::InitFuture {
         let binding = self.bindings.get(&init.identity.service_name).cloned();
         let factory = Arc::clone(&self.factory);
@@ -91,14 +133,14 @@ impl Application {
         });
         Ok(())
     }
-    /// 注册统一 RPC 工厂；按配置创建入口并将一次性 message::rpc::Binding 注入 Init.extensions。
+    /// 注册统一 RPC 工厂；按配置创建入口并将一次性 player::rpc::Binding 注入 Init.extensions。
     /// 工厂必须在初始化中安装实际状态和处理链；protocol 只选择协议，不推导业务锁或中间件。
     /// 参数校验失败不保留部分工厂或绑定；没有匹配配置时仅注册工厂。
-    pub fn register_rpc_factory<S>(
+    pub fn register_rpc_factory<R: RpcEntry, S>(
         &mut self,
         name: impl Into<String>,
         factory: impl Factory + 'static,
-        protocol: impl Fn(RpcService) -> S,
+        protocol: impl Fn(R) -> S,
     ) -> Result<(), Error>
     where
         S: Service<http::Request<Body>, Response = http::Response<Body>, Error = Infallible>
@@ -134,7 +176,7 @@ impl Application {
         let mut bindings = BTreeMap::new();
         let mut registrations = Vec::new();
         for service in services {
-            let (rpc, binding) = RpcService::deferred(&self.config.node_id, &service)?;
+            let (rpc, binding) = R::deferred(&self.config.node_id, &service)?;
             let endpoint = self.validate_rpc(&service, S::NAME)?;
             let protocol = protocol(rpc);
             bindings.insert(service.clone(), binding);

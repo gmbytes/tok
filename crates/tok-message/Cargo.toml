@@ -7,14 +7,11 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-tok-protobuf.workspace = true
 thiserror.workspace = true
 tok-grpc.workspace = true
 tok-execution.workspace = true
 tok-lifecycle.workspace = true
-tok-events.workspace = true
 tok-core.workspace = true
-tok-player.workspace = true
 tok-proto.workspace = true
 tonic.workspace = true
 tower.workspace = true
@@ -24,6 +21,8 @@ tokio-util.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+tok-player.workspace = true
+tok-events.workspace = true
 tracing-opentelemetry.workspace = true
 opentelemetry.workspace = true
 tokio-stream.workspace = true

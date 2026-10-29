@@ -1,5 +1,6 @@
 //! 配置驱动的服务生命周期；具体服务由游戏注册。
 mod rpc;
+pub use rpc::{RpcBinding, RpcEntry};
 
 use std::{collections::BTreeMap, future::Future, sync::Arc, time::Duration};
 

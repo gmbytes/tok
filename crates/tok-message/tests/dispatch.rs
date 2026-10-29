@@ -11,10 +11,11 @@ use tok_core::{Extensions, Identity, ServiceDescriptor};
 use tok_execution::registry::DispatchError;
 use tok_execution::{Context, Request};
 use tok_grpc::{Client, Listener};
-use tok_message::rpc::{CallContext, Handler as _, Service as RpcService, business};
+use tok_message::protobuf;
+use tok_message::rpc::{Handler as _, Service as RpcService, business};
 use tok_message::{Message, Registry, Reply};
+use tok_player::rpc::{CallContext, Handler as _};
 use tok_proto::internal::v1::Payload;
-use tok_protobuf as protobuf;
 use tokio_util::sync::CancellationToken;
 use tonic::{Code, Status};
 
@@ -46,6 +47,15 @@ fn call() -> CallContext {
         request_id: 7,
         session: None,
         timer: None,
+    }
+}
+
+fn business_call() -> tok_message::rpc::CallContext {
+    tok_message::rpc::CallContext {
+        node_id: "node".into(),
+        service_name: "custom".into(),
+        bid: Some("5".into()),
+        request_id: 7,
     }
 }
 
@@ -112,26 +122,6 @@ async fn local_and_rpc_share_one_chain_and_map_errors_only_at_rpc_boundary() {
         },
         |_| Status::permission_denied("业务拒绝"),
     ));
-    let mut timer = call();
-    timer.timer = Some(tok_player::TimerTrigger {
-        timer_id: "internal".into(),
-        scheduled_at_ms: 1,
-        fired_at_ms: 2,
-    });
-    assert_eq!(
-        adapter
-            .call(request((
-                timer,
-                Payload {
-                    message_id: 1,
-                    body: body.clone()
-                }
-            )))
-            .await
-            .unwrap_err()
-            .code(),
-        Code::InvalidArgument
-    );
     assert_eq!(calls.load(Ordering::SeqCst), 2);
     let mut extensions = Extensions::default();
     extensions.insert(42u64);
@@ -159,7 +149,7 @@ async fn local_and_rpc_share_one_chain_and_map_errors_only_at_rpc_boundary() {
             &target,
             root(
                 (
-                    call(),
+                    business_call(),
                     Payload {
                         message_id: 1,
                         body,
@@ -186,7 +176,7 @@ async fn local_and_rpc_share_one_chain_and_map_errors_only_at_rpc_boundary() {
                     &target,
                     root(
                         (
-                            call(),
+                            business_call(),
                             Payload {
                                 message_id: id,
                                 body
@@ -495,7 +485,7 @@ async fn custom_registry_flows_through_message_codec_and_business_rpc_with_origi
     );
     let response = adapter
         .call(request((
-            call(),
+            business_call(),
             Payload {
                 message_id: 7,
                 body: Value { value: 7 }.encode_to_vec(),
@@ -509,7 +499,7 @@ async fn custom_registry_flows_through_message_codec_and_business_rpc_with_origi
     assert_eq!(Value::decode(payload.body.as_slice()).unwrap().value, 12);
     let failure = adapter
         .call(request((
-            call(),
+            business_call(),
             Payload {
                 message_id: 11,
                 body: vec![],
@@ -520,7 +510,7 @@ async fn custom_registry_flows_through_message_codec_and_business_rpc_with_origi
     assert_eq!(failure.code(), Code::Unavailable);
     let before = backend.calls.load(Ordering::SeqCst);
     let stopped = request((
-        call(),
+        business_call(),
         Payload {
             message_id: 7,
             body: vec![],
@@ -534,7 +524,7 @@ async fn custom_registry_flows_through_message_codec_and_business_rpc_with_origi
     assert_eq!(backend.calls.load(Ordering::SeqCst), before);
     let invalid = adapter
         .call(request((
-            call(),
+            business_call(),
             Payload {
                 message_id: 0,
                 body: vec![],
@@ -549,7 +539,7 @@ async fn custom_registry_flows_through_message_codec_and_business_rpc_with_origi
 async fn player_adapter_can_replace_message_registry_without_routing_timers_through_it() {
     let backend = Redirect::<CallContext, Option<tok_player::TimerUpdate>, Status>::default();
     let mut registry =
-        tok_message::rpc::HandlerRegistry::from_registry(backend.clone(), |error| match error {
+        tok_player::rpc::HandlerRegistry::from_registry(backend.clone(), |error| match error {
             RegistryFailure::Backend(_) => Status::unavailable("自定义路由不可用"),
             RegistryFailure::Table(error) => Status::internal(error.to_string()),
         });

@@ -11,8 +11,8 @@ use std::{
 };
 use tok_core::ServiceDescriptor;
 use tok_grpc::{Client, Listener};
-use tok_message::rpc::CallContext;
-use tok_message::rpc::{CallTask, Handler, Service as RpcService};
+use tok_player::rpc::CallContext;
+use tok_player::rpc::{CallTask, Handler, Service as RpcService};
 use tok_proto::internal::v1::{CallResponse, Payload};
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
@@ -24,7 +24,7 @@ impl Handler for Capture {
     fn event(
         &self,
         request: tok_execution::Request<(CallContext, Arc<tok_events::Message>)>,
-    ) -> tok_message::rpc::EventTask<'_> {
+    ) -> tok_player::rpc::EventTask<'_> {
         let context = request.input.0;
         Box::pin(async move {
             *self.0.lock().unwrap() = Some(
@@ -63,6 +63,30 @@ impl Handler for Capture {
     }
 }
 
+impl tok_message::rpc::Handler for Capture {
+    fn call(
+        &self,
+        request: tok_execution::Request<(tok_message::rpc::CallContext, Payload)>,
+    ) -> tok_message::rpc::CallTask<'_> {
+        let (context, payload) = request.input;
+        Box::pin(async move {
+            *self.0.lock().unwrap() = Some(
+                tracing::Span::current()
+                    .context()
+                    .span()
+                    .span_context()
+                    .trace_id(),
+            );
+            Ok(tok_execution::Response::new(CallResponse {
+                request_id: context.request_id,
+                payload: Some(payload),
+                error: None,
+                timers: None,
+            }))
+        })
+    }
+}
+
 #[tokio::test]
 async fn trace_context_is_propagated_across_the_network_call() {
     global::set_text_map_propagator(TraceContextPropagator::new());
@@ -81,9 +105,13 @@ async fn trace_context_is_propagated_across_the_network_call() {
     let endpoint = Listener::new()
         .add_service(
             "guild",
-            RpcService::new("local", "guild", Arc::new(Capture(Arc::clone(&observed))))
-                .unwrap()
-                .into_business(),
+            tok_message::rpc::Service::new(
+                "local",
+                "guild",
+                Arc::new(Capture(Arc::clone(&observed))),
+            )
+            .unwrap()
+            .into_business(),
         )
         .unwrap()
         .add_service(
@@ -108,13 +136,11 @@ async fn trace_context_is_propagated_across_the_network_call() {
             protocol: "grpc".into(),
             address,
         };
-        let call = CallContext {
-            timer: None,
+        let call = tok_message::rpc::CallContext {
             node_id: "local".into(),
             service_name: "guild".into(),
             bid: Some("7".into()),
             request_id: 1,
-            session: None,
         };
         use tracing::Instrument;
         business_client
@@ -199,7 +225,7 @@ async fn trace_context_is_propagated_across_the_network_call() {
     };
     use tracing::Instrument;
     let clients = Arc::new(Client::new(Duration::from_secs(2), 1).unwrap());
-    let player_client = tok_message::rpc::player::Client::new(Arc::clone(&clients));
+    let player_client = tok_player::rpc::Client::new(Arc::clone(&clients));
     player_client
         .handle_event(
             &target,

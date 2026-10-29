@@ -14,7 +14,8 @@ use tok::{
     application::{self, Application},
     core::ServiceDirectory,
     lifecycle::{self, Init, InitFuture, task::Task},
-    message::rpc::{HandlerRegistry, Service as RpcService},
+    message::rpc::Service as BusinessService,
+    player::rpc::{HandlerRegistry, Service as RpcService},
 };
 
 struct Factory {
@@ -80,6 +81,15 @@ impl lifecycle::Factory for Factory {
 fn config(address: std::net::SocketAddr) -> AppConfig {
     AppConfig::from_toml(&format!("node_id='local'\ndiscovery='memory'\n[[endpoints]]\nname='internal'\nprotocol='grpc'\naddress='{address}'\n[[services]]\nservice_name='player'\nendpoint='internal'\n[[services]]\nservice_name='guild'\nendpoint='internal'")).unwrap()
 }
+fn business_handler() -> Arc<dyn tok::message::rpc::Handler> {
+    let registry = Arc::new(tok::message::Registry::<()>::new());
+    Arc::new(tok::message::rpc::business::Handler::new(
+        registry,
+        |_| Ok(()),
+        |error: std::convert::Infallible| match error {},
+    ))
+}
+
 fn endpoint() -> Listener {
     Listener::new()
         .add_service(
@@ -91,7 +101,7 @@ fn endpoint() -> Listener {
         .unwrap()
         .add_service(
             "guild",
-            RpcService::new("local", "guild", Arc::new(HandlerRegistry::new()))
+            BusinessService::new("local", "guild", business_handler())
                 .unwrap()
                 .into_business(),
         )
@@ -238,14 +248,16 @@ async fn configuration_requires_complete_and_unique_endpoint_bindings() {
 
 fn installing_factory(init: Init) -> InitFuture {
     Box::pin(async move {
-        let binding = init
-            .extensions
-            .get::<tok::message::rpc::Binding>()
-            .unwrap()
-            .clone();
-        assert!(!binding.is_installed());
-        binding.install(&init, Arc::new(HandlerRegistry::new()))?;
-        assert!(binding.is_installed());
+        if let Some(binding) = init.extensions.get::<tok::player::rpc::Binding>() {
+            assert!(!binding.is_installed());
+            binding.install(&init, Arc::new(HandlerRegistry::new()))?;
+            assert!(binding.is_installed());
+        } else {
+            let binding = init.extensions.get::<tok::message::rpc::Binding>().unwrap();
+            assert!(!binding.is_installed());
+            binding.install(&init, business_handler())?;
+            assert!(binding.is_installed());
+        }
         Ok(Box::pin(async move {
             init.service.cancellation().cancelled().await;
             Ok(())
@@ -281,7 +293,7 @@ async fn configured_rpc_factories_assemble_shared_endpoint_and_reject_missing_in
                     })
                 }
             },
-            RpcService::into_business,
+            BusinessService::into_business,
         )
         .unwrap();
         let directory = app.directory();
@@ -322,7 +334,7 @@ async fn rpc_factory_validation_is_atomic_and_custom_bindings_can_complete_the_s
     }
     let mut app = Application::new(cfg).unwrap();
     assert!(
-        app.register_rpc_factory("shared", installing_factory, RpcService::into_business)
+        app.register_rpc_factory("shared", installing_factory, BusinessService::into_business)
             .is_err()
     );
     // 失败没有残留工厂或半个端点，允许按显式自定义协议完成组装。
@@ -352,7 +364,7 @@ async fn rpc_factory_validation_is_atomic_and_custom_bindings_can_complete_the_s
     );
     app.bind_rpc(
         "guild",
-        RpcService::new("local", "guild", Arc::new(HandlerRegistry::new()))
+        BusinessService::new("local", "guild", business_handler())
             .unwrap()
             .into_business(),
     )
@@ -369,7 +381,7 @@ async fn one_rpc_factory_can_initialize_multiple_identities_on_distinct_endpoint
     let config = AppConfig::from_toml(&format!("node_id='local'\ndiscovery='memory'\n[[endpoints]]\nname='a'\nprotocol='grpc'\naddress='{}'\n[[endpoints]]\nname='b'\nprotocol='grpc'\naddress='{}'\n[[services]]\nservice_name='one'\nfactory='shared'\nendpoint='a'\n[[services]]\nservice_name='two'\nfactory='shared'\nendpoint='b'", one.local_addr().unwrap(), two.local_addr().unwrap())).unwrap();
     drop((one, two));
     let mut app = Application::new(config).unwrap();
-    app.register_rpc_factory("shared", installing_factory, RpcService::into_business)
+    app.register_rpc_factory("shared", installing_factory, BusinessService::into_business)
         .unwrap();
     let directory = app.directory();
     app.run_until(async {
@@ -395,7 +407,7 @@ fn rpc_factory_rejects_endpointless_service_without_retaining_registration() {
     .unwrap();
     let mut app = Application::new(config).unwrap();
     assert!(
-        app.register_rpc_factory("audit", installing_factory, RpcService::into_business)
+        app.register_rpc_factory("audit", installing_factory, BusinessService::into_business)
             .is_err()
     );
     app.register_factory(
@@ -432,7 +444,7 @@ async fn application_accepts_listener_layers_without_generic_registration() {
             .unwrap()
             .add_service(
                 "guild",
-                RpcService::new("local", "guild", Arc::new(HandlerRegistry::new()))
+                BusinessService::new("local", "guild", business_handler())
                     .unwrap()
                     .into_business(),
             )
@@ -475,10 +487,8 @@ async fn application_accepts_listener_layers_without_generic_registration() {
                             service_name: "guild".into(),
                             bid: Some("7".into()),
                             request_id: 1,
-                            session: None,
-                            timer: None,
                         },
-                        tok::message::rpc::protocol::internal::v1::Payload {
+                        tok::player::rpc::protocol::internal::v1::Payload {
                             message_id: 1,
                             body: vec![],
                         },

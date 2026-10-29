@@ -27,3 +27,53 @@ pub struct LogicalMessage {
     /// 业务编码后的消息正文，不包含传输封装。
     pub body: Vec<u8>,
 }
+
+/// 玩家通知消息构造失败。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum NotificationError {
+    /// 消息编号零保留为无消息。
+    #[error("通知消息 ID 必须非零")]
+    InvalidMessageId,
+}
+
+/// 编码玩家通知；下行序号由网关 session 分配。
+pub fn notification<M: prost::Message>(
+    message_id: u32,
+    message: &M,
+) -> Result<LogicalMessage, NotificationError> {
+    if message_id == 0 {
+        return Err(NotificationError::InvalidMessageId);
+    }
+    Ok(LogicalMessage {
+        kind: MessageKind::Notify,
+        message_id,
+        request_id: 0,
+        server_seq: None,
+        error_code: 0,
+        body: message.encode_to_vec(),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[derive(Clone, PartialEq, prost::Message)]
+    struct Notice {
+        #[prost(uint32, tag = "1")]
+        value: u32,
+    }
+    #[test]
+    fn notification_encodes_body_and_reserves_zero_id() {
+        let notice = Notice { value: 42 };
+        assert_eq!(
+            notification(0, &notice),
+            Err(NotificationError::InvalidMessageId)
+        );
+        let message = notification(7, &notice).unwrap();
+        assert_eq!(message.kind, MessageKind::Notify);
+        assert_eq!(message.message_id, 7);
+        assert_eq!(message.request_id, 0);
+        assert_eq!(message.server_seq, None);
+        assert_eq!(prost::Message::decode(message.body.as_slice()), Ok(notice));
+    }
+}

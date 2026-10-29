@@ -10,13 +10,13 @@ use std::{
 };
 use tok_core::ServiceDescriptor;
 use tok_grpc::{Client, Listener};
-use tok_message::rpc::CallContext;
-use tok_message::rpc::{
+use tok_player::TimerTrigger;
+use tok_player::rpc::CallContext;
+use tok_player::rpc::timer::{decode_update, encode_update};
+use tok_player::rpc::{
     HandlerRegistry, HandlerReply, Service as RpcService,
     protocol::internal::v1::{self as proto, Payload},
-    timer::{decode_update, encode_update},
 };
-use tok_player::TimerTrigger;
 use tok_player::{SessionIdentity, TimerSpec, TimerUpdate};
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
@@ -65,7 +65,7 @@ async fn internal_trigger_is_propagated_and_cannot_be_selected_by_client_message
     let calls = Arc::new(AtomicUsize::new(0));
     let mut registry = HandlerRegistry::new();
     registry
-        .register_with_timers(1, 2, |execution_request: tok_execution::Request<(tok_message::rpc::CallContext, Data)>| async move { let (_context, request) = execution_request.input;
+        .register_with_timers(1, 2, |execution_request: tok_execution::Request<(tok_player::rpc::CallContext, Data)>| async move { let (_context, request) = execution_request.input;
             Ok(tok_execution::Response::new(HandlerReply {
                 message: request,
                 timers: Some(TimerUpdate::ReplaceAll(vec![spec()])),
@@ -77,7 +77,7 @@ async fn internal_trigger_is_propagated_and_cannot_be_selected_by_client_message
         .register_timer(
             3,
             move |execution_request: tok_execution::Request<(
-                tok_message::rpc::CallContext,
+                tok_player::rpc::CallContext,
                 Data,
             )>| {
                 let (context, request) = execution_request.input;
@@ -102,7 +102,7 @@ async fn internal_trigger_is_propagated_and_cannot_be_selected_by_client_message
             .register_timer(
                 3,
                 |execution_request: tok_execution::Request<(
-                    tok_message::rpc::CallContext,
+                    tok_player::rpc::CallContext,
                     Data
                 )>| async move {
                     let (_ctx, _) = execution_request.input;
@@ -130,8 +130,7 @@ async fn internal_trigger_is_propagated_and_cannot_be_selected_by_client_message
     let cancel = CancellationToken::new();
     let server = tokio::spawn(endpoint.serve(listener, cancel.clone()).unwrap());
     let clients = Arc::new(Client::new(Duration::from_secs(2), 2).unwrap());
-    let player_client = tok_message::rpc::player::Client::new(Arc::clone(&clients));
-    let business_client = tok_message::rpc::business::Client::new(Arc::clone(&clients));
+    let player_client = tok_player::rpc::Client::new(Arc::clone(&clients));
     let mut context = CallContext {
         node_id: "node".into(),
         service_name: "player".into(),
@@ -207,17 +206,6 @@ async fn internal_trigger_is_propagated_and_cannot_be_selected_by_client_message
         }
     );
     assert_eq!(calls.load(Ordering::SeqCst), 1);
-    assert_eq!(
-        business_client
-            .call(
-                &target,
-                root((context.clone(), body.clone()), tracing::Span::current())
-            )
-            .await
-            .unwrap_err()
-            .code(),
-        Code::InvalidArgument
-    );
     context.timer.as_mut().unwrap().fired_at_ms = 500;
     assert_eq!(
         player_client

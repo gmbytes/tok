@@ -6,7 +6,7 @@ use std::{
 };
 use tok_core::ServiceDescriptor;
 use tok_grpc::{Client, Listener};
-use tok_message::rpc::CallContext;
+use tok_player::rpc::CallContext;
 use tok_proto::internal::v1::{
     CallRequest, CallResponse, Payload,
     business_rpc_server::{BusinessRpc, BusinessRpcServer},
@@ -34,8 +34,8 @@ impl Probe {
 impl PlayerRpc for Probe {
     async fn handle_event(
         &self,
-        _: Request<tok_message::rpc::protocol::internal::v1::EventRequest>,
-    ) -> Result<Response<tok_message::rpc::protocol::internal::v1::EventResponse>, Status> {
+        _: Request<tok_player::rpc::protocol::internal::v1::EventRequest>,
+    ) -> Result<Response<tok_player::rpc::protocol::internal::v1::EventResponse>, Status> {
         Err(Status::unimplemented("此连接探针不处理事件"))
     }
 
@@ -65,7 +65,7 @@ async fn two_services_on_one_endpoint_share_a_tcp_connection() {
     let shutdown = CancellationToken::new();
     let server = tokio::spawn(endpoint.serve(listener, shutdown.clone()).unwrap());
     let clients = Arc::new(Client::new(Duration::from_secs(2), 1).unwrap());
-    let player_client = tok_message::rpc::player::Client::new(Arc::clone(&clients));
+    let player_client = tok_player::rpc::Client::new(Arc::clone(&clients));
     let business_client = tok_message::rpc::business::Client::new(Arc::clone(&clients));
     for (name, player) in [("player", true), ("guild", false)] {
         let target = ServiceDescriptor {
@@ -93,7 +93,21 @@ async fn two_services_on_one_endpoint_share_a_tcp_connection() {
                 .unwrap();
         } else {
             business_client
-                .call(&target, root((context, payload), tracing::Span::current()))
+                .call(
+                    &target,
+                    root(
+                        (
+                            tok_message::rpc::CallContext {
+                                node_id: context.node_id,
+                                service_name: context.service_name,
+                                bid: context.bid,
+                                request_id: context.request_id,
+                            },
+                            payload,
+                        ),
+                        tracing::Span::current(),
+                    ),
+                )
                 .await
                 .unwrap();
         }

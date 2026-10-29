@@ -3,7 +3,7 @@ use prost::Message as _;
 use std::time::Duration;
 use tok_core::Identity;
 use tok_execution::{Context, Request, registry::DispatchError};
-use tok_protobuf as protobuf;
+use tok_message::protobuf;
 use tokio_util::sync::CancellationToken;
 #[derive(Clone, PartialEq, prost::Message)]
 struct Value {

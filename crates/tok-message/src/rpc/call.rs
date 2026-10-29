@@ -21,11 +21,7 @@ pub(crate) fn encode_context(context: CallContext) -> proto::CallContext {
         service_name: context.service_name,
         bid: context.bid,
         request_id: context.request_id,
-        session: context.session.map(|identity| proto::SessionIdentity {
-            player_id: identity.player_id,
-            session_id: identity.session_id,
-            epoch: identity.epoch,
-        }),
+        session: None,
     }
 }
 pub(crate) async fn call<F, Fut>(
@@ -38,16 +34,11 @@ where
     F: FnOnce(Channel, Request<CallRequest>) -> Fut,
     Fut: Future<Output = Result<Response<CallResponse>, Status>>,
 {
-    let (execution, (mut context, payload), extensions) = request.into_parts();
+    let (execution, (context, payload), extensions) = request.into_parts();
     validate_target(target, &context)?;
     let request_id = context.request_id;
-    let timer = context.timer.take().map(|timer| proto::TimerTrigger {
-        timer_id: timer.timer_id,
-        scheduled_at_ms: timer.scheduled_at_ms,
-        fired_at_ms: timer.fired_at_ms,
-    });
     let request = Request::new(CallRequest {
-        timer,
+        timer: None,
         context: Some(encode_context(context)),
         payload: Some(payload),
     });

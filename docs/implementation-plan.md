@@ -387,7 +387,7 @@ Client::with_endpoint_factory 接收从 ServiceDescriptor 创建 Tonic Endpoint 
 
 分发能力合并入 tok-execution::registry，不新增独立 crate 或 tok::dispatch 门面路径。Registry<K, T, R, E> 只负责按键选择并执行处理链，输入/结果/业务错误均泛型，不限定消息 ID、正文或编解码。K 采用 Ord + Clone 约束，不要求 Display；零或空键的合法性由业务/协议决定。
 
-正文 protobuf 适配位于 tok-protobuf，复用通用表，提供 Registry<K, C, O, E> / Message<K> / Reply / Error，编解码与内层就绪等待也计入原预算。tok-execution 不依赖 prost、Tonic、生成协议、玩家或生命周期。message::rpc::HandlerRegistry 的普通请求表委托该适配器；business::Handler 显式转换业务状态与错误，仅在 RPC 边界构造 CallResponse / Status，并保留线协议 u32 非零规则。
+当时正文 protobuf 适配位于 tok-protobuf（现为 tok-message::protobuf），复用通用表，提供 Registry<K, C, O, E> / Message<K> / Reply / Error，编解码与内层就绪等待也计入原预算。tok-execution 不依赖 prost、Tonic、生成协议、玩家或生命周期。message::rpc::HandlerRegistry 的普通请求表委托该适配器；business::Handler 显式转换业务状态与错误，仅在 RPC 边界构造 CallResponse / Status，并保留线协议 u32 非零规则。
 
 公会示例用自身错误与 u64 目标，本地及 RPC 共用相同处理链；just dispatch-smoke 演示本地直接调用。当前存储的处理链与输入要求自有 Send + static 类型，共享业务状态可以 Arc 传入；借用执行继续使用直接 Tower 或事件接口。
 
@@ -419,7 +419,7 @@ core 根校验错误的归属迁移已实施，最终落点见下文“移除 co
 
 ## 消息与传输边界校正（2026-10-21）
 
-tok-game-rpc 已调整为 tok-message，通用正文适配独立为 tok-protobuf，tok-rpc 更名为 tok-grpc。生成协议仍在 tok-proto，不依赖执行层。门面提供 tok::protobuf、tok::message 与 tok::grpc；旧 crate 与门面路径不再提供。
+当时 tok-game-rpc 调整为 tok-message，通用正文适配独立为 tok-protobuf（现已并入 tok-message::protobuf），tok-rpc 更名为 tok-grpc。生成协议仍在 tok-proto，不依赖执行层。当时门面提供 tok::protobuf、tok::message 与 tok::grpc；现改为 tok::message::protobuf 与 tok::grpc。
 
 tok-message 根 Registry 提供不依赖 Tonic 的非零编号注册、本地分发与原始业务错误；玩家身份、事件/timer RPC 组合、线协议结果与 Status 映射集中于 message::rpc。公会示例和本地/RPC 共用处理链采用根 Registry。通用 protobuf 表继续允许字符串及零键，RPC 不自动添加锁或重试，事件与 timer 仍只能由可信服务器触发。
 
@@ -617,3 +617,29 @@ TLS 导出器初始化与关闭；保留真实 HTTP Collector 导出回归。
 初始化使用延迟连接，不承诺 Collector 可达或 TLS 握手成功；本轮未进行外部 HTTPS Collector 验证。
 
 本轮 Windows 验收：全工作区串行测试 344 项通过、32 项外部专项默认跳过；全目标 Clippy、无警告 workspace rustdoc、格式、空白及 LF 检查通过。未运行真实 Redis/NATS、外部 HTTPS Collector、Linux 或 release 构建。
+
+
+### protobuf 集成与玩家边界方向（2026-10-29）
+
+泛型键 protobuf 适配由独立 tok-protobuf 移至 tok-message::protobuf，保留非 Clone 键、自定义注册器、执行保护与回归测试；Message<K> / Reply 移至 message 公共入口，本身不限定正文编码，protobuf 模块重导出相同类型；门面通过 tok::message::protobuf 使用，不保留旧 crate 或 tok::protobuf 路径。tok-execution 仍编码无关。目前编号消息 Registry 的注册入口仍以 protobuf 为默认实现，未来其他编码须继续校正编号约束与编解码边界，当前没有声称已提供通用 codec。
+
+目标方向：tok-player 承担玩家会话、所有权、timer、玩家 RPC 转发及协议适配；tok-message 承担公共编号消息与通用消息协议。现有 message::rpc 同时依赖玩家和普通业务上下文，玩家协议尚未迁移；应先拆分公共/玩家调用上下文及处理入口、消除公共消息对玩家的反向依赖，再迁移玩家专属实现，避免依赖循环。网关继续负责连接、会话调度及其状态机；不因玩家协议归属把网关实现全部移入 tok-player。
+
+本轮 Windows 验收：全工作区串行测试 344 项通过、32 项外部专项默认跳过；全目标 Clippy、无警告 workspace rustdoc、格式、空白和 LF 检查通过。未运行真实 Redis/NATS、Linux 或 release 构建。
+
+
+### 玩家通知与 timer 协议归属校正（2026-10-29）
+
+玩家通知编码从 tok-message::notification 迁至 tok-player::notification，非法消息编号由玩家通知错误表达；玩家 timer 的协议转换从 tok-message::rpc::timer 迁至 tok-player::rpc::timer，调用点和现有 timer 往返、服务器触发测试已迁移。tok-player 因此增加 tok-proto、prost 和 tonic 依赖，所有权与凭证后端的依赖成本也随之增加。
+
+当时包含玩家字段的 CallContext 已移至 tok-player::rpc，但普通与玩家 RPC 仍共用入口；后续拆分结果见下文。
+
+### 普通消息与玩家 RPC 边界校正（2026-10-29）
+
+已将玩家 RPC 的上下文、处理器、客户端、服务、绑定以及 timer / 事件协议适配迁至 tok-player::rpc；tok-message::rpc 保留普通业务入口与请求锁，不再有 tok-player 或 tok-events 正常依赖。两类入口使用各自的 CallContext 和 Binding，共用 Application 的工厂装配机制。普通业务入口拒绝玩家 session 与 timer 字段；gateway 继续负责连接和 session 生命周期。
+
+protobuf 是当前默认正文适配，不宣称其他编码已经实现。tok-player 引入消息、gRPC、事件和生命周期依赖，使用其基础契约的下游也会引入这些依赖；按实际需要评估后续是否拆分 feature。tok-player 的最终审查仍待用户确认。
+
+验证：workspace 测试、全目标 Clippy、无警告 rustdoc、格式与 LF 检查，以及共享端点 player / guild RPC smoke 和普通业务边界测试通过。未执行真实 Redis / NATS、Linux 或 release 构建。
+
+本次阶段验证：Windows 全工作区串行测试 345 项通过、32 项外部专项默认跳过；全目标 Clippy、无警告 workspace rustdoc、格式及空白检查通过。未运行真实 Redis/NATS、Linux 或 release 构建。

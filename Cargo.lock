@@ -1991,7 +1991,6 @@ dependencies = [
  "tok-message",
  "tok-observability",
  "tok-player",
- "tok-protobuf",
  "tokio",
  "tokio-util",
  "toml",
@@ -2132,7 +2131,6 @@ dependencies = [
  "tok-lifecycle",
  "tok-player",
  "tok-proto",
- "tok-protobuf",
  "tokio",
  "tokio-stream",
  "tokio-util",
@@ -2169,8 +2167,20 @@ dependencies = [
 name = "tok-player"
 version = "0.1.0"
 dependencies = [
+ "prost",
  "thiserror",
  "tok-core",
+ "tok-events",
+ "tok-execution",
+ "tok-grpc",
+ "tok-lifecycle",
+ "tok-message",
+ "tok-proto",
+ "tokio",
+ "tokio-util",
+ "tonic",
+ "tower",
+ "tracing",
 ]
 
 [[package]]
@@ -2183,19 +2193,6 @@ dependencies = [
  "tonic",
  "tonic-prost",
  "tonic-prost-build",
-]
-
-[[package]]
-name = "tok-protobuf"
-version = "0.1.0"
-dependencies = [
- "prost",
- "thiserror",
- "tok-core",
- "tok-execution",
- "tokio",
- "tokio-util",
- "tower",
 ]
 
 [[package]]

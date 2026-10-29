@@ -14,7 +14,7 @@ use tok::{
     core::Identity,
     execution::{Context, Request},
     lifecycle::task::BoxError,
-    protobuf::Message,
+    message::protobuf::Message,
 };
 use tokio_util::sync::CancellationToken;
 use tower::{ServiceBuilder, ServiceExt as _};

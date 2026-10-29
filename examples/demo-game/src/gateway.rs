@@ -91,7 +91,7 @@ impl Factory for PlayerIngressFactory {
             let executor = Arc::new(player::RpcExecutor::new(
                 "player",
                 Arc::new(RendezvousRouter::new(Arc::clone(&binding.directory))),
-                tok::message::rpc::player::Client::new(clients),
+                tok::player::rpc::Client::new(clients),
             )?);
             let pipeline = player::Pipeline::new(Arc::<player::RpcExecutor>::clone(&executor))
                 .with_admission_layer(middleware::Observe)

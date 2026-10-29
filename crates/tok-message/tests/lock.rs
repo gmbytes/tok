@@ -24,8 +24,6 @@ fn context() -> CallContext {
         service_name: "guild".into(),
         bid: Some("7".into()),
         request_id: 1,
-        session: None,
-        timer: None,
     }
 }
 fn handler(

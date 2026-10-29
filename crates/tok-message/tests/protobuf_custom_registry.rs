@@ -13,7 +13,7 @@ use tok_execution::{
     Context, Registry as _, Request, Response, StopReason,
     registry::{self, DispatchError},
 };
-use tok_protobuf::{self as protobuf, Message, Reply};
+use tok_message::protobuf::{self, Message, Reply};
 use tokio_util::sync::CancellationToken;
 use tower::ServiceExt as _;
 

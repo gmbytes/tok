@@ -7,7 +7,6 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-tok-protobuf.workspace = true
 tok-core.workspace = true
 tok-player.workspace = true
 tok-execution.workspace = true

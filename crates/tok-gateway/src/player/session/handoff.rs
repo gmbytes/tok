@@ -16,7 +16,7 @@ use std::{
     time::Duration,
 };
 use tok_core::Identity as SessionOwner;
-use tok_message::rpc::{
+use tok_player::rpc::{
     protocol::internal::v1 as proto,
     tonic::{self, Status},
 };

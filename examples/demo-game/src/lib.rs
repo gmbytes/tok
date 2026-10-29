@@ -18,9 +18,10 @@ use tok::{
     application::Application,
     core::ServiceDirectory,
     lifecycle::{Init, InitFuture, task::Task},
-    message::rpc::{CallContext, Service as RpcService, protocol::internal::v1::Payload},
+    message::rpc::{CallContext as BusinessContext, Service as BusinessService},
     observability::Error,
     player::SessionIdentity,
+    player::rpc::{CallContext, Service as RpcService, protocol::internal::v1::Payload},
 };
 
 /// 组装 TCP 网关与内部 RPC；所有权按配置选择，公会请求锁默认使用 Memory。
@@ -150,7 +151,7 @@ pub fn application_with_locks(
                     Arc::clone(&endpoints.directory),
                 )?;
                 init.extensions
-                    .get::<tok::message::rpc::Binding>()
+                    .get::<tok::player::rpc::Binding>()
                     .ok_or_else(|| std::io::Error::other("服务缺少 RPC 绑定"))?
                     .install(&init, Arc::new(handlers))?;
                 Ok(Box::pin(async move {
@@ -177,7 +178,7 @@ pub fn application_with_locks(
                 }) as Task)
             })
         },
-        RpcService::into_business,
+        BusinessService::into_business,
     )?;
     Ok(app)
 }
@@ -187,7 +188,7 @@ pub async fn rpc_smoke(directory: &dyn ServiceDirectory) -> Result<(), Error> {
     let player = tok::infra::routing::route(directory, "player", "42")?;
     let guild = tok::infra::routing::route(directory, "guild", "7")?;
     let clients = Arc::new(Client::new(Duration::from_secs(2), 8)?);
-    let player_client = tok::message::rpc::player::Client::new(Arc::clone(&clients));
+    let player_client = tok::player::rpc::Client::new(Arc::clone(&clients));
     let business_client = tok::message::rpc::business::Client::new(clients);
     let response = player_client
         .call(
@@ -231,13 +232,11 @@ pub async fn rpc_smoke(directory: &dyn ServiceDirectory) -> Result<(), Error> {
             &guild,
             root(
                 (
-                    CallContext {
-                        timer: None,
+                    BusinessContext {
                         node_id: guild.node_id.clone(),
                         service_name: guild.service_name.clone(),
                         bid: Some("7".into()),
                         request_id: 2,
-                        session: None,
                     },
                     Payload {
                         message_id: protocol::v1::GetGuildRequest::MESSAGE_ID,

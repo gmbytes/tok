@@ -24,7 +24,7 @@ use tok_gateway::{
     rpc::GatewayRpcService,
 };
 use tok_infra::{discovery::MemoryDirectory, ownership::MemoryOwnership};
-use tok_message::rpc::protocol::internal::v1 as proto;
+use tok_player::rpc::protocol::internal::v1 as proto;
 use tok_player::{
     LogicalMessage, MessageKind, credentials::ResumeTokenCodec, ownership::Store as OwnershipStore,
 };
@@ -411,7 +411,7 @@ async fn resume(fixture: &Fixture, login: &protocol::LoginResponse) -> TcpStream
 }
 async fn rpc(
     fixture: &Fixture,
-) -> proto::gateway_rpc_client::GatewayRpcClient<tok_message::rpc::tonic::transport::Channel> {
+) -> proto::gateway_rpc_client::GatewayRpcClient<tok_player::rpc::tonic::transport::Channel> {
     proto::gateway_rpc_client::GatewayRpcClient::connect(format!("http://{}", fixture.rpc_address))
         .await
         .unwrap()
@@ -1033,7 +1033,7 @@ async fn gateway_rpc_registers_player_when_handoff_is_disabled() {
     // 统一入口已登记并找到管理器；交接开关在具体操作中拒绝，不影响注册。
     assert_eq!(
         client.prepare_handoff(request).await.unwrap_err().code(),
-        tok_message::rpc::tonic::Code::InvalidArgument
+        tok_player::rpc::tonic::Code::InvalidArgument
     );
     let unknown = proto::HandoffRequest {
         source_service_name: "missing".into(),
@@ -1041,7 +1041,7 @@ async fn gateway_rpc_registers_player_when_handoff_is_disabled() {
     };
     assert_eq!(
         client.prepare_handoff(unknown).await.unwrap_err().code(),
-        tok_message::rpc::tonic::Code::Unavailable
+        tok_player::rpc::tonic::Code::Unavailable
     );
     fixture.stop().await;
 }

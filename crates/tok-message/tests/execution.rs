@@ -10,8 +10,8 @@ use std::{
 use tok_core::service::Identity;
 use tok_events::{Envelope, Event, EventId, Input};
 use tok_execution::{Context, Request};
-use tok_message::rpc::CallContext;
-use tok_message::rpc::{
+use tok_player::rpc::CallContext;
+use tok_player::rpc::{
     Handler, HandlerRegistry, HandlerReply, Service as RpcService,
     protocol::internal::v1::{self as proto, Payload},
 };
@@ -166,9 +166,13 @@ fn wire_request(timeout: Option<&str>) -> tonic::Request<proto::CallRequest> {
         context: Some(proto::CallContext {
             node_id: "node".into(),
             service_name: "test".into(),
-            bid: None,
+            bid: Some("42".into()),
             request_id: 1,
-            session: None,
+            session: Some(proto::SessionIdentity {
+                player_id: "42".into(),
+                session_id: "test".into(),
+                epoch: 1,
+            }),
         }),
         payload: Some(Payload {
             message_id: 1,
@@ -193,7 +197,7 @@ async fn rpc_budget_and_malformed_timeout_are_enforced_before_accepting_results(
             1,
             2,
             move |execution_request: tok_execution::Request<(
-                tok_message::rpc::CallContext,
+                tok_player::rpc::CallContext,
                 Value,
             )>| {
                 let (_, value) = execution_request.input;
@@ -209,7 +213,7 @@ async fn rpc_budget_and_malformed_timeout_are_enforced_before_accepting_results(
     let rpc = RpcService::new("node", "test", Arc::new(registry)).unwrap();
     for value in ["", "123456789S", "1X", "-1S"] {
         assert_eq!(
-            proto::business_rpc_server::BusinessRpc::call(&rpc, wire_request(Some(value)))
+            proto::player_rpc_server::PlayerRpc::call(&rpc, wire_request(Some(value)))
                 .await
                 .unwrap_err()
                 .code(),
@@ -218,7 +222,7 @@ async fn rpc_budget_and_malformed_timeout_are_enforced_before_accepting_results(
     }
     assert_eq!(calls.load(Ordering::SeqCst), 0);
     assert_eq!(
-        proto::business_rpc_server::BusinessRpc::call(&rpc, wire_request(Some("0S")))
+        proto::player_rpc_server::PlayerRpc::call(&rpc, wire_request(Some("0S")))
             .await
             .unwrap_err()
             .code(),
@@ -226,7 +230,7 @@ async fn rpc_budget_and_malformed_timeout_are_enforced_before_accepting_results(
     );
     assert_eq!(calls.load(Ordering::SeqCst), 0);
     assert_eq!(
-        proto::business_rpc_server::BusinessRpc::call(&rpc, wire_request(Some("1m")))
+        proto::player_rpc_server::PlayerRpc::call(&rpc, wire_request(Some("1m")))
             .await
             .unwrap_err()
             .code(),
@@ -239,7 +243,7 @@ async fn deferred_rpc_is_initialized_once_by_its_own_factory_and_stops_with_serv
     use tok_lifecycle::{Builder, Init, InitFuture};
     let (rpc, binding) = RpcService::deferred("node", "test").unwrap();
     assert_eq!(
-        proto::business_rpc_server::BusinessRpc::call(&rpc, wire_request(None))
+        proto::player_rpc_server::PlayerRpc::call(&rpc, wire_request(None))
             .await
             .unwrap_err()
             .code(),
@@ -278,7 +282,7 @@ async fn deferred_rpc_is_initialized_once_by_its_own_factory_and_stops_with_serv
                 1,
                 2,
                 |execution_request: tok_execution::Request<(
-                    tok_message::rpc::CallContext,
+                    tok_player::rpc::CallContext,
                     Value,
                 )>| async move {
                     let (_, v) = execution_request.input;
@@ -301,14 +305,14 @@ async fn deferred_rpc_is_initialized_once_by_its_own_factory_and_stops_with_serv
         .unwrap();
     let running = tokio::spawn(prepared.start().run(Duration::from_secs(1)));
     assert!(
-        proto::business_rpc_server::BusinessRpc::call(&rpc, wire_request(None))
+        proto::player_rpc_server::PlayerRpc::call(&rpc, wire_request(None))
             .await
             .is_ok()
     );
     service.request_stop();
     running.await.unwrap().unwrap();
     assert_eq!(
-        proto::business_rpc_server::BusinessRpc::call(&rpc, wire_request(None))
+        proto::player_rpc_server::PlayerRpc::call(&rpc, wire_request(None))
             .await
             .unwrap_err()
             .code(),

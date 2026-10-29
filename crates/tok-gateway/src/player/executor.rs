@@ -4,13 +4,13 @@ use crate::{ErrorCode, Result};
 use std::{future::Future, pin::Pin, sync::Arc};
 use tok_core::ServiceRouter;
 use tok_execution::Response;
-use tok_message::rpc::CallContext;
-use tok_message::rpc::{
-    player::Client,
+use tok_player::TimerTrigger;
+use tok_player::rpc::CallContext;
+use tok_player::rpc::{
+    Client,
     protocol::internal::v1::Payload,
     tonic::{Code, Status},
 };
-use tok_player::TimerTrigger;
 use tok_player::{LogicalMessage, MessageKind, SessionIdentity, TimerSpec, TimerUpdate};
 
 /// 单次玩家调用的结果，受 session 的调用期限控制。
@@ -180,7 +180,7 @@ impl Executor for RpcExecutor {
             let (response, response_extensions) = response.into_parts();
             let timers = response
                 .timers
-                .map(tok_message::rpc::timer::decode_update)
+                .map(tok_player::rpc::timer::decode_update)
                 .transpose()
                 .map_err(|_| ErrorCode::Internal)?;
             if let Some(error) = response.error {
@@ -262,7 +262,7 @@ impl RpcExecutor {
             let (response, response_extensions) = response.into_parts();
             let timers = response
                 .timers
-                .map(tok_message::rpc::timer::decode_update)
+                .map(tok_player::rpc::timer::decode_update)
                 .transpose()
                 .map_err(|_| ErrorCode::Internal)?;
             if let Some(error) = response.error {
