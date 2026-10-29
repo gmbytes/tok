@@ -14,9 +14,9 @@ message RpcError {
   string message = 2;
 }
 
-// 服务名与 protobuf 服务由组装层绑定，不从客户端正文信任玩家身份。
+// 服务名与 protobuf 服务由组装层绑定，不从客户端正文信任主体身份。
 message SessionIdentity {
-  string player_id = 1;
+  string subject_id = 1;
   string session_id = 2;
   uint64 epoch = 3;
 }
@@ -70,8 +70,8 @@ message CallResponse {
   TimerUpdate timers = 4;
 }
 
-// 只允许会话驱动的 player 入口。身份可信性由部署和认证组件保证。
-service PlayerRpc {
+// 只允许会话驱动的 logic 入口。身份可信性由部署和认证组件保证。
+service LogicRpc {
   rpc Call(CallRequest) returns (CallResponse);
   // 仅内部转发事件；不与客户端请求或 timer 混用。
   rpc HandleEvent(EventRequest) returns (EventResponse);

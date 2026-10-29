@@ -4,7 +4,7 @@
 
 框架以“服务 + 处理链”为核心：Factory 初始化状态、入口和中间件，运行设施监督主任务与后台工作。RPC、事件、timer 和网关业务共用 Request / Tower 执行协议；tok-gateway 是增加连接/session 能力的内置扩展。Application 按配置组装服务，纯事件服务可以不绑定网络端点。
 
-通用基础契约位于 tok-core，调用执行及按键分发位于 tok-execution，服务构建与生命周期位于 tok-lifecycle。tok-message 提供编号消息、本地处理、普通业务 RPC 和默认 protobuf 正文适配；tok-player 提供玩家会话、所有权、计时与玩家 RPC 适配，复用公共消息设施。tok-gateway 管理连接与会话运行，tok-grpc 提供基于 Tonic 的连接、监听与调用执行。
+通用基础契约位于 tok-core，调用执行及按键分发位于 tok-execution，服务构建与生命周期位于 tok-lifecycle。tok-message 提供编号消息、本地处理、普通业务 RPC 和默认 protobuf 正文适配；tok-session 提供逻辑会话、所有权、计时与 logic RPC 适配，复用公共消息设施。tok-gateway 管理连接与会话运行，tok-grpc 提供基于 Tonic 的连接、监听与调用执行。
 
 ## 文档入口
 

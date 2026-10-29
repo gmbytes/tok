@@ -17,7 +17,7 @@ use tok_execution::Request;
 use tok_gateway::{
     ErrorCode, Gateway, GatewayError, Result,
     codec::{FrameCodec, VERSION},
-    player::{
+    logic::{
         self, Config, EventInput, Executor, Ingress, Reply, RequestInput, SessionHandle,
         SessionManager, TimerInput,
         session::{
@@ -29,7 +29,7 @@ use tok_gateway::{
 };
 use tok_infra::ownership::MemoryOwnership;
 use tok_lifecycle::{Builder, Init, InitFuture, task::Task};
-use tok_player::{
+use tok_session::{
     LogicalMessage, MessageKind, TimerSpec, TimerUpdate, ownership::Store as OwnershipStore,
 };
 use tokio::{
@@ -66,7 +66,7 @@ impl extension::Factory for StateFactory {
     fn kind(&self) -> &str {
         "test.state.v1"
     }
-    fn initialize(&self, request: Request<tok_player::SessionIdentity>) -> Result<Extensions> {
+    fn initialize(&self, request: Request<tok_session::SessionIdentity>) -> Result<Extensions> {
         assert!(request.extensions().get::<SessionManager>().is_some());
         if self.initialize_failure {
             return Err(ErrorCode::Internal.into());
@@ -98,7 +98,7 @@ impl extension::Factory for StateFactory {
     }
     fn restore(
         &self,
-        request: Request<(tok_player::SessionIdentity, &[u8])>,
+        request: Request<(tok_session::SessionIdentity, &[u8])>,
     ) -> Result<Extensions> {
         self.validate(request.input.1)?;
         let mut bytes = [0; 8];
@@ -124,11 +124,11 @@ impl extension::Factory for StateFactory {
     }
 }
 struct Auth;
-impl player::Authenticator for Auth {
-    fn authenticate(&self, credential: String) -> player::AuthenticationTask<'_> {
+impl logic::Authenticator for Auth {
+    fn authenticate(&self, credential: String) -> logic::AuthenticationTask<'_> {
         Box::pin(async move {
-            Ok(player::AuthenticatedIdentity {
-                player_id: credential,
+            Ok(logic::AuthenticatedIdentity {
+                subject_id: credential,
             })
         })
     }
@@ -144,11 +144,11 @@ fn completed(reply: Reply) -> tok_execution::Response<Reply> {
 }
 struct Execution(Arc<Counts>);
 impl Executor for Execution {
-    fn execute_request(&self, request: Request<RequestInput>) -> player::Task<'_> {
+    fn execute_request(&self, request: Request<RequestInput>) -> logic::Task<'_> {
         Box::pin(async move {
             assert_eq!(
-                request.extensions().get::<player::ClientRequest>(),
-                Some(&player::ClientRequest {
+                request.extensions().get::<logic::ClientRequest>(),
+                Some(&logic::ClientRequest {
                     request_id: request.input.message.request_id,
                     message_id: request.input.message.message_id,
                 })
@@ -187,7 +187,7 @@ impl Executor for Execution {
             }))
         })
     }
-    fn execute_event(&self, request: Request<EventInput>) -> player::EventTask<'_> {
+    fn execute_event(&self, request: Request<EventInput>) -> logic::EventTask<'_> {
         Box::pin(async move {
             request
                 .extensions()
@@ -199,7 +199,7 @@ impl Executor for Execution {
             Ok(tok_execution::Response::new(None))
         })
     }
-    fn execute_timer(&self, request: Request<TimerInput>) -> player::Task<'_> {
+    fn execute_timer(&self, request: Request<TimerInput>) -> logic::Task<'_> {
         Box::pin(async move {
             request
                 .extensions()
@@ -283,7 +283,7 @@ where
                 gateway.identity().service_name,
                 manager.owner().service_name
             );
-            assert_eq!(session.identity().player_id, "1");
+            assert_eq!(session.identity().subject_id, "1");
             session.snapshot()?;
             let operation = request.context.operation();
             let counter = if operation.contains("/admission/") {
@@ -418,7 +418,7 @@ impl Fixture {
                     counts: Arc::clone(&counts),
                     gate,
                 };
-                let pipeline = player::Pipeline::new(Arc::clone(&executor))
+                let pipeline = logic::Pipeline::new(Arc::clone(&executor))
                     .with_admission_layer(audit.clone())
                     .with_request_layer(audit.clone())
                     .with_event_layer(audit.clone())
@@ -447,7 +447,7 @@ impl Fixture {
                     }))?;
                     let ingress = match policy {
                         Some(topics) => ingress.with_topic_policy(move |request| {
-                            assert_eq!(request.input.player_id, "1");
+                            assert_eq!(request.input.subject_id, "1");
                             Ok(topics.clone())
                         }),
                         None => ingress,
@@ -718,9 +718,9 @@ async fn topic_membership_is_rechecked_after_async_downlink_before_assigning_seq
         manager
             .deliver(tok_execution::Request::new(
                 delivery_context(),
-                player::events::Delivery {
-                    target: player::events::Target::Topic("room".into()),
-                    action: player::events::Action::Notify {
+                logic::events::Delivery {
+                    target: logic::events::Target::Topic("room".into()),
+                    action: logic::events::Action::Notify {
                         message_id: 90,
                         body: vec![1],
                     },
@@ -987,9 +987,9 @@ async fn independent_event_keeps_selected_metadata_after_source_cancellation() {
         .manager
         .deliver(Request::from_parts(
             context,
-            player::events::Delivery {
-                target: player::events::Target::Players(vec!["1".into()]),
-                action: player::events::Action::Forward(event),
+            logic::events::Delivery {
+                target: logic::events::Target::Subjects(vec!["1".into()]),
+                action: logic::events::Action::Forward(event),
             },
             extensions,
         ))
@@ -1072,9 +1072,9 @@ async fn synchronous_notification_keeps_metadata_and_stops_before_sequence_on_ex
         .manager
         .deliver(Request::from_parts(
             context,
-            player::events::Delivery {
-                target: player::events::Target::Players(vec!["1".into()]),
-                action: player::events::Action::Notify {
+            logic::events::Delivery {
+                target: logic::events::Target::Subjects(vec!["1".into()]),
+                action: logic::events::Action::Notify {
                     message_id: 90,
                     body: vec![],
                 },
@@ -1135,9 +1135,9 @@ async fn local_request_and_notification_return_output_extensions_to_their_caller
         .manager
         .deliver(Request::new(
             delivery_context(),
-            player::events::Delivery {
-                target: player::events::Target::Players(vec!["1".into()]),
-                action: player::events::Action::Notify {
+            logic::events::Delivery {
+                target: logic::events::Target::Subjects(vec!["1".into()]),
+                action: logic::events::Action::Notify {
                     message_id: 90,
                     body: vec![],
                 },

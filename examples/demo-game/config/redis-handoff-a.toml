@@ -10,7 +10,7 @@ namespace = "demo-dev"
 # 公开示例密钥，仅用于开发，部署时替换为随机共享密钥。
 secret_key = "1111111111111111111111111111111111111111111111111111111111111111"
 
-[player_gateway]
+[logic_gateway]
 handoff_enabled = true
 
 [[endpoints]]

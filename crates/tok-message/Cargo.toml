@@ -21,7 +21,7 @@ tokio-util.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
-tok-player.workspace = true
+tok-session.workspace = true
 tok-events.workspace = true
 tracing-opentelemetry.workspace = true
 opentelemetry.workspace = true

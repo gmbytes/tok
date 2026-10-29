@@ -42,13 +42,13 @@ impl Event for ValueChanged {
 /// 独立的玩家转发组件；消费组由部署组装显式选择。
 pub fn player_forwarder(
     identity: tok::core::service::Identity,
-    sessions: tok::gateway::player::SessionManager,
+    sessions: tok::gateway::logic::SessionManager,
     topics: tok::events::TopicFilter,
     group: Option<&str>,
 ) -> Result<tok::events::Subscriber, tok::events::Error> {
-    use tok::gateway::player::events::{Target, forward};
+    use tok::gateway::logic::events::{Target, forward};
     let handler = forward::<AddValue, _>(sessions, |event| {
-        Ok(Target::Players(vec![event.payload.player_id.clone()]))
+        Ok(Target::Subjects(vec![event.payload.player_id.clone()]))
     })?;
     tok::events::Subscriber::new(identity, std::sync::Arc::new(handler), topics, group)
 }
@@ -56,14 +56,14 @@ pub fn player_forwarder(
 /// 独立的通知组件；可与转发组件分别启停、选择消费组或替换处理逻辑。
 pub fn value_notifier(
     identity: tok::core::service::Identity,
-    sessions: tok::gateway::player::SessionManager,
+    sessions: tok::gateway::logic::SessionManager,
     topics: tok::events::TopicFilter,
     group: Option<&str>,
 ) -> Result<tok::events::Subscriber, tok::events::Error> {
-    use tok::gateway::player::events::{Target, notify};
+    use tok::gateway::logic::events::{Target, notify};
     let handler = notify::<ValueChanged, _>(sessions, v1::ValueNotice::MESSAGE_ID, |event| {
         Ok((
-            Target::Players(vec![event.payload.player_id.clone()]),
+            Target::Subjects(vec![event.payload.player_id.clone()]),
             v1::ValueNotice {
                 value: event.payload.value,
             }

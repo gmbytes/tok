@@ -15,7 +15,7 @@ pub use tok_infra as infra;
 pub use tok_message as message;
 pub use tok_observability as observability;
 /// 玩家会话、逻辑消息、计时需求、所有权与恢复凭证契约。
-pub use tok_player as player;
+pub use tok_session as session;
 
 /// 类型化调用上下文、请求与处理链执行设施。
 pub use tok_execution as execution;

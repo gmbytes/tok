@@ -7,7 +7,7 @@ use tok::{
     core::Identity as SessionOwner,
     core::service::Identity,
     execution::{Context, Layer as ExecutionLayer, Request, Response},
-    gateway::{Gateway, player},
+    gateway::{Gateway, logic},
     infra::ownership::MemoryOwnership,
     lifecycle::task,
 };
@@ -23,12 +23,12 @@ struct Added {
     amount: u64,
 }
 struct ReadOnly;
-impl player::Executor for ReadOnly {
+impl logic::Executor for ReadOnly {
     fn execute_request(
         &self,
-        input: tok::execution::Request<tok::gateway::player::RequestInput>,
-    ) -> player::Task<'_> {
-        let tok::gateway::player::RequestInput {
+        input: tok::execution::Request<tok::gateway::logic::RequestInput>,
+    ) -> logic::Task<'_> {
+        let tok::gateway::logic::RequestInput {
             identity: _identity,
             message: _request,
         } = input.input;
@@ -91,9 +91,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .output;
 
     // gateway 只添加自身能力，同一执行设施没有 gateway 依赖，也未改现有 worker。
-    let config = player::Config::default();
+    let config = logic::Config::default();
     let gateway = Gateway::new(tok_core_identity(), config.gateway_limits(), |tasks| {
-        player::Ingress::new(
+        logic::Ingress::new(
             tasks,
             config,
             SessionOwner {
@@ -119,7 +119,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             .ok_or_else(|| io::Error::other("缺少网关能力"))?;
         let sessions = request
             .extensions()
-            .get::<player::SessionManager>()
+            .get::<logic::SessionManager>()
             .ok_or_else(|| io::Error::other("缺少会话目录"))?;
         if tasks.cancellation().is_cancelled() {
             return Err(io::Error::other("网关已停止"));

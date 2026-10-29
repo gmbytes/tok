@@ -10,14 +10,14 @@ use std::{
 };
 use tok_core::ServiceDescriptor;
 use tok_grpc::{Client, Listener};
-use tok_player::TimerTrigger;
-use tok_player::rpc::CallContext;
-use tok_player::rpc::timer::{decode_update, encode_update};
-use tok_player::rpc::{
+use tok_session::TimerTrigger;
+use tok_session::logic::rpc::CallContext;
+use tok_session::logic::rpc::timer::{decode_update, encode_update};
+use tok_session::logic::rpc::{
     HandlerRegistry, HandlerReply, Service as RpcService,
     protocol::internal::v1::{self as proto, Payload},
 };
-use tok_player::{SessionIdentity, TimerSpec, TimerUpdate};
+use tok_session::{SessionIdentity, TimerSpec, TimerUpdate};
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 use tonic::Code;
@@ -65,19 +65,27 @@ async fn internal_trigger_is_propagated_and_cannot_be_selected_by_client_message
     let calls = Arc::new(AtomicUsize::new(0));
     let mut registry = HandlerRegistry::new();
     registry
-        .register_with_timers(1, 2, |execution_request: tok_execution::Request<(tok_player::rpc::CallContext, Data)>| async move { let (_context, request) = execution_request.input;
-            Ok(tok_execution::Response::new(HandlerReply {
-                message: request,
-                timers: Some(TimerUpdate::ReplaceAll(vec![spec()])),
-            }))
-        })
+        .register_with_timers(
+            1,
+            2,
+            |execution_request: tok_execution::Request<(
+                tok_session::logic::rpc::CallContext,
+                Data,
+            )>| async move {
+                let (_context, request) = execution_request.input;
+                Ok(tok_execution::Response::new(HandlerReply {
+                    message: request,
+                    timers: Some(TimerUpdate::ReplaceAll(vec![spec()])),
+                }))
+            },
+        )
         .unwrap();
     let seen = Arc::clone(&calls);
     registry
         .register_timer(
             3,
             move |execution_request: tok_execution::Request<(
-                tok_player::rpc::CallContext,
+                tok_session::logic::rpc::CallContext,
                 Data,
             )>| {
                 let (context, request) = execution_request.input;
@@ -102,7 +110,7 @@ async fn internal_trigger_is_propagated_and_cannot_be_selected_by_client_message
             .register_timer(
                 3,
                 |execution_request: tok_execution::Request<(
-                    tok_player::rpc::CallContext,
+                    tok_session::logic::rpc::CallContext,
                     Data
                 )>| async move {
                     let (_ctx, _) = execution_request.input;
@@ -116,7 +124,7 @@ async fn internal_trigger_is_propagated_and_cannot_be_selected_by_client_message
             "player",
             RpcService::new("node", "player", Arc::new(registry))
                 .unwrap()
-                .into_player(),
+                .into_logic(),
         )
         .unwrap();
     endpoint.readiness().set("player", true);
@@ -130,14 +138,14 @@ async fn internal_trigger_is_propagated_and_cannot_be_selected_by_client_message
     let cancel = CancellationToken::new();
     let server = tokio::spawn(endpoint.serve(listener, cancel.clone()).unwrap());
     let clients = Arc::new(Client::new(Duration::from_secs(2), 2).unwrap());
-    let player_client = tok_player::rpc::Client::new(Arc::clone(&clients));
+    let player_client = tok_session::logic::rpc::Client::new(Arc::clone(&clients));
     let mut context = CallContext {
         node_id: "node".into(),
         service_name: "player".into(),
         bid: Some("42".into()),
         request_id: 1,
         session: Some(SessionIdentity {
-            player_id: "42".into(),
+            subject_id: "42".into(),
             session_id: "session".into(),
             epoch: 1,
         }),

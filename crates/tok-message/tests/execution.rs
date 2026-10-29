@@ -10,8 +10,8 @@ use std::{
 use tok_core::service::Identity;
 use tok_events::{Envelope, Event, EventId, Input};
 use tok_execution::{Context, Request};
-use tok_player::rpc::CallContext;
-use tok_player::rpc::{
+use tok_session::logic::rpc::CallContext;
+use tok_session::logic::rpc::{
     Handler, HandlerRegistry, HandlerReply, Service as RpcService,
     protocol::internal::v1::{self as proto, Payload},
 };
@@ -107,7 +107,7 @@ async fn one_layer_and_one_event_registration_serve_rpc_timer_local_and_encoded_
                     assert!(
                         request
                             .extensions()
-                            .get::<tok_player::TimerTrigger>()
+                            .get::<tok_session::TimerTrigger>()
                             .is_some()
                     );
                     Ok(tok_execution::Response::new(None))
@@ -139,7 +139,7 @@ async fn one_layer_and_one_event_registration_serve_rpc_timer_local_and_encoded_
         .await
         .unwrap();
     assert_eq!(response.output.payload.unwrap().message_id, 2);
-    let timer = tok_player::TimerTrigger {
+    let timer = tok_session::TimerTrigger {
         timer_id: "tick".into(),
         scheduled_at_ms: 1,
         fired_at_ms: 2,
@@ -169,7 +169,7 @@ fn wire_request(timeout: Option<&str>) -> tonic::Request<proto::CallRequest> {
             bid: Some("42".into()),
             request_id: 1,
             session: Some(proto::SessionIdentity {
-                player_id: "42".into(),
+                subject_id: "42".into(),
                 session_id: "test".into(),
                 epoch: 1,
             }),
@@ -197,7 +197,7 @@ async fn rpc_budget_and_malformed_timeout_are_enforced_before_accepting_results(
             1,
             2,
             move |execution_request: tok_execution::Request<(
-                tok_player::rpc::CallContext,
+                tok_session::logic::rpc::CallContext,
                 Value,
             )>| {
                 let (_, value) = execution_request.input;
@@ -213,7 +213,7 @@ async fn rpc_budget_and_malformed_timeout_are_enforced_before_accepting_results(
     let rpc = RpcService::new("node", "test", Arc::new(registry)).unwrap();
     for value in ["", "123456789S", "1X", "-1S"] {
         assert_eq!(
-            proto::player_rpc_server::PlayerRpc::call(&rpc, wire_request(Some(value)))
+            proto::logic_rpc_server::LogicRpc::call(&rpc, wire_request(Some(value)))
                 .await
                 .unwrap_err()
                 .code(),
@@ -222,7 +222,7 @@ async fn rpc_budget_and_malformed_timeout_are_enforced_before_accepting_results(
     }
     assert_eq!(calls.load(Ordering::SeqCst), 0);
     assert_eq!(
-        proto::player_rpc_server::PlayerRpc::call(&rpc, wire_request(Some("0S")))
+        proto::logic_rpc_server::LogicRpc::call(&rpc, wire_request(Some("0S")))
             .await
             .unwrap_err()
             .code(),
@@ -230,7 +230,7 @@ async fn rpc_budget_and_malformed_timeout_are_enforced_before_accepting_results(
     );
     assert_eq!(calls.load(Ordering::SeqCst), 0);
     assert_eq!(
-        proto::player_rpc_server::PlayerRpc::call(&rpc, wire_request(Some("1m")))
+        proto::logic_rpc_server::LogicRpc::call(&rpc, wire_request(Some("1m")))
             .await
             .unwrap_err()
             .code(),
@@ -243,7 +243,7 @@ async fn deferred_rpc_is_initialized_once_by_its_own_factory_and_stops_with_serv
     use tok_lifecycle::{Builder, Init, InitFuture};
     let (rpc, binding) = RpcService::deferred("node", "test").unwrap();
     assert_eq!(
-        proto::player_rpc_server::PlayerRpc::call(&rpc, wire_request(None))
+        proto::logic_rpc_server::LogicRpc::call(&rpc, wire_request(None))
             .await
             .unwrap_err()
             .code(),
@@ -282,7 +282,7 @@ async fn deferred_rpc_is_initialized_once_by_its_own_factory_and_stops_with_serv
                 1,
                 2,
                 |execution_request: tok_execution::Request<(
-                    tok_player::rpc::CallContext,
+                    tok_session::logic::rpc::CallContext,
                     Value,
                 )>| async move {
                     let (_, v) = execution_request.input;
@@ -305,14 +305,14 @@ async fn deferred_rpc_is_initialized_once_by_its_own_factory_and_stops_with_serv
         .unwrap();
     let running = tokio::spawn(prepared.start().run(Duration::from_secs(1)));
     assert!(
-        proto::player_rpc_server::PlayerRpc::call(&rpc, wire_request(None))
+        proto::logic_rpc_server::LogicRpc::call(&rpc, wire_request(None))
             .await
             .is_ok()
     );
     service.request_stop();
     running.await.unwrap().unwrap();
     assert_eq!(
-        proto::player_rpc_server::PlayerRpc::call(&rpc, wire_request(None))
+        proto::logic_rpc_server::LogicRpc::call(&rpc, wire_request(None))
             .await
             .unwrap_err()
             .code(),

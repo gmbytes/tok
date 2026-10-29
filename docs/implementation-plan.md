@@ -642,4 +642,10 @@ protobuf 是当前默认正文适配，不宣称其他编码已经实现。tok-p
 
 验证：workspace 测试、全目标 Clippy、无警告 rustdoc、格式与 LF 检查，以及共享端点 player / guild RPC smoke 和普通业务边界测试通过。未执行真实 Redis / NATS、Linux 或 release 构建。
 
+### logic / scene 术语与逻辑会话命名（2026-10-29）
+
+tok-player 更名为 tok-session，现有 session 驱动入口称为 logic，gateway 接入与共享 RPC 分别为 gateway::logic 和 session::logic::rpc。框架身份使用 subject_id，由认证组件定义其业务含义；游戏协议仍可使用玩家等业务词汇。scene session、场景转发和公共服务 reminder 均为后续工作，不能将它们写成已实现或默认共用 logic 的状态机。旧配置、Rust 路径和 gRPC 服务名不提供兼容；protobuf 字段编号及令牌二进制编码保持不变。
+
+验证：workspace 测试、Clippy、无警告 rustdoc、格式和 LF 检查、RPC 与事件 smoke 通过；未运行真实 Redis / NATS、Linux 或 release 构建。
+
 本次阶段验证：Windows 全工作区串行测试 345 项通过、32 项外部专项默认跳过；全目标 Clippy、无警告 workspace rustdoc、格式及空白检查通过。未运行真实 Redis/NATS、Linux 或 release 构建。

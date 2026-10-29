@@ -6,11 +6,11 @@
 pub mod error;
 pub use error::{ErrorCode, GatewayError, Result};
 /// 客户端逻辑协议，正文由具体游戏定义。
-pub use tok_player::rpc::protocol::client::v1 as protocol;
+pub use tok_session::logic::rpc::protocol::client::v1 as protocol;
 
 pub mod codec;
 mod handle;
-pub mod player;
+pub mod logic;
 pub mod rpc;
 pub mod scene;
 pub mod security;

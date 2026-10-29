@@ -17,10 +17,10 @@ use std::{
 use tok::grpc::Client;
 use tok::{
     core::ServiceDirectory,
-    player::rpc::{
+    session::logic::rpc::{
         CallContext, HandlerRegistry, HandlerReply, protocol::internal::v1::Payload, tonic::Status,
     },
-    player::{TimerSpec, TimerUpdate},
+    session::{TimerSpec, TimerUpdate},
 };
 use tokio::sync::Mutex;
 
@@ -63,12 +63,12 @@ impl State {
     }
 }
 
-fn player_id(context: &CallContext) -> Result<u64, Status> {
+fn subject_id(context: &CallContext) -> Result<u64, Status> {
     context
         .session
         .as_ref()
         .ok_or_else(|| Status::failed_precondition("缺少玩家会话"))?
-        .player_id
+        .subject_id
         .parse::<u64>()
         .map_err(|_| Status::invalid_argument("示例玩家 ID 必须为整数"))
 }
@@ -77,7 +77,7 @@ fn player_id(context: &CallContext) -> Result<u64, Status> {
 pub fn handlers(
     state: Arc<State>,
     directory: Arc<dyn ServiceDirectory>,
-) -> Result<HandlerRegistry, tok::player::rpc::Error> {
+) -> Result<HandlerRegistry, tok::session::logic::rpc::Error> {
     let mut registry = HandlerRegistry::new();
     registry.register_with_timers(
         GetPlayerRequest::MESSAGE_ID,
@@ -85,23 +85,23 @@ pub fn handlers(
         {
             let state = Arc::clone(&state);
             move |execution_request: tok::execution::Request<(
-                tok::player::rpc::CallContext,
+                tok::session::logic::rpc::CallContext,
                 GetPlayerRequest,
             )>| {
                 let (context, _request) = execution_request.input;
                 let state = Arc::clone(&state);
                 async move {
-                    let player_id = player_id(&context)?;
+                    let subject_id = subject_id(&context)?;
                     let stored = state
                         .values
                         .lock()
                         .await
-                        .get(&player_id)
+                        .get(&subject_id)
                         .copied()
                         .unwrap_or_default();
                     Ok(tok::execution::Response::new(HandlerReply {
                         message: GetPlayerResponse {
-                            player_id,
+                            player_id: subject_id,
                             value: stored.value,
                         },
                         timers: Some(TimerUpdate::ReplaceAll(
@@ -122,20 +122,20 @@ pub fn handlers(
         {
             let state = Arc::clone(&state);
             move |execution_request: tok::execution::Request<(
-                tok::player::rpc::CallContext,
+                tok::session::logic::rpc::CallContext,
                 SetPlayerRequest,
             )>| {
                 let (context, request) = execution_request.input;
                 let state = Arc::clone(&state);
                 async move {
-                    let player_id = player_id(&context)?;
+                    let subject_id = subject_id(&context)?;
                     let mut values = state.values.lock().await;
-                    if !values.contains_key(&player_id) && values.len() >= state.capacity {
+                    if !values.contains_key(&subject_id) && values.len() >= state.capacity {
                         return Err(Status::resource_exhausted("示例存储容量已满"));
                     }
-                    values.entry(player_id).or_default().value = request.value;
+                    values.entry(subject_id).or_default().value = request.value;
                     Ok(tok::execution::Response::new(SetPlayerResponse {
-                        player_id,
+                        player_id: subject_id,
                         value: request.value,
                     }))
                 }
@@ -148,13 +148,13 @@ pub fn handlers(
         {
             let state = Arc::clone(&state);
             move |execution_request: tok::execution::Request<(
-                tok::player::rpc::CallContext,
+                tok::session::logic::rpc::CallContext,
                 StartProductionRequest,
             )>| {
                 let (context, _request) = execution_request.input;
                 let state = Arc::clone(&state);
                 async move {
-                    let id = player_id(&context)?;
+                    let id = subject_id(&context)?;
                     let now = SystemTime::now()
                         .duration_since(UNIX_EPOCH)
                         .map_err(|_| Status::internal("系统时钟无效"))?
@@ -178,18 +178,18 @@ pub fn handlers(
     )?;
     let production = Arc::new(
         production::dispatcher()
-            .map_err(|error| tok::player::rpc::Error::Configuration(error.to_string()))?,
+            .map_err(|error| tok::session::logic::rpc::Error::Configuration(error.to_string()))?,
     );
     let events_state = Arc::clone(&state);
     registry.register_timer_service(
         ProductionFinished::MESSAGE_ID,
-        tok::player::rpc::tower::service_fn(
+        tok::session::logic::rpc::tower::service_fn(
             move |request: tok::execution::Request<(CallContext, ProductionFinished)>| {
                 let (execution, (context, _), extensions) = request.into_parts();
                 let state = Arc::clone(&state);
                 let production = Arc::clone(&production);
                 async move {
-                    let id = player_id(&context)?;
+                    let id = subject_id(&context)?;
                     let mut values = state.values.lock().await;
                     if !values.contains_key(&id) && values.len() >= state.capacity {
                         return Err(Status::resource_exhausted("示例存储容量已满"));
@@ -227,7 +227,7 @@ pub fn handlers(
         let event = &request.input.event.payload;
         let state = Arc::clone(&events_state);
         Box::pin(async move {
-            let id = player_id(context)?;
+            let id = subject_id(context)?;
             let mut values = state.values.lock().await;
             if !values.contains_key(&id) && values.len() >= state.capacity {
                 return Err(Status::resource_exhausted("示例存储容量已满"));
@@ -248,7 +248,7 @@ pub fn handlers(
         QueryGuildRequest::MESSAGE_ID,
         QueryGuildResponse::MESSAGE_ID,
         move |execution_request: tok::execution::Request<(
-            tok::player::rpc::CallContext,
+            tok::session::logic::rpc::CallContext,
             QueryGuildRequest,
         )>| {
             let (execution, (context, request), extensions) = execution_request.into_parts();

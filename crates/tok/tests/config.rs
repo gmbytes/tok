@@ -8,7 +8,7 @@ fn handoff_requires_shared_secret_ownership_and_valid_budgets() {
     assert!(
         AppConfig::from_toml(source)
             .unwrap()
-            .player_gateway
+            .logic_gateway
             .handoff_enabled
     );
     for invalid in [
@@ -141,7 +141,7 @@ fn redis_configuration_requires_isolation_lease_bounds_and_reachable_advertiseme
 }
 
 #[test]
-fn player_gateway_limits_and_lease_coverage_are_validated() {
+fn logic_gateway_limits_and_lease_coverage_are_validated() {
     let original = AppConfig::from_toml(include_str!(
         "../../../examples/demo-game/config/local.toml"
     ))
@@ -149,16 +149,16 @@ fn player_gateway_limits_and_lease_coverage_are_validated() {
     for invalid in 0..8 {
         let mut config = original.clone();
         match invalid {
-            0 => config.player_gateway.queue_capacity = 0,
-            1 => config.player_gateway.max_connections = 65_537,
-            2 => config.player_gateway.max_frame_size = 16 * 1024 * 1024 + 1,
-            3 => config.player_gateway.rpc_timeout_ms = 0,
-            4 => config.player_gateway.max_timers = 0,
-            5 => config.player_gateway.max_timers = 65_537,
-            6 => config.player_gateway.max_timer_bytes = 0,
+            0 => config.logic_gateway.queue_capacity = 0,
+            1 => config.logic_gateway.max_connections = 65_537,
+            2 => config.logic_gateway.max_frame_size = 16 * 1024 * 1024 + 1,
+            3 => config.logic_gateway.rpc_timeout_ms = 0,
+            4 => config.logic_gateway.max_timers = 0,
+            5 => config.logic_gateway.max_timers = 65_537,
+            6 => config.logic_gateway.max_timer_bytes = 0,
             _ => {
-                config.player_gateway.ownership_ttl_ms = config.player_gateway.renew_interval_ms
-                    + config.player_gateway.rpc_timeout_ms * 2
+                config.logic_gateway.ownership_ttl_ms =
+                    config.logic_gateway.renew_interval_ms + config.logic_gateway.rpc_timeout_ms * 2
             }
         }
         assert!(config.validate().is_err());
@@ -268,15 +268,17 @@ fn invalid_or_misspelled_config_is_rejected() {
 #[test]
 fn force_trace_rules_are_parsed_and_validated() {
     let local = include_str!("../../../examples/demo-game/config/local.toml");
-    let source = local.replace("log_format = \"text\"", "log_format = \"text\"\ntrace_sample_ratio = 0.0\n[[observability.trace_force_rules]]\nspan = \"client_request\"\nfields = { player_id = 123, operation = \"login\" }");
+    let source = local.replace("log_format = \"text\"", "log_format = \"text\"\ntrace_sample_ratio = 0.0\n[[observability.trace_force_rules]]\nspan = \"client_request\"\nfields = { subject_id = 123, operation = \"login\" }");
     let config = AppConfig::from_toml(&source).unwrap();
     assert_eq!(config.observability.trace_force_rules.len(), 1);
     assert_eq!(
-        config.observability.trace_force_rules[0].fields["player_id"].as_u64(),
+        config.observability.trace_force_rules[0].fields["subject_id"].as_u64(),
         Some(123)
     );
     assert!(
         AppConfig::from_toml(&source.replace("span = \"client_request\"", "span = \"\"")).is_err()
     );
-    assert!(AppConfig::from_toml(&source.replace("player_id = 123", "player_id = [123]")).is_err());
+    assert!(
+        AppConfig::from_toml(&source.replace("subject_id = 123", "subject_id = [123]")).is_err()
+    );
 }

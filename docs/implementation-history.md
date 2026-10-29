@@ -46,7 +46,7 @@
 | 服务生命周期 | [runtime.rs（现 application.rs）](../crates/tok/src/application.rs) 提供工厂注册、共享端点、就绪入口、初始化期限及失败清理 | 生产依赖就绪策略与发现后端 |
 | 发现 | [MemoryDirectory](../crates/tok-infra/src/discovery/memory.rs) 支持单进程；[RedisDirectory](../crates/tok-infra/src/discovery/redis.rs) 提供多进程开发租约注册、条件撤销、本地缓存与合并通知 | Kubernetes 本地缓存与资源映射；Redis 发现不代替 session 所有权 |
 | 协议与 RPC | [tok-rpc](../crates/tok-grpc/src/lib.rs) 提供 PlayerRpc、BusinessRpc、强类型分发、连接复用、超时、追踪传播、TowerHandler 和可选请求锁 Layer | 配置式中间件及生产调用身份认证 |
-| 网关 | [Gateway](../crates/tok-gateway/src/server.rs) 统一接收、容量及监督；[Ingress](../crates/tok-gateway/src/player/ingress.rs) 提供 TCP 认证、串行 session、所有权续租、timer、下行缓存及同网关恢复 | 生产安全及 scene 接入 |
+| 网关 | [Gateway](../crates/tok-gateway/src/server.rs) 统一接收、容量及监督；[Ingress](../crates/tok-gateway/src/logic/ingress.rs) 提供 TCP 认证、串行 session、所有权续租、timer、下行缓存及同网关恢复 | 生产安全及 scene 接入 |
 | 路由与 Redis | bid rendezvous 路由、Memory / Redis 所有权及请求锁、条件释放及本地时间预算检查已实现 | Cluster 拓扑与故障切换适配 |
 | 事件 | [tok-events](../crates/tok-events/src/lib.rs) 提供同步本地分发、Core NATS protobuf 编解码及网关广播/转发、本地主题筛选与交接；示例已接通 | 统一事件接口、传输主题路由与动态订阅、网关生命周期及消息 Layer；后续再做 JetStream、离线加载和去重 |
 | 可观测 | 日志动态过滤、Prometheus、OTLP、强追踪规则、RPC / NATS 上下文传播及调用、session / timer / event 基础指标已实现 | 持久化事件指标及生产告警基线 |
@@ -815,5 +815,9 @@ TLS 导出器初始化与关闭；保留真实 HTTP Collector 导出回归。
 ### 普通消息与玩家 RPC 边界校正（2026-10-29）
 
 玩家 RPC 的上下文、处理器、客户端、服务、绑定和事件 / timer 适配迁至 tok-player::rpc，普通业务 RPC 独立留在 tok-message::rpc；普通入口拒绝玩家 session 与 timer，tok-message 正常依赖不再包含玩家和事件。应用按入口类型注入对应 Binding，gateway 继续管理连接与 session 状态机。tok-player 因聚合玩家 RPC 增加消息、gRPC、事件及生命周期依赖，基础契约的下游也会引入这些依赖。迁移后的 tok-player 尚待最终审查确认。
+
+### logic / scene 术语与逻辑会话命名（2026-10-29）
+
+tok-player 更名为 tok-session，gateway::player 更名为 gateway::logic，逻辑 RPC 改为 session::logic::rpc 和 LogicRpc。框架的业务主体字段改为 subject_id；具体游戏协议仍可使用 player_id。场景接入和公共服务 reminder 尚未实现；不保留旧配置、Rust 路径或 gRPC 服务名，令牌 protobuf 二进制编码保持不变。
 
 本次阶段验证：Windows 全工作区串行测试 345 项通过、32 项外部专项默认跳过；全目标 Clippy、无警告 workspace rustdoc、格式及空白检查通过。未运行真实 Redis/NATS、Linux 或 release 构建。

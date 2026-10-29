@@ -11,9 +11,9 @@ log_format = "text"
 # trace_sample_ratio = 1.0
 # [[observability.trace_force_rules]]
 # span = "client_request"
-# fields = { player_id = "42" }
+# fields = { subject_id = "42" }
 
-[player_gateway]
+[logic_gateway]
 max_connections = 128
 max_sessions = 1024
 queue_capacity = 64

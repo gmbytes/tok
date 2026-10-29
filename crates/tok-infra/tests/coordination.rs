@@ -4,13 +4,13 @@ use std::time::Duration;
 use tok_core::Identity as SessionOwner;
 use tok_core::{ServiceDescriptor, ServiceDirectory};
 use tok_infra::{ownership::MemoryOwnership, routing::route};
-use tok_player::ownership::Store as OwnershipStore;
+use tok_session::ownership::Store as OwnershipStore;
 
 struct Directory(Vec<ServiceDescriptor>);
 
 #[tokio::test]
 async fn latest_login_blocks_old_credentials_after_release_but_survives_transfer() {
-    use tok_player::credentials::ResumeClaims;
+    use tok_session::credentials::ResumeClaims;
     let store = MemoryOwnership::new(2).unwrap();
     let ttl = Duration::from_secs(2);
     let first = store
@@ -20,7 +20,7 @@ async fn latest_login_blocks_old_credentials_after_release_but_survives_transfer
     let moved = store.transfer(first, owner("b"), ttl).await.unwrap();
     store.release(moved).await.unwrap();
     let claims = |session: &str| ResumeClaims {
-        player_id: "p".into(),
+        subject_id: "p".into(),
         session_id: session.into(),
     };
     let next = store
@@ -32,7 +32,7 @@ async fn latest_login_blocks_old_credentials_after_release_but_survives_transfer
         store
             .acquire_for_relogin(claims("s1"), "stale".into(), owner("a"), None, ttl)
             .await,
-        Err(tok_player::ownership::Error::Conflict)
+        Err(tok_session::ownership::Error::Conflict)
     ));
     let fresh = store
         .acquire_for_relogin(claims("s2"), "s3".into(), owner("a"), None, ttl)
@@ -142,7 +142,7 @@ async fn ownership_competition_takeover_and_release_are_conditional() {
         store
             .acquire("43".into(), "other".into(), owner("c"), None, ttl)
             .await,
-        Err(tok_player::ownership::Error::CapacityExceeded(_))
+        Err(tok_session::ownership::Error::CapacityExceeded(_))
     ));
     let next = store
         .acquire(
@@ -157,7 +157,7 @@ async fn ownership_competition_takeover_and_release_are_conditional() {
     assert!(next.identity.epoch > first.identity.epoch);
     assert!(matches!(
         store.renew(first.clone(), ttl).await,
-        Err(tok_player::ownership::Error::Conflict)
+        Err(tok_session::ownership::Error::Conflict)
     ));
     assert!(!store.release(first).await.unwrap());
     assert_eq!(store.lookup("42").await.unwrap(), Some(next.clone()));
@@ -187,7 +187,7 @@ async fn expired_ownership_cannot_be_renewed_and_capacity_is_reclaimed() {
     tokio::time::sleep(Duration::from_millis(20)).await;
     assert!(matches!(
         store.renew(lease.clone(), Duration::from_secs(1)).await,
-        Err(tok_player::ownership::Error::Conflict)
+        Err(tok_session::ownership::Error::Conflict)
     ));
     assert!(store.lookup("42").await.unwrap().is_none());
     let fresh = store
@@ -205,7 +205,7 @@ async fn expired_ownership_cannot_be_renewed_and_capacity_is_reclaimed() {
         store
             .acquire("44".into(), "bad".into(), owner("b"), None, Duration::ZERO)
             .await,
-        Err(tok_player::ownership::Error::InvalidInput(_))
+        Err(tok_session::ownership::Error::InvalidInput(_))
     ));
 }
 
@@ -236,7 +236,7 @@ fn routing_preserves_discovery_failure_and_default_subscription_uses_its_domain_
 #[test]
 fn ownership_constructor_errors_are_configuration_failures() {
     use tok_infra::ownership::redis::RedisOwnershipConfig;
-    use tok_player::ownership::Error;
+    use tok_session::ownership::Error;
     assert!(matches!(
         MemoryOwnership::new(0),
         Err(Error::InvalidConfig(_))
@@ -253,7 +253,7 @@ fn ownership_constructor_errors_are_configuration_failures() {
 
 #[tokio::test]
 async fn evicted_latest_login_marker_requires_normal_authentication() {
-    use tok_player::{credentials::ResumeClaims, ownership::Error};
+    use tok_session::{credentials::ResumeClaims, ownership::Error};
     let store = MemoryOwnership::new(1).unwrap();
     let ttl = Duration::from_secs(10);
     let first = store
@@ -282,7 +282,7 @@ async fn evicted_latest_login_marker_requires_normal_authentication() {
         store
             .acquire_for_relogin(
                 ResumeClaims {
-                    player_id: "old-player".into(),
+                    subject_id: "old-player".into(),
                     session_id: "old-session".into()
                 },
                 "relogin".into(),

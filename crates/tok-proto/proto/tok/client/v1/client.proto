@@ -28,7 +28,7 @@ message LoginRequest {
 message LoginResponse {
   uint64 request_id = 1;
   uint32 error_code = 2;
-  string player_id = 3;
+  string subject_id = 3;
   string session_id = 4;
   uint64 epoch = 5;
   string resume_token = 6;
@@ -43,7 +43,7 @@ message ResumeRequest {
 message ResumeResponse {
   uint64 request_id = 1;
   uint32 error_code = 2;
-  string player_id = 3;
+  string subject_id = 3;
   string session_id = 4;
   uint64 epoch = 5;
   // 网关已见过的最大业务请求 ID；新请求必须更大，不能重发未知结果请求。

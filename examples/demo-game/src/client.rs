@@ -36,7 +36,7 @@ pub async fn smoke(address: std::net::SocketAddr) -> Result<(), Error> {
         return Err(std::io::Error::other("未收到登录回应").into());
     };
     if login.error_code != 0
-        || login.player_id != "42"
+        || login.subject_id != "42"
         || login.epoch == 0
         || login.session_id.is_empty()
     {

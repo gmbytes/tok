@@ -12,13 +12,13 @@
 | 事件路由 | Event::topic 默认全局，可固定或由正文派生；NATS 负责安全 subject 编码 | group 属于订阅组件，不强制广播或提供玩家归属路由 |
 | 主题兴趣 | Pool 按组件和主题聚合独立引用，异步成员操作，初始策略和交接就绪 | 逻辑会话宽限期/冻结保留兴趣，不补收即时事件 |
 
-不把 topic、group、player_id 混为同一维度；不默认按玩家创建 NATS 订阅，不要求所有网关订阅环境中的全部事件。
+不把 topic、group、subject_id 混为同一维度；不默认按玩家创建 NATS 订阅，不要求所有网关订阅环境中的全部事件。
 
 ## 框架核心与 gateway 定位
 
 本批统一工作的根本目标是建立框架通用的“服务 + 处理链”基础设施。tok-gateway 是复用该设施的内置扩展实例，面向通用游戏运行时提供连接和 session 等能力；不是要求其他服务继承或依赖的核心基类。普通 RPC/事件服务、gateway 和游戏自定义服务使用相同的构建、上下文、中间件和生命周期扩展契约。
 
-当前 tok crate 承担统一导出与 Application 组装，已经依赖 tok-gateway。共同设施必须位于二者可共同依赖的下层：通用基础契约归 tok-core，调用执行设施由 tok-execution 承载，服务构建、生命周期和任务监督由 tok-lifecycle 承载；玩家会话、计时需求、所有权、恢复凭证与玩家 RPC 归 tok-player。tok-player 复用 tok-message 及 gRPC、事件与生命周期设施；tok-execution、tok-lifecycle 和 tok-events 不依赖玩家契约。禁止通过 gateway 依赖 tok 门面形成循环，也不在 gateway 内复制共同执行器来绕过分层。完整职责表见[框架核心与扩展分层](design.md#框架核心与扩展分层)。
+当前 tok crate 承担统一导出与 Application 组装，已经依赖 tok-gateway。共同设施必须位于二者可共同依赖的下层：通用基础契约归 tok-core，调用执行设施由 tok-execution 承载，服务构建、生命周期和任务监督由 tok-lifecycle 承载；逻辑会话、计时需求、所有权、恢复凭证与 logic RPC 归 tok-session。tok-session 复用 tok-message 及 gRPC、事件与生命周期设施；tok-execution、tok-lifecycle 和 tok-events 不依赖逻辑会话契约。禁止通过 gateway 依赖 tok 门面形成循环，也不在 gateway 内复制共同执行器来绕过分层。完整职责表见[框架核心与扩展分层](design.md#框架核心与扩展分层)。
 
 构建时以普通服务和 gateway 两个最小样例验证：共同设施不导入 player/scene 或网关线协议；gateway 通过组合增加连接和会话能力；游戏从 tok 门面取得便捷组装入口，无需理解内部拆分。通用任务监督和生命周期由基础设施复用，各接入状态机继续承担自己的职责。
 
@@ -150,12 +150,12 @@ Application::register_rpc_factory 根据入口类型为匹配配置创建普通�
 | 事件类型 | 正文契约和处理逻辑 | `chat.message.v1` |
 | topic | 发布与订阅共同选择的业务路由主题 | `chat:7`、`realm:42` |
 | group | 匹配同一路由的订阅实例如何分担消费 | `chat.audit` |
-| player_id | 正文中的业务目标；转发组件据此查找会话 | `4242` |
+| subject_id | 正文中的业务目标；转发组件据此查找会话 | `4242` |
 | 本地 Target | 处理组件收到事件后，实际向哪些会话投递 | Players、Topic、All |
 
 NATS subject 是传输编码，包含 namespace、topic 和事件类型。具体布局集中在适配器内部生成和校验，不让业务拼接原始 subject。主题编码必须可逆或采用无碰撞映射；不得直接把用户字符串中的点、空格、`*`、`>` 拼入订阅表达式。默认作用域使用显式值，与同名普通主题区分；默认订阅不代表订阅全部主题。
 
-P5 已为 Envelope / Message / EventEnvelope 及内部 EventRequest 增加一致的路由主题信息，接收时同时校验 subject、主题和事件类型。topic 不是消息正文中的 player_id，也不自动意味着客户端 Notify。处理组件可以把路由主题映射为同名本地 Target::Topic，也可以选择其他目标；此映射由组件显式声明。
+P5 已为 Envelope / Message / EventEnvelope 及内部 EventRequest 增加一致的路由主题信息，接收时同时校验 subject、主题和事件类型。topic 不是消息正文中的 subject_id，也不自动意味着客户端 Notify。处理组件可以把路由主题映射为同名本地 Target::Topic，也可以选择其他目标；此映射由组件显式声明。
 
 无 group 的每个匹配实例各自接收；同名 group 的匹配实例分担事件，不同 group 独立接收。框架支持所有合法组合，不根据 gateway、player 或组件名称强制选组。NATS 的组内分担不提供玩家归属或跨网关扇出，参见 [NATS 客户端协议](https://docs.nats.io/reference/protocols/client) 和 [Core NATS 模型](https://docs.nats.io/learn/core-nats/)。
 
@@ -183,11 +183,11 @@ Topic::default 表示当前 namespace 内的默认作用域，Topic::named 创�
 
 同一会话可同时加入聊天、区服等多个主题。固定兴趣和动态兴趣可共存；本地主题成员登记不会自动绑定所有订阅组件，工厂显式选择哪些组件跟随这些成员变化，哪些仅处理固定主题。
 
-区服信息由认证结果或可信游戏状态提供，框架不从 player_id、服务名或客户端上报字符串猜测。客户端仍不能直接修改传输订阅；游戏可以注册经过认证和权限校验的聊天加入请求，由服务器执行主题操作。
+区服信息由认证结果或可信游戏状态提供，框架不从 subject_id、服务名或客户端上报字符串猜测。客户端仍不能直接修改传输订阅；游戏可以注册经过认证和权限校验的聊天加入请求，由服务器执行主题操作。
 
 传输兴趣由网关级协调组件持有，按订阅组件、topic 和事件类型合并，并保留 group 语义。相同组件下多个会话对同一主题只增加成员引用，不重复创建 broker 订阅。不同组件、不同消费组的逻辑消费不能误合并成只执行其中一个 handler。
 
-首个需求建立订阅并等待就绪；最后一个需求释放时退订。固定兴趣计入独立引用，不因最后一个玩家离开而误删。动态订阅按不同主题与事件类型的组合计数，而不是按 player_id 计数；若游戏刻意为每个玩家创建独有 topic，数量仍会随玩家增长，框架不承诺消除这种业务建模成本。
+首个需求建立订阅并等待就绪；最后一个需求释放时退订。固定兴趣计入独立引用，不因最后一个玩家离开而误删。动态订阅按不同主题与事件类型的组合计数，而不是按 subject_id 计数；若游戏刻意为每个玩家创建独有 topic，数量仍会随玩家增长，框架不承诺消除这种业务建模成本。
 
 ### 加入与退出的边界
 
@@ -307,7 +307,7 @@ JetStream、离线加载、全局去重、通用扇出中继、热配置、生�
 
 ## RPC 协议适配分层校正（2026-10-21）
 
-通用 tok-grpc 保留 Client / Listener / Server，通过泛型请求和 Tower 接入任意生成的 gRPC 服务；不依赖 tok-player / tok-events / tok-proto。普通业务协议适配位于 message::rpc，玩家调用、事件与 timer 适配位于 player::rpc。Application 的自定义 protobuf 绑定继续使用通用端点，两类消息 RPC 使用同一工厂装配入口。事件与 timer 入口仍仅供可信服务端。
+通用 tok-grpc 保留 Client / Listener / Server，通过泛型请求和 Tower 接入任意生成的 gRPC 服务；不依赖 tok-session / tok-events / tok-proto。普通业务协议适配位于 message::rpc，玩家调用、事件与 timer 适配位于 session::logic::rpc。Application 的自定义 protobuf 绑定继续使用通用端点，两类消息 RPC 使用同一工厂装配入口。事件与 timer 入口仍仅供可信服务端。
 
 ## 调用执行与生命周期分库（2026-10-21）
 
@@ -353,7 +353,7 @@ protobuf 正文适配现位于 tok-message::protobuf，包装上述通用表，�
 
 服务发现、请求锁和路由契约分别使用 core::discovery::{Error, Result}、core::lock::{Error, Result}、core::routing::{Error, Result}；不提供旧领域变体兼容别名。路由的 Discovery 包装保留原发现错误与错误链，Application::Error 增加 Discovery 聚合，注册、清理和故障传播均使用该类别。后端错误按相应领域映射，不返回其他领域的变体。
 
-core 不提供根 Error / Result，参数、配置和可选能力校验由实际所属组件表达。所有权后端故障使用 player::ownership::Error::Unavailable，冲突、配置、凭证与不可用语义保持区分。Redis 发现与锁构造/校验采用所属领域错误，整体应用配置在边界映射为 config::Error::Invalid。
+core 不提供根 Error / Result，参数、配置和可选能力校验由实际所属组件表达。所有权后端故障使用 session::ownership::Error::Unavailable，冲突、配置、凭证与不可用语义保持区分。Redis 发现与锁构造/校验采用所属领域错误，整体应用配置在边界映射为 config::Error::Invalid。
 
 registry 注册错误定名为 Error<K>，运行失败定名为 DispatchError<K, E>；后者覆盖未知键与业务处理错误，执行停止统一由 execution::Error::Stopped 表达，避免 HandleError 误指只有处理者内部失败。protobuf 适配与示例同步新路径，不保留 RegistrationError 旧类型。
 
@@ -361,13 +361,13 @@ registry 注册错误定名为 Error<K>，运行失败定名为 DispatchError<K,
 
 删除 tok-core/error.rs 及根 Error / Result，领域发现、锁和路由契约不变，不提供兼容类型。剩余校验能力回到所属模块：execution::ContextError 表达无效服务身份、操作名和不可表示期限；lifecycle::task::CreateError 表达无效容量和父范围退出，lifecycle::CreateError 表达服务身份及底层任务范围构造失败。构造失败与运行错误分开，组合处保留原始来源。
 
-应用配置使用 tok::config::{Error, Result}，Application 以 Configuration / Create / Discovery 聚合配置、构造和发现错误，Unsupported 表达应用尚未实现的可选能力。所有权和凭证错误分别归 player::ownership::Error 与 player::credentials::Error，不再经 Core 包装；玩家接入运行参数单独使用 gateway::player::ConfigError。示例业务状态构造采用自己的标准 I/O 参数错误，不依赖框架根错误。
+应用配置使用 tok::config::{Error, Result}，Application 以 Configuration / Create / Discovery 聚合配置、构造和发现错误，Unsupported 表达应用尚未实现的可选能力。所有权和凭证错误分别归 session::ownership::Error 与 session::credentials::Error，不再经 Core 包装；玩家接入运行参数单独使用 gateway::logic::ConfigError。示例业务状态构造采用自己的标准 I/O 参数错误，不依赖框架根错误。
 
 ## 消息与传输边界校正（2026-10-21）
 
 tok-game-rpc 已调整为 tok-message，tok-rpc 更名为 tok-grpc；通用 protobuf 正文适配现集成于 tok-message::protobuf。生成协议仍在 tok-proto，不依赖执行层。门面提供 tok::message 与 tok::grpc，不再提供独立 tok::protobuf。
 
-tok-message 根 Registry 提供非零编号注册、本地分发与原始业务错误；普通业务 RPC 位于 message::rpc，玩家身份及事件/timer RPC 适配位于 player::rpc。公会示例和本地/RPC 共用处理链采用根 Registry。通用 protobuf 表继续允许字符串及零键，RPC 不自动添加锁或重试，事件与 timer 仍只能由可信服务器触发。
+tok-message 根 Registry 提供非零编号注册、本地分发与原始业务错误；普通业务 RPC 位于 message::rpc，玩家身份及事件/timer RPC 适配位于 session::logic::rpc。公会示例和本地/RPC 共用处理链采用根 Registry。通用 protobuf 表继续允许字符串及零键，RPC 不自动添加锁或重试，事件与 timer 仍只能由可信服务器触发。
 
 本轮只校正库与命名空间边界，不宣称通用请求锁泛化、玩家结果模型及通知构造后续批次已经完成。请求锁执行已迁入 execution::lock，message::rpc::lock 只保留协议策略与映射，仍按有限 TTL 和执行预算约束运行。
 

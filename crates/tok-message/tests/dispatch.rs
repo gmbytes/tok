@@ -14,8 +14,8 @@ use tok_grpc::{Client, Listener};
 use tok_message::protobuf;
 use tok_message::rpc::{Handler as _, Service as RpcService, business};
 use tok_message::{Message, Registry, Reply};
-use tok_player::rpc::{CallContext, Handler as _};
 use tok_proto::internal::v1::Payload;
+use tok_session::logic::rpc::{CallContext, Handler as _};
 use tokio_util::sync::CancellationToken;
 use tonic::{Code, Status};
 
@@ -537,12 +537,14 @@ async fn custom_registry_flows_through_message_codec_and_business_rpc_with_origi
 
 #[tokio::test]
 async fn player_adapter_can_replace_message_registry_without_routing_timers_through_it() {
-    let backend = Redirect::<CallContext, Option<tok_player::TimerUpdate>, Status>::default();
-    let mut registry =
-        tok_player::rpc::HandlerRegistry::from_registry(backend.clone(), |error| match error {
+    let backend = Redirect::<CallContext, Option<tok_session::TimerUpdate>, Status>::default();
+    let mut registry = tok_session::logic::rpc::HandlerRegistry::from_registry(
+        backend.clone(),
+        |error| match error {
             RegistryFailure::Backend(_) => Status::unavailable("自定义路由不可用"),
             RegistryFailure::Table(error) => Status::internal(error.to_string()),
-        });
+        },
+    );
     registry
         .register(1, 2, |request: Request<(CallContext, Value)>| async move {
             assert_eq!(request.extensions().get::<u64>(), Some(&42));
@@ -579,7 +581,7 @@ async fn player_adapter_can_replace_message_registry_without_routing_timers_thro
         })
         .unwrap();
     let mut timer = call();
-    timer.timer = Some(tok_player::TimerTrigger {
+    timer.timer = Some(tok_session::TimerTrigger {
         timer_id: "tick".into(),
         scheduled_at_ms: 1,
         fired_at_ms: 2,

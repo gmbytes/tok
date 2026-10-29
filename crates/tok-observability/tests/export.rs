@@ -60,7 +60,7 @@ async fn metrics_are_scrapable_and_traces_survive_log_filter_changes() {
     assert!(telemetry.logs.set_filter("tok=invalid-level").is_err());
     assert_eq!(telemetry.logs.filter().unwrap(), "off");
     {
-        let span = tracing::info_span!("test_operation", player_id = 123);
+        let span = tracing::info_span!("test_operation", subject_id = 123);
         let _entered = span.enter();
         tracing::info!("日志关闭时仍应记录追踪");
     }
@@ -72,7 +72,7 @@ async fn metrics_are_scrapable_and_traces_survive_log_filter_changes() {
             force_rules: vec![ForceTraceRule {
                 span: Some("forced_request".into()),
                 fields: std::collections::BTreeMap::from([(
-                    "player_id".into(),
+                    "subject_id".into(),
                     serde_json::json!(123),
                 )]),
                 ..ForceTraceRule::default()
@@ -80,17 +80,17 @@ async fn metrics_are_scrapable_and_traces_survive_log_filter_changes() {
         })
         .unwrap();
     {
-        let wrong_player = tracing::debug_span!("forced_request", player_id = 124_u64);
+        let wrong_player = tracing::debug_span!("forced_request", subject_id = 124_u64);
         assert!(!wrong_player.context().span().span_context().is_sampled());
     }
     {
-        let late = tracing::debug_span!("forced_request", player_id = tracing::field::Empty);
+        let late = tracing::debug_span!("forced_request", subject_id = tracing::field::Empty);
         let _entered = late.enter();
-        late.record("player_id", 123_u64);
+        late.record("subject_id", 123_u64);
         assert!(!late.context().span().span_context().is_sampled());
     }
     {
-        let root = tracing::debug_span!("forced_request", player_id = 123_u64);
+        let root = tracing::debug_span!("forced_request", subject_id = 123_u64);
         tracing::trace!(parent: &root, "explicit_before_enter");
         assert!(root.context().span().span_context().is_sampled());
         {
@@ -108,7 +108,7 @@ async fn metrics_are_scrapable_and_traces_survive_log_filter_changes() {
         tracing::trace!("forced_detail");
     }
     fn dynamic_span() {
-        let span = tracing::debug_span!("dynamic_request", player_id = 789_u64);
+        let span = tracing::debug_span!("dynamic_request", subject_id = 789_u64);
         let _entered = span.enter();
     }
     dynamic_span();

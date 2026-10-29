@@ -25,7 +25,7 @@ RPC 返回回应，事件返回当前处理阶段的结果，不自动生成客�
 | 层次 | 职责 | 边界 |
 | --- | --- | --- |
 | tok-core 基础契约 | 服务身份、Extensions、发现、路由及请求锁契约 | 不依赖玩家运行契约、gateway、具体 RPC 协议或 NATS |
-| tok-player 玩家契约与适配 | 会话身份、所有权与恢复凭证，玩家通知、timer、事件及 RPC 适配 | 复用 tok-message、tok-grpc 与事件设施；不实现网络监听、会话调度或存储后端 |
+| tok-session 会话契约与适配 | 逻辑会话身份、所有权与恢复凭证，客户端通知、timer、事件及 logic RPC 适配 | 复用 tok-message、tok-grpc 与事件设施；不实现网络监听、会话调度或存储后端 |
 | 调用执行设施 | 执行上下文、类型化请求、Tower 处理链与预算/取消约束 | tok-execution，不管理服务构建与后台任务 |
 | 按键分发模块 | 根据泛型键选择输入、结果和错误均可自定义的处理链 | tok-execution::registry，不规定编码或协议；protobuf 适配归 tok-message::protobuf |
 | 服务生命周期设施 | 服务工厂、启动阶段、退出与有界任务监督 | tok-lifecycle，不依赖执行层或 Tower |
@@ -39,27 +39,27 @@ RPC 返回回应，事件返回当前处理阶段的结果，不自动生成客�
 flowchart TD
     execution[tok-execution] --> core[tok-core]
     lifecycle[tok-lifecycle] --> core
-    player[tok-player] --> core
+    session[tok-session] --> core
     events[tok-events] --> execution
     events --> lifecycle
     grpc[tok-grpc] --> execution
     message[tok-message] --> execution
     message --> grpc
-    player --> message
-    player --> grpc
-    player --> events
-    player --> lifecycle
+    session --> message
+    session --> grpc
+    session --> events
+    session --> lifecycle
     gateway[tok-gateway] --> execution
     gateway --> lifecycle
-    gateway --> player
+    gateway --> session
     gateway --> message
     infra[tok-infra] --> core
-    infra --> player
+    infra --> session
 ```
 
 依赖方向为“门面/游戏组装 → 扩展与适配 → 共同设施 → 基础契约”。实际依赖允许按用途引用更下层组件，禁止形成循环或反向依赖具体游戏。P1 最初将上下文放在 tok-core；当前 Context / StopReason 已归 tok-execution，与类型化执行和 Layer 放在一起，Extensions 独立为 core 的基础容器；P2 已将公共工厂与生命周期沿这一落点下沉，P3 已将 RPC/事件及 RPC timer 路由接入共同处理链；P4 已接入 gateway/session 能力、状态工厂与业务消息 Layer。共同设施不能长期留在门面，再由 gateway 复制实现；也不为分层图预先增加空 crate。
 
-Gateway 复用构建、上下文、Layer、任务监督和退出设施；监听、session 调度、恢复与交接保留各自状态机，不强制合并成一个循环。通用设施不能到处判断 player/scene。tok-execution、tok-lifecycle、tok-events、tok-grpc 与 tok-message 的正常依赖均不包含 tok-player；玩家 RPC 适配依赖公共消息，tok-infra 提供玩家契约的后端。普通业务与玩家入口各有 CallContext。游戏自定义服务与内置 gateway 使用相同扩展契约。
+Gateway 复用构建、上下文、Layer、任务监督和退出设施；监听、session 调度、恢复与交接保留各自状态机，不强制合并成一个循环。通用设施不能到处判断 logic/scene。tok-execution、tok-lifecycle、tok-events、tok-grpc 与 tok-message 的正常依赖均不包含 tok-session；logic RPC 适配依赖公共消息，tok-infra 提供会话所有权后端。普通业务与 logic 入口各有 CallContext。游戏自定义服务与内置 gateway 使用相同扩展契约。
 
 Application / Gateway 已复用同一 Factory 与生命周期，RPC、事件及网关业务入口使用共同 Request / Tower 协议。协议适配仍保留游戏协议 Handler、Executor 等不同输入与结果，不另建平行的执行或事件中间件系统；具体能力与未实现范围以实现状态为准。
 
@@ -67,14 +67,15 @@ Application / Gateway 已复用同一 Factory 与生命周期，RPC、事件及�
 
 公开 API 按使用者概念组织，内部模块按实现需要组织，通过 pub use 解耦；规则与依据维护在 [AGENTS.md](../AGENTS.md#rust-公开-api-与模块组织)。实现文件默认不构成公开路径；需要理解、组合或扩展的功能提供公开模块，主要入口可根重导出。公开模块与根重导出可以并存，不因双路径或角色名前缀做机械重构。
 
-core 的 discovery / lock / routing / service 是功能命名空间，常用身份、发现与路由契约同时根导出。extensions 是内部文件，Extensions 与 BoxFuture 从根访问；各领域 Error / Result 位于其功能模块，不提供根错误。玩家 TimerTrigger 从 tok-player 根访问。公开 API 不要求复刻文件树，也不要求所有模块同一种可见性。
+core 的 discovery / lock / routing / service 是功能命名空间，常用身份、发现与路由契约同时根导出。extensions 是内部文件，Extensions 与 BoxFuture 从根访问；各领域 Error / Result 位于其功能模块，不提供根错误。玩家 TimerTrigger 从 tok-session 根访问。公开 API 不要求复刻文件树，也不要求所有模块同一种可见性。
 
 ## 身份、路由与作用域
 
 | 标识 | 职责 |
 | --- | --- |
 | node_id + service_name | 定位节点内服务，服务名在该节点唯一 |
-| bid | 业务实体身份，如 player_id、guild_id；用于亲和路由与可选互斥 |
+| bid | 业务实体身份，例如主体 ID 或公会 ID；用于亲和路由与可选互斥 |
+| subject_id | 认证扩展确认的业务主体 ID；由具体游戏定义其含义 |
 | session_id + epoch | 可恢复逻辑会话及所有权代次 |
 | message_id | 客户端业务消息类型与显式请求/回应配对 |
 | request_id | 请求关联及准入顺序，不是补发正文或业务幂等键 |
@@ -112,11 +113,11 @@ P6 已提供固定兴趣、会话动态兴趣和可信身份策略（如区服�
 
 发布成功只表示传输接受，不代表 broker 接收、handler 完成、player 执行或客户端处理。仅订阅建立做有界就绪确认。Core NATS 允许即时消息在离线、过载及冻结窗口丢失，不自动重试/去重。持久化、重新投递与消费确认留给后续 JetStream 设计；届时不得把进入 session 内存队列当成业务完成。
 
-## gateway 与 player 边界
+## gateway、logic 与 scene 边界
 
-玩家接入是 gateway 的具体组件：取得可信身份和所有权、维护逻辑 session、串行驱动 player。Scene 是未来的接入扩展，不要求复制网关运行模型，也不强制复用 Player 的所有权与执行语义。
+logic 是 gateway 的具体接入组件：取得可信主体身份和所有权、维护逻辑 session、串行驱动 logic 业务服务。scene 是未来的场景接入扩展，用于面向场景服务的异步消息转发；具体 session 与通信通道的关系以未来设计为准，不要求复用 logic 的所有权或执行语义。scene 可以承载房间、地图等不同游戏概念，不限定实时性。
 
-player 无状态指执行能力不依赖常驻 player 实例或客户端连接，不代表业务数据不存在或不能使用读缓存。所有客户端请求、timer 和转发事件都经有效 session FIFO 驱动，其他服务不能绕过该入口直接修改 player。转发事件按正文选玩家，通知直接进入客户端下行，不执行 player。
+logic 业务无状态指执行能力不依赖每个主体的常驻业务实例，不代表业务数据不存在或不能使用读缓存。客户端请求、timer 和转发事件经有效 session FIFO 驱动；业务需要遵守该写入约定，所有权变化或远程超时仍有既定竞态窗口。转发事件按正文选目标，通知直接进入客户端下行，不执行 logic 业务。普通公共服务独立于此入口；其未来 reminder 与 session timer 分别设计，目前尚未实现。
 
 普通登录、顶号、短线恢复和快速重登语义分别保留。有效 session 由所有权租约协调；顶号更新会话标记，旧 token 即使签名未过期也不能恢复新会话。新登录全量业务初始化由游戏显式完成，不增加固定 player 登录 RPC。
 
@@ -150,13 +151,13 @@ Kubernetes 配置可校验但后端未实现，部署目录尚无可运行清单
 
 ## 工程与可观测
 
-现有 workspace 包括 tok-core、tok-execution、tok-lifecycle、tok-player、tok-proto、tok-grpc、tok-message、tok-events、tok-gateway、tok-infra、tok-observability 和 tok。游戏协议属于 demo/game；框架协议属于 tok-proto。protobuf 构建期生成到 Cargo OUT_DIR，不提交生成的 Rust 文件。
+现有 workspace 包括 tok-core、tok-execution、tok-lifecycle、tok-session、tok-proto、tok-grpc、tok-message、tok-events、tok-gateway、tok-infra、tok-observability 和 tok。游戏协议属于 demo/game；框架协议属于 tok-proto。protobuf 构建期生成到 Cargo OUT_DIR，不提交生成的 Rust 文件。
 
 游戏消息 ID 可由 proto 枚举在构建期按名字生成关联，运行时仍按数字分发，配对与权限显式注册。未发布 API/协议直接校正，不增加开发中间状态兼容别名；正式发布后的破坏性变更再按版本策略处理。
 
 使用 Rust 原生 rustdoc 作为用户/API 文档，公开项以 missing_docs 检查；工具链、依赖、lint、LF、just 与 CI 在 workspace 统一。库不反向依赖具体游戏，API 名称和模块遵循 Rust 风格并保留清晰的使用端语义。
 
-日志、指标与追踪由进程入口初始化一次，服务和 Layer 复用。日志默认不记录凭证和正文，指标标签不使用 player_id、bid 或 request_id；W3C 追踪随 RPC metadata 和 NATS headers 传播。有限预算与取消不因中间件或本地派生调用重置，已开始的追踪决定不被运行时配置回写。
+日志、指标与追踪由进程入口初始化一次，服务和 Layer 复用。日志默认不记录凭证和正文，指标标签不使用 subject_id、bid 或 request_id；W3C 追踪随 RPC metadata 和 NATS headers 传播。有限预算与取消不因中间件或本地派生调用重置，已开始的追踪决定不被运行时配置回写。
 
 ## 后续范围
 
@@ -166,7 +167,7 @@ Redis Cluster 缓存与 MongoDB 集群是存储选型方向，存储 API 由业�
 
 ## 通用 RPC 与游戏协议适配
 
-tok-grpc 只提供 Client、Listener 和 Server；Server 接受任意类型化 Tower Service，客户端 execute 接入任意生成协议。它不依赖 tok-player、tok-events 或 tok-proto，不定义玩家事件方法。tok-message 提供消息注册、普通业务 RPC 和可选业务请求锁；玩家身份校验、timer 与事件转发归 tok-player::rpc。通用任务、生命周期和处理链仍分别由 tok-lifecycle / tok-execution 提供。
+tok-grpc 只提供 Client、Listener 和 Server；Server 接受任意类型化 Tower Service，客户端 execute 接入任意生成协议。它不依赖 tok-session、tok-events 或 tok-proto，不定义 logic 事件方法。tok-message 提供消息注册、普通业务 RPC 和可选业务请求锁；logic 会话身份校验、timer 与事件适配归 tok-session::logic::rpc。通用任务、生命周期和处理链仍分别由 tok-lifecycle / tok-execution 提供。
 
 游戏协议可以有 Call 与 HandleEvent 等不同远程方法；方法数量不是分层依据。session 通过玩家客户端适配调用 HandleEvent，由玩家服务适配解码并进入事件 Registry 和同一 Tower 处理模型。事件由服务器驱动，客户端业务入口不能选择事件或 timer。独立游戏协议层的 Handler 是游戏分发契约，不是通用 RPC 必须实现的接口。tok 门面的 grpc / message::rpc 分别对应这两层，不保留旧游戏 API 路径。
 
@@ -196,7 +197,7 @@ protobuf 正文编解码位于 tok-message::protobuf，基于同一个通用分�
 
 服务发现、请求锁和路由契约分别使用 core::discovery::{Error, Result}、core::lock::{Error, Result}、core::routing::{Error, Result}；不提供旧领域变体兼容别名。路由的 Discovery 包装保留原发现错误与错误链，Application::Error 增加 Discovery 聚合，注册、清理和故障传播均使用该类别。后端错误按相应领域映射，不返回其他领域的变体。
 
-core 不提供根 Error / Result，参数、配置和可选能力校验由实际所属组件表达。所有权后端故障使用 player::ownership::Error::Unavailable，冲突、配置、凭证与不可用语义保持区分。Redis 发现与锁构造/校验采用所属领域错误，整体应用配置在边界映射为 config::Error::Invalid。
+core 不提供根 Error / Result，参数、配置和可选能力校验由实际所属组件表达。所有权后端故障使用 session::ownership::Error::Unavailable，冲突、配置、凭证与不可用语义保持区分。Redis 发现与锁构造/校验采用所属领域错误，整体应用配置在边界映射为 config::Error::Invalid。
 
 registry 注册错误定名为 Error<K>，运行失败定名为 DispatchError<K, E>；后者覆盖未知键与业务处理错误，执行停止统一由 execution::Error::Stopped 表达，避免 HandleError 误指只有处理者内部失败。protobuf 适配与示例同步新路径，不保留 RegistrationError 旧类型。
 
@@ -204,17 +205,17 @@ registry 注册错误定名为 Error<K>，运行失败定名为 DispatchError<K,
 
 删除 tok-core/error.rs 及根 Error / Result，领域发现、锁和路由契约不变，不提供兼容类型。剩余校验能力回到所属模块：execution::ContextError 表达无效服务身份、操作名和不可表示期限；lifecycle::task::CreateError 表达无效容量和父范围退出，lifecycle::CreateError 表达服务身份及底层任务范围构造失败。构造失败与运行错误分开，组合处保留原始来源。
 
-应用配置使用 tok::config::{Error, Result}，Application 以 Configuration / Create / Discovery 聚合配置、构造和发现错误，Unsupported 表达应用尚未实现的可选能力。所有权和凭证错误分别归 player::ownership::Error 与 player::credentials::Error，不再经 Core 包装；玩家接入运行参数单独使用 gateway::player::ConfigError。示例业务状态构造采用自己的标准 I/O 参数错误，不依赖框架根错误。
+应用配置使用 tok::config::{Error, Result}，Application 以 Configuration / Create / Discovery 聚合配置、构造和发现错误，Unsupported 表达应用尚未实现的可选能力。所有权和凭证错误分别归 session::ownership::Error 与 session::credentials::Error，不再经 Core 包装；玩家接入运行参数单独使用 gateway::logic::ConfigError。示例业务状态构造采用自己的标准 I/O 参数错误，不依赖框架根错误。
 
 ## protobuf、编号消息与 gRPC 边界（2026-10-21）
 
 tok-proto 仅提供生成协议；tok-message::protobuf 在 tok-execution 上适配泛型键的正文编解码；模块本身不使用生成游戏协议或 Tonic，所属 crate 为普通业务 RPC 依赖这些设施，但不依赖玩家。tok-message::Registry 在其上施加 u32 非零编号规则，保留调用状态、附加结果和业务错误，支持直接本地调用。
 
-tok-message::rpc 承载普通业务 CallContext、客户端、Service、绑定槽与请求锁适配。tok-player::rpc 承载玩家 CallContext、客户端、Service、绑定槽和 timer/事件转换；其 HandlerRegistry 复用公共消息 Registry。普通业务入口拒绝玩家 session 与 timer 字段。tok-grpc 明确限于 Tonic/gRPC 的连接、监听、调用预算、取消和追踪，不理解编号消息或玩家协议。
+tok-message::rpc 承载普通业务 CallContext、客户端、Service、绑定槽与请求锁适配。tok-session::logic::rpc 承载 logic CallContext、客户端、Service、绑定槽和 timer/事件转换；其 HandlerRegistry 复用公共消息 Registry。普通业务入口拒绝逻辑 session 与 timer 字段。tok-grpc 明确限于 Tonic/gRPC 的连接、监听、调用预算、取消和追踪，不理解编号消息或 logic 协议。
 
 ## 玩家契约的领域边界（2026-10-21）
 
-tok-player 的会话、逻辑消息和计时类型继续根导出；ownership 与 credentials 是独立功能命名空间，各自定义 Error / Result，不提供玩家根错误。所有权持有者复用 tok-core::Identity，Record 只组合会话身份和持有者，不重复定义部署服务身份。
+tok-session 的会话、逻辑消息和计时类型继续根导出；ownership 与 credentials 是独立功能命名空间，各自定义 Error / Result，不提供玩家根错误。所有权持有者复用 tok-core::Identity，Record 只组合会话身份和持有者，不重复定义部署服务身份。
 
 所有权错误区分比较冲突、容量不足、后端不可用、输入、配置与不支持的操作；凭证错误只描述签发参数、配置与本地组件故障，非法或过期凭证返回 None。诊断不能包含连接凭据、密钥或 token。网关将所有权容量不足映射为已有 CapacityExceeded 客户端错误码，不改变线协议编号。
 
@@ -284,4 +285,4 @@ protobuf 派发直接借用消息键，不将默认表或注册回应键的 Clon
 
 ## 玩家与公共消息边界的后续校正
 
-tok-player 聚合玩家专属契约和适配，包括所有权、timer、玩家 RPC 转发与协议；tok-message 负责公共编号消息及普通业务 RPC，提供默认 protobuf 适配。玩家适配依赖公共消息，公共消息不依赖玩家。连接、session 生命周期和状态机仍由 tok-gateway 管理。目前编号消息注册以 protobuf 为默认实现，其他编码尚需扩展对应的接入边界。
+tok-session 聚合逻辑会话契约和适配，包括所有权、timer 与 logic RPC；tok-message 负责公共编号消息及普通业务 RPC，提供默认 protobuf 适配。logic 适配依赖公共消息，公共消息不依赖 session。连接、session 生命周期和状态机仍由 tok-gateway 管理。目前编号消息注册以 protobuf 为默认实现，其他编码尚需扩展对应的接入边界。

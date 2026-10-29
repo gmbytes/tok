@@ -1,0 +1,26 @@
+[package]
+name = "tok-session"
+description = "tok 逻辑会话契约与协议适配"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+tok-core.workspace = true
+tok-message.workspace = true
+tok-execution.workspace = true
+tok-lifecycle.workspace = true
+tok-events.workspace = true
+tok-grpc.workspace = true
+tower.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+tok-proto.workspace = true
+tonic.workspace = true
+prost.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

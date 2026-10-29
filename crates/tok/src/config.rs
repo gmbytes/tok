@@ -95,7 +95,7 @@ pub struct AppConfig {
     pub events: Option<tok_events::nats::Config>,
     /// 可选的本地固定共享密钥；省略时使用单进程临时密钥。
     #[serde(default)]
-    pub resume_token: Option<tok_gateway::player::resume_token::Config>,
+    pub resume_token: Option<tok_gateway::logic::resume_token::Config>,
     /// 部署节点身份，节点内的所有业务服务共享此 ID。
     pub node_id: String,
     /// 服务发现后端选择。
@@ -119,7 +119,7 @@ pub struct AppConfig {
     pub observability: tok_observability::Config,
     /// 玩家 TCP 网关的容量与期限；未组装网关时不创建监听。
     #[serde(default)]
-    pub player_gateway: tok_gateway::player::Config,
+    pub logic_gateway: tok_gateway::logic::Config,
 }
 
 impl AppConfig {
@@ -142,7 +142,7 @@ impl AppConfig {
             keys.validate()
                 .map_err(|error| Error::Invalid(error.to_string()))?;
         }
-        if self.player_gateway.handoff_enabled
+        if self.logic_gateway.handoff_enabled
             && (self.resume_token.is_none()
                 || self.ownership != OwnershipBackend::Redis
                 || self.discovery == DiscoveryBackend::Memory)
@@ -156,7 +156,7 @@ impl AppConfig {
                 redis
                     .validate()
                     .map_err(|error| Error::Invalid(error.to_string()))?;
-                if redis.operation_timeout_ms > self.player_gateway.rpc_timeout_ms {
+                if redis.operation_timeout_ms > self.logic_gateway.rpc_timeout_ms {
                     return Err(Error::Invalid("所有权操作期限不能大于网关调用期限".into()));
                 }
             }
@@ -184,7 +184,7 @@ impl AppConfig {
             }
             _ => {}
         }
-        self.player_gateway
+        self.logic_gateway
             .validate()
             .map_err(|error| Error::Invalid(error.to_string()))?;
         self.observability

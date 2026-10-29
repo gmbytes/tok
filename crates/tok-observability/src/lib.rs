@@ -450,7 +450,7 @@ mod tests {
             )
             .with(contexts.layer());
         tracing::subscriber::with_default(subscriber, || {
-            let span = tracing::info_span!("request", player_id = 123);
+            let span = tracing::info_span!("request", subject_id = 123);
             let _entered = span.enter();
             tracing::info!("test");
         });
@@ -540,21 +540,21 @@ mod tests {
         );
         tracing::subscriber::with_default(subscriber, || {
             let pending =
-                tracing::info_span!(parent: None, "pending", player_id = tracing::field::Empty);
+                tracing::info_span!(parent: None, "pending", subject_id = tracing::field::Empty);
             let decided =
-                tracing::info_span!(parent: None, "decided", player_id = tracing::field::Empty);
+                tracing::info_span!(parent: None, "decided", subject_id = tracing::field::Empty);
             assert!(!decided.context().span().span_context().is_sampled());
             control
                 .set_force_rules(vec![ForceTraceRule {
                     fields: std::collections::BTreeMap::from([(
-                        "player_id".into(),
+                        "subject_id".into(),
                         serde_json::json!(123),
                     )]),
                     ..ForceTraceRule::default()
                 }])
                 .unwrap();
-            pending.record("player_id", 123_u64);
-            decided.record("player_id", 123_u64);
+            pending.record("subject_id", 123_u64);
+            decided.record("subject_id", 123_u64);
             assert!(pending.context().span().span_context().is_sampled());
             assert!(!decided.context().span().span_context().is_sampled());
             control.set_force_rules(Vec::new()).unwrap();

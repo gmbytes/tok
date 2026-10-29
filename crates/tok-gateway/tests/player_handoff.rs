@@ -16,7 +16,7 @@ use tok_core::ServiceDescriptor;
 use tok_gateway::{
     Gateway,
     codec::{FrameCodec, VERSION},
-    player::{
+    logic::{
         AuthenticatedIdentity, AuthenticationTask, Authenticator, Config, Executor, Ingress, Reply,
         SessionManager, Task,
     },
@@ -24,8 +24,8 @@ use tok_gateway::{
     rpc::GatewayRpcService,
 };
 use tok_infra::{discovery::MemoryDirectory, ownership::MemoryOwnership};
-use tok_player::rpc::protocol::internal::v1 as proto;
-use tok_player::{
+use tok_session::logic::rpc::protocol::internal::v1 as proto;
+use tok_session::{
     LogicalMessage, MessageKind, credentials::ResumeTokenCodec, ownership::Store as OwnershipStore,
 };
 use tokio::{
@@ -43,7 +43,7 @@ impl OwnershipStore for TransferFault {
     fn lookup(
         &self,
         player: &str,
-    ) -> BoxFuture<'_, tok_player::ownership::Result<Option<tok_player::ownership::Record>>> {
+    ) -> BoxFuture<'_, tok_session::ownership::Result<Option<tok_session::ownership::Record>>> {
         self.inner.lookup(player)
     }
     fn acquire(
@@ -53,33 +53,33 @@ impl OwnershipStore for TransferFault {
         owner: SessionOwner,
         expected: Option<u64>,
         ttl: Duration,
-    ) -> BoxFuture<'_, tok_player::ownership::Result<tok_player::ownership::Record>> {
+    ) -> BoxFuture<'_, tok_session::ownership::Result<tok_session::ownership::Record>> {
         self.inner.acquire(player, session, owner, expected, ttl)
     }
     fn renew(
         &self,
-        value: tok_player::ownership::Record,
+        value: tok_session::ownership::Record,
         ttl: Duration,
-    ) -> BoxFuture<'_, tok_player::ownership::Result<()>> {
+    ) -> BoxFuture<'_, tok_session::ownership::Result<()>> {
         self.inner.renew(value, ttl)
     }
     fn release(
         &self,
-        value: tok_player::ownership::Record,
-    ) -> BoxFuture<'_, tok_player::ownership::Result<bool>> {
+        value: tok_session::ownership::Record,
+    ) -> BoxFuture<'_, tok_session::ownership::Result<bool>> {
         self.inner.release(value)
     }
     fn transfer(
         &self,
-        value: tok_player::ownership::Record,
+        value: tok_session::ownership::Record,
         target: SessionOwner,
         ttl: Duration,
-    ) -> BoxFuture<'_, tok_player::ownership::Result<tok_player::ownership::Record>> {
+    ) -> BoxFuture<'_, tok_session::ownership::Result<tok_session::ownership::Record>> {
         Box::pin(async move {
             if self.committed_error {
                 self.inner.transfer(value, target, ttl).await?;
             }
-            Err(tok_player::ownership::Error::Unavailable(
+            Err(tok_session::ownership::Error::Unavailable(
                 "injected transfer result loss".into(),
             ))
         })
@@ -88,8 +88,8 @@ impl OwnershipStore for TransferFault {
 
 struct Auth;
 impl Authenticator for Auth {
-    fn authenticate(&self, player_id: String) -> AuthenticationTask<'_> {
-        Box::pin(async move { Ok(AuthenticatedIdentity { player_id }) })
+    fn authenticate(&self, subject_id: String) -> AuthenticationTask<'_> {
+        Box::pin(async move { Ok(AuthenticatedIdentity { subject_id }) })
     }
 }
 struct Execution {
@@ -113,9 +113,9 @@ impl Default for Execution {
 impl Executor for Execution {
     fn execute_event(
         &self,
-        input: tok_execution::Request<tok_gateway::player::EventInput>,
-    ) -> tok_gateway::player::EventTask<'_> {
-        let tok_gateway::player::EventInput {
+        input: tok_execution::Request<tok_gateway::logic::EventInput>,
+    ) -> tok_gateway::logic::EventTask<'_> {
+        let tok_gateway::logic::EventInput {
             identity: _,
             request_id,
             event: _,
@@ -128,9 +128,9 @@ impl Executor for Execution {
 
     fn execute_request(
         &self,
-        input: tok_execution::Request<tok_gateway::player::RequestInput>,
+        input: tok_execution::Request<tok_gateway::logic::RequestInput>,
     ) -> Task<'_> {
-        let tok_gateway::player::RequestInput {
+        let tok_gateway::logic::RequestInput {
             identity: _,
             message: request,
         } = input.input;
@@ -141,7 +141,7 @@ impl Executor for Execution {
                 self.permits.acquire().await.unwrap().forget();
             }
             let timers = (request.message_id == 2).then(|| {
-                tok_player::TimerUpdate::ReplaceAll(vec![tok_player::TimerSpec {
+                tok_session::TimerUpdate::ReplaceAll(vec![tok_session::TimerSpec {
                     timer_id: "production".into(),
                     message_id: 9,
                     body: vec![],
@@ -168,9 +168,9 @@ impl Executor for Execution {
     }
     fn execute_timer(
         &self,
-        input: tok_execution::Request<tok_gateway::player::TimerInput>,
+        input: tok_execution::Request<tok_gateway::logic::TimerInput>,
     ) -> Task<'_> {
-        let tok_gateway::player::TimerInput {
+        let tok_gateway::logic::TimerInput {
             identity: _,
             request_id: _,
             spec: _,
@@ -187,7 +187,7 @@ impl Executor for Execution {
 }
 #[derive(Default)]
 struct FixtureOptions {
-    extension: Option<Arc<dyn tok_gateway::player::session::extension::Factory>>,
+    extension: Option<Arc<dyn tok_gateway::logic::session::extension::Factory>>,
     topics: Option<Arc<topic_support::TopicTransport>>,
 }
 struct Fixture {
@@ -232,7 +232,7 @@ impl Fixture {
         tokens: Arc<dyn ResumeTokenCodec>,
         execution: Arc<Execution>,
         config: Config,
-        extension: Option<Arc<dyn tok_gateway::player::session::extension::Factory>>,
+        extension: Option<Arc<dyn tok_gateway::logic::session::extension::Factory>>,
     ) -> Self {
         Self::configured_options(
             node,
@@ -411,7 +411,8 @@ async fn resume(fixture: &Fixture, login: &protocol::LoginResponse) -> TcpStream
 }
 async fn rpc(
     fixture: &Fixture,
-) -> proto::gateway_rpc_client::GatewayRpcClient<tok_player::rpc::tonic::transport::Channel> {
+) -> proto::gateway_rpc_client::GatewayRpcClient<tok_session::logic::rpc::tonic::transport::Channel>
+{
     proto::gateway_rpc_client::GatewayRpcClient::connect(format!("http://{}", fixture.rpc_address))
         .await
         .unwrap()
@@ -421,7 +422,7 @@ fn prepare_request(login: &protocol::LoginResponse, id: &str) -> proto::HandoffR
         handoff_id: id.into(),
         expected: Some(proto::GatewayOwnership {
             identity: Some(proto::SessionIdentity {
-                player_id: "42".into(),
+                subject_id: "42".into(),
                 session_id: login.session_id.clone(),
                 epoch: login.epoch,
             }),
@@ -446,7 +447,7 @@ async fn handoff_replays_original_response_preserves_identity_and_runs_timer_onc
     let directory = Arc::new(MemoryDirectory::default());
     let ownership = Arc::new(MemoryOwnership::new(16).unwrap());
     let tokens: Arc<dyn ResumeTokenCodec> =
-        Arc::new(tok_gateway::player::resume_token::SignedResumeTokens::ephemeral().unwrap());
+        Arc::new(tok_gateway::logic::resume_token::SignedResumeTokens::ephemeral().unwrap());
     let execution = Arc::new(Execution::default());
     let a = Fixture::new(
         "a",
@@ -469,9 +470,9 @@ async fn handoff_replays_original_response_preserves_identity_and_runs_timer_onc
     let (mut stream, login) = login(&a).await;
     let source = a.sessions.session("42").unwrap().unwrap();
     source.join_topic("guild:7").await.unwrap();
-    let event = tok_gateway::player::events::Delivery {
-        target: tok_gateway::player::events::Target::Topic("guild:7".into()),
-        action: tok_gateway::player::events::Action::Forward(Arc::new(tok_events::Message {
+    let event = tok_gateway::logic::events::Delivery {
+        target: tok_gateway::logic::events::Target::Topic("guild:7".into()),
+        action: tok_gateway::logic::events::Action::Forward(Arc::new(tok_events::Message {
             topic: Default::default(),
             event_id: tok_events::EventId::generate(),
             event_type: "test.handoff".into(),
@@ -600,7 +601,7 @@ async fn draining_waits_for_inflight_result_without_reexecuting_it() {
     let directory = Arc::new(MemoryDirectory::default());
     let ownership = Arc::new(MemoryOwnership::new(16).unwrap());
     let tokens: Arc<dyn ResumeTokenCodec> =
-        Arc::new(tok_gateway::player::resume_token::SignedResumeTokens::ephemeral().unwrap());
+        Arc::new(tok_gateway::logic::resume_token::SignedResumeTokens::ephemeral().unwrap());
     let execution = Arc::new(Execution::default());
     let a = Fixture::new(
         "a",
@@ -649,7 +650,7 @@ async fn cancelled_snapshot_cannot_commit_and_old_session_can_resume() {
     let directory = Arc::new(MemoryDirectory::default());
     let ownership = Arc::new(MemoryOwnership::new(16).unwrap());
     let tokens: Arc<dyn ResumeTokenCodec> =
-        Arc::new(tok_gateway::player::resume_token::SignedResumeTokens::ephemeral().unwrap());
+        Arc::new(tok_gateway::logic::resume_token::SignedResumeTokens::ephemeral().unwrap());
     let a = Fixture::new(
         "a",
         directory,
@@ -740,7 +741,7 @@ async fn failed_target_validation_cancels_before_ownership_changes() {
     let directory = Arc::new(MemoryDirectory::default());
     let ownership = Arc::new(MemoryOwnership::new(16).unwrap());
     let tokens: Arc<dyn ResumeTokenCodec> =
-        Arc::new(tok_gateway::player::resume_token::SignedResumeTokens::ephemeral().unwrap());
+        Arc::new(tok_gateway::logic::resume_token::SignedResumeTokens::ephemeral().unwrap());
     let execution = Arc::new(Execution::default());
     let a = Fixture::new(
         "a",
@@ -787,7 +788,7 @@ async fn uncertain_commit_is_confirmed_by_lookup_and_never_reexecutes_business()
     let directory = Arc::new(MemoryDirectory::default());
     let ownership = Arc::new(MemoryOwnership::new(16).unwrap());
     let tokens: Arc<dyn ResumeTokenCodec> =
-        Arc::new(tok_gateway::player::resume_token::SignedResumeTokens::ephemeral().unwrap());
+        Arc::new(tok_gateway::logic::resume_token::SignedResumeTokens::ephemeral().unwrap());
     let execution = Arc::new(Execution::default());
     let faulty = Arc::new(TransferFault {
         inner: Arc::<MemoryOwnership>::clone(&ownership),
@@ -833,7 +834,7 @@ async fn failed_commit_stops_old_session_and_shared_token_can_fast_login() {
     let directory = Arc::new(MemoryDirectory::default());
     let ownership = Arc::new(MemoryOwnership::new(16).unwrap());
     let tokens: Arc<dyn ResumeTokenCodec> =
-        Arc::new(tok_gateway::player::resume_token::SignedResumeTokens::ephemeral().unwrap());
+        Arc::new(tok_gateway::logic::resume_token::SignedResumeTokens::ephemeral().unwrap());
     let execution = Arc::new(Execution::default());
     let a = Fixture::new(
         "a",
@@ -894,7 +895,7 @@ async fn expired_preparation_unfreezes_source_and_rejects_late_commit() {
     let directory = Arc::new(MemoryDirectory::default());
     let ownership = Arc::new(MemoryOwnership::new(16).unwrap());
     let tokens: Arc<dyn ResumeTokenCodec> =
-        Arc::new(tok_gateway::player::resume_token::SignedResumeTokens::ephemeral().unwrap());
+        Arc::new(tok_gateway::logic::resume_token::SignedResumeTokens::ephemeral().unwrap());
     let a = Fixture::new(
         "a",
         directory,
@@ -933,7 +934,7 @@ async fn competing_targets_cannot_prepare_the_same_source_together() {
     let directory = Arc::new(MemoryDirectory::default());
     let ownership = Arc::new(MemoryOwnership::new(16).unwrap());
     let tokens: Arc<dyn ResumeTokenCodec> =
-        Arc::new(tok_gateway::player::resume_token::SignedResumeTokens::ephemeral().unwrap());
+        Arc::new(tok_gateway::logic::resume_token::SignedResumeTokens::ephemeral().unwrap());
     let a = Fixture::new(
         "a",
         directory,
@@ -967,7 +968,7 @@ async fn client_disconnect_during_drain_does_not_leave_an_unowned_connection_bin
     let directory = Arc::new(MemoryDirectory::default());
     let ownership = Arc::new(MemoryOwnership::new(16).unwrap());
     let tokens: Arc<dyn ResumeTokenCodec> =
-        Arc::new(tok_gateway::player::resume_token::SignedResumeTokens::ephemeral().unwrap());
+        Arc::new(tok_gateway::logic::resume_token::SignedResumeTokens::ephemeral().unwrap());
     let execution = Arc::new(Execution::default());
     let a = Fixture::new(
         "a",
@@ -1020,7 +1021,7 @@ async fn gateway_rpc_registers_player_when_handoff_is_disabled() {
         "a",
         Arc::new(MemoryDirectory::default()),
         Arc::new(MemoryOwnership::new(16).unwrap()),
-        Arc::new(tok_gateway::player::resume_token::SignedResumeTokens::ephemeral().unwrap()),
+        Arc::new(tok_gateway::logic::resume_token::SignedResumeTokens::ephemeral().unwrap()),
         Arc::new(Execution::default()),
         Config::default(),
     )
@@ -1033,7 +1034,7 @@ async fn gateway_rpc_registers_player_when_handoff_is_disabled() {
     // 统一入口已登记并找到管理器；交接开关在具体操作中拒绝，不影响注册。
     assert_eq!(
         client.prepare_handoff(request).await.unwrap_err().code(),
-        tok_player::rpc::tonic::Code::InvalidArgument
+        tok_session::logic::rpc::tonic::Code::InvalidArgument
     );
     let unknown = proto::HandoffRequest {
         source_service_name: "missing".into(),
@@ -1041,7 +1042,7 @@ async fn gateway_rpc_registers_player_when_handoff_is_disabled() {
     };
     assert_eq!(
         client.prepare_handoff(unknown).await.unwrap_err().code(),
-        tok_player::rpc::tonic::Code::Unavailable
+        tok_session::logic::rpc::tonic::Code::Unavailable
     );
     fixture.stop().await;
 }
@@ -1067,15 +1068,15 @@ enum ExtensionMode {
 }
 struct SessionExtension {
     mode: ExtensionMode,
-    changes: std::sync::Mutex<Vec<tok_gateway::player::session::extension::Change>>,
+    changes: std::sync::Mutex<Vec<tok_gateway::logic::session::extension::Change>>,
 }
-impl tok_gateway::player::session::extension::Factory for SessionExtension {
+impl tok_gateway::logic::session::extension::Factory for SessionExtension {
     fn kind(&self) -> &str {
         "test.state.v1"
     }
     fn initialize(
         &self,
-        request: tok_execution::Request<tok_player::SessionIdentity>,
+        request: tok_execution::Request<tok_session::SessionIdentity>,
     ) -> tok_gateway::Result<tok_core::Extensions> {
         let mut extensions = tok_core::Extensions::default();
         extensions.insert(ExtensionData {
@@ -1087,7 +1088,7 @@ impl tok_gateway::player::session::extension::Factory for SessionExtension {
     }
     fn snapshot(
         &self,
-        request: tok_execution::Request<tok_gateway::player::SessionHandle>,
+        request: tok_execution::Request<tok_gateway::logic::SessionHandle>,
     ) -> tok_gateway::Result<Vec<u8>> {
         if matches!(self.mode, ExtensionMode::TooLarge) {
             return Ok(vec![0; 65_537]);
@@ -1111,7 +1112,7 @@ impl tok_gateway::player::session::extension::Factory for SessionExtension {
     }
     fn restore(
         &self,
-        request: tok_execution::Request<(tok_player::SessionIdentity, &[u8])>,
+        request: tok_execution::Request<(tok_session::SessionIdentity, &[u8])>,
     ) -> tok_gateway::Result<tok_core::Extensions> {
         self.validate(request.input.1)?;
         if matches!(self.mode, ExtensionMode::RejectRestore) {
@@ -1129,7 +1130,7 @@ impl tok_gateway::player::session::extension::Factory for SessionExtension {
     }
     fn on_change(
         &self,
-        request: tok_execution::Request<tok_gateway::player::session::extension::Change>,
+        request: tok_execution::Request<tok_gateway::logic::session::extension::Change>,
     ) {
         self.changes.lock().unwrap().push(request.input);
     }
@@ -1142,11 +1143,11 @@ fn session_extension(mode: ExtensionMode) -> Arc<SessionExtension> {
 }
 #[tokio::test]
 async fn required_session_extensions_restore_with_new_owner_and_explicit_snapshot() {
-    use tok_gateway::player::session::extension::Change;
+    use tok_gateway::logic::session::extension::Change;
     let directory = Arc::new(MemoryDirectory::default());
     let ownership = Arc::new(MemoryOwnership::new(16).unwrap());
     let tokens: Arc<dyn ResumeTokenCodec> =
-        Arc::new(tok_gateway::player::resume_token::SignedResumeTokens::ephemeral().unwrap());
+        Arc::new(tok_gateway::logic::resume_token::SignedResumeTokens::ephemeral().unwrap());
     let execution = Arc::new(Execution::default());
     let source = session_extension(ExtensionMode::Good);
     let target = session_extension(ExtensionMode::Good);
@@ -1216,7 +1217,7 @@ async fn required_session_extensions_restore_with_new_owner_and_explicit_snapsho
 }
 #[tokio::test]
 async fn incompatible_rejected_or_oversized_extensions_do_not_transfer_ownership() {
-    use tok_gateway::player::session::extension::Change;
+    use tok_gateway::logic::session::extension::Change;
     for mode in [
         None,
         Some(ExtensionMode::RejectValidation),
@@ -1225,7 +1226,7 @@ async fn incompatible_rejected_or_oversized_extensions_do_not_transfer_ownership
         let directory = Arc::new(MemoryDirectory::default());
         let ownership = Arc::new(MemoryOwnership::new(16).unwrap());
         let tokens: Arc<dyn ResumeTokenCodec> =
-            Arc::new(tok_gateway::player::resume_token::SignedResumeTokens::ephemeral().unwrap());
+            Arc::new(tok_gateway::logic::resume_token::SignedResumeTokens::ephemeral().unwrap());
         let execution = Arc::new(Execution::default());
         let source = session_extension(if matches!(mode, Some(ExtensionMode::TooLarge)) {
             ExtensionMode::TooLarge
@@ -1294,7 +1295,7 @@ async fn restore_failure_after_commit_releases_target_without_reopening_source()
     let directory = Arc::new(MemoryDirectory::default());
     let ownership = Arc::new(MemoryOwnership::new(16).unwrap());
     let tokens: Arc<dyn ResumeTokenCodec> =
-        Arc::new(tok_gateway::player::resume_token::SignedResumeTokens::ephemeral().unwrap());
+        Arc::new(tok_gateway::logic::resume_token::SignedResumeTokens::ephemeral().unwrap());
     let execution = Arc::new(Execution::default());
     let source = session_extension(ExtensionMode::Good);
     let target = session_extension(ExtensionMode::RejectRestore);
@@ -1343,7 +1344,7 @@ async fn target_waits_for_topic_readiness_before_transfer_and_source_releases_af
     let directory = Arc::new(MemoryDirectory::default());
     let ownership = Arc::new(MemoryOwnership::new(8).unwrap());
     let tokens: Arc<dyn ResumeTokenCodec> =
-        Arc::new(tok_gateway::player::resume_token::SignedResumeTokens::ephemeral().unwrap());
+        Arc::new(tok_gateway::logic::resume_token::SignedResumeTokens::ephemeral().unwrap());
     let execution = Arc::new(Execution::default());
     let source_transport = Arc::new(topic_support::TopicTransport::new());
     let target_transport = Arc::new(topic_support::TopicTransport::new());
@@ -1421,7 +1422,7 @@ async fn target_topic_failure_cancels_preparation_without_transferring_ownership
     let directory = Arc::new(MemoryDirectory::default());
     let ownership = Arc::new(MemoryOwnership::new(8).unwrap());
     let tokens: Arc<dyn ResumeTokenCodec> =
-        Arc::new(tok_gateway::player::resume_token::SignedResumeTokens::ephemeral().unwrap());
+        Arc::new(tok_gateway::logic::resume_token::SignedResumeTokens::ephemeral().unwrap());
     let execution = Arc::new(Execution::default());
     let source_transport = Arc::new(topic_support::TopicTransport::new());
     let target_transport = Arc::new(topic_support::TopicTransport::new());
@@ -1504,13 +1505,13 @@ async fn all_gateway_rpc_methods_validate_execution_metadata_before_state_change
         "a",
         Arc::new(MemoryDirectory::default()),
         Arc::new(MemoryOwnership::new(16).unwrap()),
-        Arc::new(tok_gateway::player::resume_token::SignedResumeTokens::ephemeral().unwrap()),
+        Arc::new(tok_gateway::logic::resume_token::SignedResumeTokens::ephemeral().unwrap()),
         Arc::new(Execution::default()),
         Config::default(),
     )
     .await;
     let service = GatewayRpcService::new(Config::default().max_handoff_bytes).unwrap();
-    service.register_player(fixture.sessions.clone()).unwrap();
+    service.register_logic(fixture.sessions.clone()).unwrap();
     for operation in 0..4 {
         for (timeout, expected) in [
             ("invalid", tonic::Code::InvalidArgument),

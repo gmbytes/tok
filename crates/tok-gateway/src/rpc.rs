@@ -1,12 +1,12 @@
 //! 网关内部 RPC 入口，按网关服务名分发管理操作；由组装层绑定到受信内部端点。
 
-use crate::player::{HandoffAction, SessionManager};
+use crate::logic::{HandoffAction, SessionManager};
 use crate::{ErrorCode, Result};
 use std::{
     collections::BTreeMap,
     sync::{Arc, Mutex},
 };
-use tok_player::rpc::{
+use tok_session::logic::rpc::{
     protocol::internal::v1 as proto,
     tonic::{self, Request, Response, Status},
 };
@@ -14,7 +14,7 @@ use tok_player::rpc::{
 /// 网关内部 RPC 服务，复用按网关服务名登记的会话管理器；当前提供会话交接方法。
 #[derive(Clone)]
 pub struct GatewayRpcService {
-    player_managers: Arc<Mutex<BTreeMap<String, SessionManager>>>,
+    logic_managers: Arc<Mutex<BTreeMap<String, SessionManager>>>,
     max_handoff_bytes: usize,
 }
 impl GatewayRpcService {
@@ -24,26 +24,26 @@ impl GatewayRpcService {
             return Err(ErrorCode::InvalidRequest.into());
         }
         Ok(Self {
-            player_managers: Arc::new(Mutex::new(BTreeMap::new())),
+            logic_managers: Arc::new(Mutex::new(BTreeMap::new())),
             max_handoff_bytes,
         })
     }
     /// 在网关启动前登记玩家会话管理器，按网关服务名分发，重复名称拒绝。
-    pub fn register_player(&self, manager: SessionManager) -> Result<()> {
-        let mut player_managers = self
-            .player_managers
+    pub fn register_logic(&self, manager: SessionManager) -> Result<()> {
+        let mut logic_managers = self
+            .logic_managers
             .lock()
             .map_err(|_| ErrorCode::Internal)?;
         let name = manager.service_name().to_owned();
-        if player_managers.contains_key(&name) {
+        if logic_managers.contains_key(&name) {
             return Err(ErrorCode::InvalidState.into());
         }
-        player_managers.insert(name, manager);
+        logic_managers.insert(name, manager);
         Ok(())
     }
-    pub(crate) fn unregister_player(&self, manager: &SessionManager) -> Result<()> {
+    pub(crate) fn unregister_logic(&self, manager: &SessionManager) -> Result<()> {
         let mut managers = self
-            .player_managers
+            .logic_managers
             .lock()
             .map_err(|_| ErrorCode::Internal)?;
         if managers
@@ -66,7 +66,7 @@ impl GatewayRpcService {
         request: Request<proto::HandoffRequest>,
         action: Option<HandoffAction>,
     ) -> std::result::Result<Response<proto::HandoffResponse>, Status> {
-        let manager = self.player_manager(&request.get_ref().source_service_name)?;
+        let manager = self.logic_manager(&request.get_ref().source_service_name)?;
         let gateway = manager.gateway();
         let server = tok_grpc::Server::new(gateway.identity().clone())
             .and_then(|server| {
@@ -111,8 +111,8 @@ impl GatewayRpcService {
             .await
             .map(|response| Response::new(response.output))
     }
-    fn player_manager(&self, service_name: &str) -> std::result::Result<SessionManager, Status> {
-        self.player_managers
+    fn logic_manager(&self, service_name: &str) -> std::result::Result<SessionManager, Status> {
+        self.logic_managers
             .lock()
             .map_err(|_| Status::internal("网关 RPC 入口不可用"))?
             .get(service_name)

@@ -20,8 +20,8 @@ use tok::{
     lifecycle::{Init, InitFuture, task::Task},
     message::rpc::{CallContext as BusinessContext, Service as BusinessService},
     observability::Error,
-    player::SessionIdentity,
-    player::rpc::{CallContext, Service as RpcService, protocol::internal::v1::Payload},
+    session::SessionIdentity,
+    session::logic::rpc::{CallContext, Service as RpcService, protocol::internal::v1::Payload},
 };
 
 /// 组装 TCP 网关与内部 RPC；所有权按配置选择，公会请求锁默认使用 Memory。
@@ -35,9 +35,9 @@ pub fn application_with_locks(
     locks: Arc<dyn tok::core::lock::Backend>,
 ) -> Result<Application, Error> {
     let mut app = Application::new(config.clone())?;
-    let ownership: Arc<dyn tok::player::ownership::Store> = match config.ownership {
+    let ownership: Arc<dyn tok::session::ownership::Store> = match config.ownership {
         tok::OwnershipBackend::Memory => Arc::new(tok::infra::ownership::MemoryOwnership::new(
-            config.player_gateway.max_sessions,
+            config.logic_gateway.max_sessions,
         )?),
         tok::OwnershipBackend::Redis => {
             Arc::new(tok::infra::ownership::redis::RedisOwnership::new(
@@ -48,15 +48,15 @@ pub fn application_with_locks(
         }
     };
     let gateway_rpc =
-        tok::gateway::rpc::GatewayRpcService::new(config.player_gateway.max_handoff_bytes)?;
-    let tokens: Arc<dyn tok::player::credentials::ResumeTokenCodec> =
+        tok::gateway::rpc::GatewayRpcService::new(config.logic_gateway.max_handoff_bytes)?;
+    let tokens: Arc<dyn tok::session::credentials::ResumeTokenCodec> =
         Arc::new(match config.resume_token.clone() {
-            Some(keys) => tok::gateway::player::resume_token::SignedResumeTokens::new(keys)?,
-            None => tok::gateway::player::resume_token::SignedResumeTokens::ephemeral()?,
+            Some(keys) => tok::gateway::logic::resume_token::SignedResumeTokens::new(keys)?,
+            None => tok::gateway::logic::resume_token::SignedResumeTokens::ephemeral()?,
         });
-    if config.player_gateway.handoff_enabled
+    if config.logic_gateway.handoff_enabled
         && !config.services.iter().any(|service| {
-            service.service_name == config.player_gateway.gateway_rpc_service_name
+            service.service_name == config.logic_gateway.gateway_rpc_service_name
                 && service.factory_name() == "gateway-rpc"
                 && config.endpoints.iter().any(|endpoint| {
                     service.endpoint.as_deref() == Some(endpoint.name.as_str())
@@ -113,7 +113,7 @@ pub fn application_with_locks(
             }
         }
     }
-    let mut ingress = gateway::PlayerIngressFactory::new(config.player_gateway.clone(), ownership)
+    let mut ingress = gateway::PlayerIngressFactory::new(config.logic_gateway.clone(), ownership)
         .with_resume_token_codec(tokens)
         .with_gateway_rpc(gateway_rpc.clone());
     if let Some(events) = config.events.clone() {
@@ -137,7 +137,7 @@ pub fn application_with_locks(
     {
         app.bind_rpc(&service.service_name, gateway_rpc.clone().into_rpc())?;
     }
-    let capacity = config.player_gateway.max_sessions;
+    let capacity = config.logic_gateway.max_sessions;
     app.register_rpc_factory(
         "player",
         move |init: Init| -> InitFuture {
@@ -151,7 +151,7 @@ pub fn application_with_locks(
                     Arc::clone(&endpoints.directory),
                 )?;
                 init.extensions
-                    .get::<tok::player::rpc::Binding>()
+                    .get::<tok::session::logic::rpc::Binding>()
                     .ok_or_else(|| std::io::Error::other("服务缺少 RPC 绑定"))?
                     .install(&init, Arc::new(handlers))?;
                 Ok(Box::pin(async move {
@@ -160,7 +160,7 @@ pub fn application_with_locks(
                 }) as Task)
             })
         },
-        RpcService::into_player,
+        RpcService::into_logic,
     )?;
     app.register_rpc_factory(
         "guild",
@@ -188,7 +188,7 @@ pub async fn rpc_smoke(directory: &dyn ServiceDirectory) -> Result<(), Error> {
     let player = tok::infra::routing::route(directory, "player", "42")?;
     let guild = tok::infra::routing::route(directory, "guild", "7")?;
     let clients = Arc::new(Client::new(Duration::from_secs(2), 8)?);
-    let player_client = tok::player::rpc::Client::new(Arc::clone(&clients));
+    let player_client = tok::session::logic::rpc::Client::new(Arc::clone(&clients));
     let business_client = tok::message::rpc::business::Client::new(clients);
     let response = player_client
         .call(
@@ -202,7 +202,7 @@ pub async fn rpc_smoke(directory: &dyn ServiceDirectory) -> Result<(), Error> {
                         bid: Some("42".into()),
                         request_id: 1,
                         session: Some(SessionIdentity {
-                            player_id: "42".into(),
+                            subject_id: "42".into(),
                             session_id: "rpc-smoke".into(),
                             epoch: 1,
                         }),

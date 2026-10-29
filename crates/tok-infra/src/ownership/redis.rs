@@ -5,8 +5,8 @@ use serde::Deserialize;
 use std::{future::Future, time::Duration};
 use tok_core::BoxFuture;
 use tok_core::Identity as SessionOwner;
-use tok_player::ownership::{Error, Result};
-use tok_player::{
+use tok_session::ownership::{Error, Result};
+use tok_session::{
     SessionIdentity,
     ownership::{Record as SessionOwnership, Store as OwnershipStore},
 };
@@ -120,19 +120,19 @@ impl RedisOwnership {
     }
     fn acquire_checked(
         &self,
-        player_id: String,
+        subject_id: String,
         session_id: String,
         owner: SessionOwner,
         expected_epoch: Option<u64>,
         expected_session_id: Option<String>,
         ttl: Duration,
-    ) -> BoxFuture<'_, tok_player::ownership::Result<SessionOwnership>> {
+    ) -> BoxFuture<'_, tok_session::ownership::Result<SessionOwnership>> {
         Box::pin(async move {
             identity(&session_id, 1024)?;
             identity(&owner.node_id, 256)?;
             identity(&owner.service_name, 256)?;
             let milliseconds = ttl_millis(ttl)?;
-            let (lease, epoch_key, latest_session_key) = self.keys(&player_id)?;
+            let (lease, epoch_key, latest_session_key) = self.keys(&subject_id)?;
             self.timely(
                 Duration::from_millis(milliseconds),
                 self.operation(|mut connection| async move {
@@ -158,7 +158,7 @@ impl RedisOwnership {
                     }
                     Ok(SessionOwnership {
                         identity: SessionIdentity {
-                            player_id,
+                            subject_id,
                             session_id,
                             epoch: epoch.parse().map_err(|_| unavailable())?,
                         },
@@ -170,9 +170,9 @@ impl RedisOwnership {
         })
     }
 
-    fn keys(&self, player_id: &str) -> Result<(String, String, String)> {
-        identity(player_id, 256)?;
-        let encoded: String = player_id.bytes().map(|b| format!("{b:02x}")).collect();
+    fn keys(&self, subject_id: &str) -> Result<(String, String, String)> {
+        identity(subject_id, 256)?;
+        let encoded: String = subject_id.bytes().map(|b| format!("{b:02x}")).collect();
         let prefix = format!("tok:ownership:{{{}:{encoded}}}", self.config.namespace);
         Ok((
             format!("{prefix}:lease"),
@@ -228,7 +228,7 @@ fn ttl_millis(ttl: Duration) -> Result<u64> {
     Ok(ttl.as_millis() as u64)
 }
 fn validate(ownership: &SessionOwnership) -> Result<()> {
-    identity(&ownership.identity.player_id, 256)?;
+    identity(&ownership.identity.subject_id, 256)?;
     identity(&ownership.identity.session_id, 1024)?;
     identity(&ownership.owner.node_id, 256)?;
     identity(&ownership.owner.service_name, 256)?;
@@ -244,13 +244,13 @@ impl OwnershipStore for RedisOwnership {
         expected: SessionOwnership,
         target: SessionOwner,
         ttl: Duration,
-    ) -> BoxFuture<'_, tok_player::ownership::Result<SessionOwnership>> {
+    ) -> BoxFuture<'_, tok_session::ownership::Result<SessionOwnership>> {
         Box::pin(async move {
             validate(&expected)?;
             identity(&target.node_id, 256)?;
             identity(&target.service_name, 256)?;
             let milliseconds = ttl_millis(ttl)?;
-            let (lease, epoch_key, _) = self.keys(&expected.identity.player_id)?;
+            let (lease, epoch_key, _) = self.keys(&expected.identity.subject_id)?;
             self.timely(
                 ttl,
                 self.operation(|mut connection| async move {
@@ -284,11 +284,11 @@ impl OwnershipStore for RedisOwnership {
     }
     fn lookup(
         &self,
-        player_id: &str,
-    ) -> BoxFuture<'_, tok_player::ownership::Result<Option<SessionOwnership>>> {
-        let player_id = player_id.to_owned();
+        subject_id: &str,
+    ) -> BoxFuture<'_, tok_session::ownership::Result<Option<SessionOwnership>>> {
+        let subject_id = subject_id.to_owned();
         Box::pin(async move {
-            let (lease, _, _) = self.keys(&player_id)?;
+            let (lease, _, _) = self.keys(&subject_id)?;
             self.operation(|mut connection| async move {
                 let (values, ttl): (Vec<Option<String>>, i64) = redis::pipe()
                     .cmd("HMGET")
@@ -314,7 +314,7 @@ impl OwnershipStore for RedisOwnership {
                     .map_err(|_| unavailable())?;
                 let ownership = SessionOwnership {
                     identity: SessionIdentity {
-                        player_id,
+                        subject_id,
                         epoch,
                         session_id: values.next().flatten().ok_or_else(unavailable)?,
                     },
@@ -331,24 +331,24 @@ impl OwnershipStore for RedisOwnership {
     }
     fn acquire(
         &self,
-        player_id: String,
+        subject_id: String,
         session_id: String,
         owner: SessionOwner,
         expected_epoch: Option<u64>,
         ttl: Duration,
-    ) -> BoxFuture<'_, tok_player::ownership::Result<SessionOwnership>> {
-        self.acquire_checked(player_id, session_id, owner, expected_epoch, None, ttl)
+    ) -> BoxFuture<'_, tok_session::ownership::Result<SessionOwnership>> {
+        self.acquire_checked(subject_id, session_id, owner, expected_epoch, None, ttl)
     }
     fn acquire_for_relogin(
         &self,
-        previous: tok_player::credentials::ResumeClaims,
+        previous: tok_session::credentials::ResumeClaims,
         session_id: String,
         owner: SessionOwner,
         expected_epoch: Option<u64>,
         ttl: Duration,
-    ) -> BoxFuture<'_, tok_player::ownership::Result<SessionOwnership>> {
+    ) -> BoxFuture<'_, tok_session::ownership::Result<SessionOwnership>> {
         self.acquire_checked(
-            previous.player_id,
+            previous.subject_id,
             session_id,
             owner,
             expected_epoch,
@@ -360,11 +360,11 @@ impl OwnershipStore for RedisOwnership {
         &self,
         ownership: SessionOwnership,
         ttl: Duration,
-    ) -> BoxFuture<'_, tok_player::ownership::Result<()>> {
+    ) -> BoxFuture<'_, tok_session::ownership::Result<()>> {
         Box::pin(async move {
             validate(&ownership)?;
             let milliseconds = ttl_millis(ttl)?;
-            let (lease, _, _) = self.keys(&ownership.identity.player_id)?;
+            let (lease, _, _) = self.keys(&ownership.identity.subject_id)?;
             self.timely(
                 Duration::from_millis(milliseconds),
                 self.operation(|mut connection| async move {
@@ -391,10 +391,10 @@ impl OwnershipStore for RedisOwnership {
     fn release(
         &self,
         ownership: SessionOwnership,
-    ) -> BoxFuture<'_, tok_player::ownership::Result<bool>> {
+    ) -> BoxFuture<'_, tok_session::ownership::Result<bool>> {
         Box::pin(async move {
             validate(&ownership)?;
-            let (lease, _, _) = self.keys(&ownership.identity.player_id)?;
+            let (lease, _, _) = self.keys(&ownership.identity.subject_id)?;
             self.operation(|mut connection| async move {
                 let removed: i64 = Script::new(RELEASE)
                     .key(lease)

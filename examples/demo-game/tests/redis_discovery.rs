@@ -18,7 +18,7 @@ use tok::{
         discovery::redis::{RedisDirectory, RedisDiscoveryConfig},
         ownership::redis::{RedisOwnership, RedisOwnershipConfig},
     },
-    player::ownership::Store as OwnershipStore,
+    session::ownership::Store as OwnershipStore,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -75,7 +75,7 @@ fn config(path: &Path, namespace: &str, url: &str, node: &str, port: u16, gatewa
         }
     }
     if gateway {
-        source.push_str(&format!("[redis_ownership]\nurl='{url}'\nnamespace='{namespace}'\noperation_timeout_ms=300\n[player_gateway]\nrpc_timeout_ms=500\nownership_ttl_ms=1800\nrenew_interval_ms=200\ndisconnect_grace_ms=250\n"));
+        source.push_str(&format!("[redis_ownership]\nurl='{url}'\nnamespace='{namespace}'\noperation_timeout_ms=300\n[logic_gateway]\nrpc_timeout_ms=500\nownership_ttl_ms=1800\nrenew_interval_ms=200\ndisconnect_grace_ms=250\n"));
     }
     std::fs::write(path, source).unwrap();
 }
@@ -245,8 +245,8 @@ async fn three_process_handoff_preserves_replay_and_crash_falls_back_to_fast_log
         let mut source = std::fs::read_to_string(file)
             .unwrap()
             .replace(
-                "[player_gateway]\n",
-                "[player_gateway]\nhandoff_enabled=true\nhandoff_timeout_ms=5000\n",
+                "[logic_gateway]\n",
+                "[logic_gateway]\nhandoff_enabled=true\nhandoff_timeout_ms=5000\n",
             )
             .replace("disconnect_grace_ms=250", "disconnect_grace_ms=2000");
         source.push_str(&format!("\n[resume_token]\nsecret_key='1111111111111111111111111111111111111111111111111111111111111111'\n[[endpoints]]\nname='internal'\nprotocol='grpc'\naddress='127.0.0.1:{}'\n[[services]]\nservice_name='gateway-rpc'\nendpoint='internal'\n", port()));

@@ -338,7 +338,7 @@ mod tests {
                 span: Some("request".into()),
                 target: Some("game::player".into()),
                 fields: BTreeMap::from([
-                    ("player_id".into(), serde_json::json!(123)),
+                    ("subject_id".into(), serde_json::json!(123)),
                     ("business".into(), serde_json::json!("login")),
                 ]),
             }],
@@ -347,7 +347,7 @@ mod tests {
         let attributes = [
             KeyValue::new("target", "game::player"),
             KeyValue::new("level", "DEBUG"),
-            KeyValue::new("player_id", "123"),
+            KeyValue::new("subject_id", "123"),
             KeyValue::new("business", "login"),
         ];
         assert_eq!(
@@ -430,7 +430,7 @@ mod tests {
         assert!(
             control
                 .set_force_rules(vec![ForceTraceRule {
-                    fields: BTreeMap::from([("player_id".into(), serde_json::Value::Null)]),
+                    fields: BTreeMap::from([("subject_id".into(), serde_json::Value::Null)]),
                     ..ForceTraceRule::default()
                 }])
                 .is_err()

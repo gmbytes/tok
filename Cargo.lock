@@ -1990,7 +1990,7 @@ dependencies = [
  "tok-lifecycle",
  "tok-message",
  "tok-observability",
- "tok-player",
+ "tok-session",
  "tokio",
  "tokio-util",
  "toml",
@@ -2061,7 +2061,7 @@ dependencies = [
  "tok-infra",
  "tok-lifecycle",
  "tok-message",
- "tok-player",
+ "tok-session",
  "tokio",
  "tokio-util",
  "tower",
@@ -2097,7 +2097,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tok-core",
- "tok-player",
+ "tok-session",
  "tokio",
  "tokio-util",
  "uuid",
@@ -2129,8 +2129,8 @@ dependencies = [
  "tok-grpc",
  "tok-infra",
  "tok-lifecycle",
- "tok-player",
  "tok-proto",
+ "tok-session",
  "tokio",
  "tokio-stream",
  "tokio-util",
@@ -2164,7 +2164,19 @@ dependencies = [
 ]
 
 [[package]]
-name = "tok-player"
+name = "tok-proto"
+version = "0.1.0"
+dependencies = [
+ "prost",
+ "prost-build",
+ "protoc-bin-vendored",
+ "tonic",
+ "tonic-prost",
+ "tonic-prost-build",
+]
+
+[[package]]
+name = "tok-session"
 version = "0.1.0"
 dependencies = [
  "prost",
@@ -2181,18 +2193,6 @@ dependencies = [
  "tonic",
  "tower",
  "tracing",
-]
-
-[[package]]
-name = "tok-proto"
-version = "0.1.0"
-dependencies = [
- "prost",
- "prost-build",
- "protoc-bin-vendored",
- "tonic",
- "tonic-prost",
- "tonic-prost-build",
 ]
 
 [[package]]

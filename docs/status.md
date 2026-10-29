@@ -4,7 +4,7 @@
 
 ## crate 与基础契约
 
-玩家运行契约与玩家 RPC 位于 [tok-player](../crates/tok-player/src/lib.rs)，普通业务 RPC 位于 tok-message，各自使用独立的 CallContext。Context / StopReason 归 tok-execution，Extensions 独立为 tok_core::Extensions。core 删除 tokio-util 与 tracing 依赖，当前只依赖 serde / thiserror。
+逻辑会话契约与 logic RPC 位于 [tok-session](../crates/tok-session/src/lib.rs)，普通业务 RPC 位于 tok-message，各自使用独立的 CallContext。Context / StopReason 归 tok-execution，Extensions 独立为 tok_core::Extensions。core 删除 tokio-util 与 tracing 依赖，当前只依赖 serde / thiserror。
 
 | core 范围 | 当前职责与接口 |
 | --- | --- |
@@ -36,7 +36,7 @@ AGENTS.md 已记录有官方依据的 API 组织规则：功能命名空间公�
 | 无端点服务 | ServiceConfig.endpoint 可省略，纯事件/后台服务使用同一生命周期 | 不发布网络地址，不注入 application::Binding；需要发现查询时由组装层注入 |
 | 执行与中间件 | [execution::Context](../crates/tok-execution/src/context.rs)、[Request / Tower Layer](../crates/tok-execution/src/lib.rs) 用于 RPC、事件、timer 与网关消息链 | 保留具体协议、输入/结果类型、可信入口校验和调度边界，无通用路由器/熔断器 |
 | 服务生命周期 | Factory / Init 初始化，Builder → Prepared → Running 消费式编排；task::Supervisor 驱动有界工作 | 主任务、后台故障及退出期限由所有者监督，不创建隐藏的任务运行时 |
-| RPC | [tok-grpc](../crates/tok-grpc/src/lib.rs) 提供连接、端点和通用执行；[tok-message](../crates/tok-message/src/lib.rs) 提供普通业务 RPC 与可选请求锁；[tok-player](../crates/tok-player/src/lib.rs) 提供玩家 RPC、事件与 timer 适配 | RPC 工厂初始化必须安装处理链，未安装不发布；同一端点不能覆盖同名 protobuf 服务 |
+| RPC | [tok-grpc](../crates/tok-grpc/src/lib.rs) 提供连接、端点和通用执行；[tok-message](../crates/tok-message/src/lib.rs) 提供普通业务 RPC 与可选请求锁；[tok-session](../crates/tok-session/src/lib.rs) 提供 logic RPC、事件与 timer 适配 | RPC 工厂初始化必须安装处理链，未安装不发布；同一端点不能覆盖同名 protobuf 服务 |
 | 事件 | [Registry](../crates/tok-events/src/registry.rs) 本地借用及远程解码共用处理表，有序多处理者、原始错误及 Arc 保留 | 本地 dispatch 显式等待；远程发布不等待业务结果，不提供事务或隐式去重 |
 | topic / group | Event::topic 默认全局，可固定或由正文字段派生；[Pool](../crates/tok-events/src/interest.rs) 按组件/主题聚合固定与会话引用 | group 属于订阅组件；无组独立接收，同组分担不等于玩家归属路由 |
 | NATS | [Bus](../crates/tok-events/src/nats.rs) 按 namespace、topic、类型安全路由，有限 SID、建立操作、缓冲与处理预算 | Core NATS 即时事件；发布只表示接受，订阅建立有限回环就绪；没有 JetStream |
@@ -220,10 +220,10 @@ Listener::from_server 已支持带 Tower Layer 的 Tonic Server。内部改为 R
 | 优先顺序 | 修复前代码与事实 | 契约差异及调整方向 |
 | --- | --- | --- |
 | 1 | [gRPC 客户端输入](../crates/tok-grpc/src/client/call.rs)、[执行 Layer](../crates/tok-grpc/src/client/middleware.rs)、[PreparedCall](../crates/tok-grpc/src/client/call.rs) 和 [便捷入口](../crates/tok-grpc/src/client.rs)：Call 只带目标、序号、请求和 Span，Layer 根据 Client timeout / metadata 新建本地截止点，PreparedCall 没有 execution Context | 在本地出站处理链承接 Request<T> / Context，保留适用扩展和取消，并以已有截止点和客户端配置共同限制预算。保留目标独立于 Context.service；根调用须显式建立范围，便捷入口不能要求调用方拆散后再拼接上游 Context。现有外层 execution Layer 可约束本地结果，但不能让被丢弃的扩展重新可见，也不能保证远端取得上游剩余预算 |
-| 2 | [游戏 RPC 编码](../crates/tok-message/src/rpc/call.rs)、[普通业务客户端](../crates/tok-message/src/rpc/business.rs)、[玩家客户端](../crates/tok-player/src/rpc/client.rs)：只接收协议 CallContext / payload，自建发送 Span；[RpcExecutor](../crates/tok-gateway/src/player/executor.rs) 取 request.input 后不传 request.context | 游戏客户端承接执行请求，在编码正文时保留本地 Context，并交给通用 gRPC 出站适配。CallContext 继续表达远端目标、玩家与协议关联，不代替执行 Context。请求、事件、timer 三条 RpcExecutor 路径均需迁移，避免只修普通 call |
-| 3 | [玩家准入链](../crates/tok-gateway/src/player/pipeline.rs) 的 admission 输出仅 LogicalMessage；[BoundSession::submit](../crates/tok-gateway/src/player/session/handle.rs) 准入后只将正文入队；[RequestJob / worker](../crates/tok-gateway/src/player/session/worker.rs) 出队后重建执行 Context | 准入中写入的自定义扩展无法进入请求执行链；队列没有携带截止点，执行预算从出队后重新开始。需要保留执行承载并明确准入与已接受工作的范围边界；保留断线后在途业务收束的既有语义，不能直接将连接取消令牌替换为所有阶段共同取消令牌。即使声明准入与执行为独立范围，也须明确扩展转移及预算起点，不能静默丢弃 |
-| 4 | [事件转发/通知组件](../crates/tok-gateway/src/player/events.rs) 调 deliver 时只传 Delivery；[SessionManager::deliver](../crates/tok-gateway/src/player/session/events.rs) 不接收 Context；EventJob 只保留事件与当前 Span；[下行入口](../crates/tok-gateway/src/player/session/handle.rs) 每次新建 Context | 事件中间件写入的本地扩展与消费期限无法接续到投递/下行；异步玩家事件执行只继承部分追踪。应将投递与下行适配接入共同执行承载，区分当前订阅者等待的准入范围与成功入队后的独立 session 工作。跨 session fan-out 由目标安装自身能力并显式筛选源元信息，不复制源 SessionHandle；补发仍不重复执行新下行中间件 |
-| 5 | [GatewayRpcService](../crates/tok-gateway/src/rpc.rs) 四个交接方法直接 into_inner，再调用 SessionManager；[交接协调](../crates/tok-gateway/src/player/session/handoff.rs) 直接使用生成的 GatewayRpcClient 与 timeout_at | 内部交接服务未通过 Server::context / 共同执行链，接收端丢弃 metadata，出站与接收入口缺少一致的本地能力、追踪和预算适配。现有 budget_ms、handoff deadline、租约和补偿状态机必须保留；接入 Context 后合并限制，不能将已有取消/完成补偿简单绑定到已失效的原调用 |
+| 2 | [游戏 RPC 编码](../crates/tok-message/src/rpc/call.rs)、[普通业务客户端](../crates/tok-message/src/rpc/business.rs)、[玩家客户端](../crates/tok-session/src/logic/rpc/client.rs)：只接收协议 CallContext / payload，自建发送 Span；[RpcExecutor](../crates/tok-gateway/src/logic/executor.rs) 取 request.input 后不传 request.context | 游戏客户端承接执行请求，在编码正文时保留本地 Context，并交给通用 gRPC 出站适配。CallContext 继续表达远端目标、玩家与协议关联，不代替执行 Context。请求、事件、timer 三条 RpcExecutor 路径均需迁移，避免只修普通 call |
+| 3 | [玩家准入链](../crates/tok-gateway/src/logic/pipeline.rs) 的 admission 输出仅 LogicalMessage；[BoundSession::submit](../crates/tok-gateway/src/logic/session/handle.rs) 准入后只将正文入队；[RequestJob / worker](../crates/tok-gateway/src/logic/session/worker.rs) 出队后重建执行 Context | 准入中写入的自定义扩展无法进入请求执行链；队列没有携带截止点，执行预算从出队后重新开始。需要保留执行承载并明确准入与已接受工作的范围边界；保留断线后在途业务收束的既有语义，不能直接将连接取消令牌替换为所有阶段共同取消令牌。即使声明准入与执行为独立范围，也须明确扩展转移及预算起点，不能静默丢弃 |
+| 4 | [事件转发/通知组件](../crates/tok-gateway/src/logic/events.rs) 调 deliver 时只传 Delivery；[SessionManager::deliver](../crates/tok-gateway/src/logic/session/events.rs) 不接收 Context；EventJob 只保留事件与当前 Span；[下行入口](../crates/tok-gateway/src/logic/session/handle.rs) 每次新建 Context | 事件中间件写入的本地扩展与消费期限无法接续到投递/下行；异步玩家事件执行只继承部分追踪。应将投递与下行适配接入共同执行承载，区分当前订阅者等待的准入范围与成功入队后的独立 session 工作。跨 session fan-out 由目标安装自身能力并显式筛选源元信息，不复制源 SessionHandle；补发仍不重复执行新下行中间件 |
+| 5 | [GatewayRpcService](../crates/tok-gateway/src/rpc.rs) 四个交接方法直接 into_inner，再调用 SessionManager；[交接协调](../crates/tok-gateway/src/logic/session/handoff.rs) 直接使用生成的 GatewayRpcClient 与 timeout_at | 内部交接服务未通过 Server::context / 共同执行链，接收端丢弃 metadata，出站与接收入口缺少一致的本地能力、追踪和预算适配。现有 budget_ms、handoff deadline、租约和补偿状态机必须保留；接入 Context 后合并限制，不能将已有取消/完成补偿简单绑定到已失效的原调用 |
 | 6 | [NATS 发布](../crates/tok-events/src/nats.rs) publish / publish_event 接收 Message / Envelope，调用方通过正文追踪载体传递信息，没有接收执行 Context 的框架发布适配 | 原生传输出口可保留；需要为当前处理链内的发布提供显式、保持 Context 的适配，约束本地发布等待和追踪提取。不能因此将 Extensions 序列化，或让独立订阅消费继承发布者的短期调用期限；Core NATS 发布成功仍不是 broker / 订阅者确认 |
 
 ### 已符合或不应机械迁移的部分
@@ -427,5 +427,13 @@ TLS 导出器初始化与关闭；保留真实 HTTP Collector 导出回归。
 tok-player 新增公共消息、gRPC、事件和生命周期设施的依赖，使用其所有权或凭证契约的下游也会承受相应依赖成本；目前没有以 feature 拆分。tok-player 尚未获得最终审查确认。
 
 本轮 Windows 验证：workspace 测试（包括 21 项指南示例）、全目标 Clippy、无警告 rustdoc、格式与 LF 检查通过；共享端点上的 player / guild RPC smoke 和普通业务协议边界测试通过。未运行真实 Redis / NATS、Linux 或 release 构建。
+
+### logic / scene 术语与逻辑会话命名（2026-10-29）
+
+原 tok-player 更名为 tok-session；原 gateway::player 更名为 gateway::logic，逻辑 RPC 路径为 session::logic::rpc，内部 protobuf 服务改名为 LogicRpc。框架会话、认证、恢复凭证及客户端和内部协议中的主体标识使用 subject_id；具体游戏协议仍可定义 player_id。普通公共服务保持独立。scene 接入仍未实现；未来的场景 session 与通道依其实际语义设计，不预设复用 logic 的调度与所有权。公共服务 reminder 亦留待后续设计。
+
+本次为未发布协议的破坏性命名变更：旧 Rust 路径、配置键和 gRPC 服务名不提供兼容。protobuf 字段编号及令牌载荷的二进制编码不变；相同密钥、有效期和所有权条件下，旧签名令牌仍可验证，旧 gRPC 服务名则不可继续使用。迁移后的 tok-session 尚待用户最终审查确认。
+
+Windows 验证：workspace 测试（含 21 项指南示例）、全目标 Clippy、无警告 rustdoc、格式和 LF 检查，以及 RPC、事件 smoke 通过；示例业务字段恢复后补跑示例测试。真实 Redis / NATS、Linux 与 release 构建未运行。
 
 本次阶段验证：Windows 全工作区串行测试 345 项通过、32 项外部专项默认跳过；全目标 Clippy、无警告 workspace rustdoc、格式及空白检查通过。未运行真实 Redis/NATS、Linux 或 release 构建。

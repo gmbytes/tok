@@ -14,14 +14,14 @@ use tok_core::Identity as SessionOwner;
 use tok_gateway::{
     ErrorCode, Gateway,
     codec::{FrameCodec, VERSION},
-    player::{
+    logic::{
         AuthenticatedIdentity, AuthenticationTask, Authenticator, Config, Executor, SessionManager,
         Task,
     },
     protocol::{self, Frame, frame::Content},
 };
 use tok_infra::ownership::MemoryOwnership;
-use tok_player::{
+use tok_session::{
     LogicalMessage, MessageKind,
     ownership::{Record as SessionOwnership, Store as OwnershipStore},
 };
@@ -46,7 +46,7 @@ impl Authenticator for Auth {
                 .filter(|id| *id > 0)
                 .ok_or(ErrorCode::AuthenticationFailed)?;
             Ok(AuthenticatedIdentity {
-                player_id: id.to_string(),
+                subject_id: id.to_string(),
             })
         })
     }
@@ -72,10 +72,10 @@ struct TestExecutor(Arc<Tracker>);
 impl Executor for TestExecutor {
     fn execute_event(
         &self,
-        input: tok_execution::Request<tok_gateway::player::EventInput>,
-    ) -> tok_gateway::player::EventTask<'_> {
+        input: tok_execution::Request<tok_gateway::logic::EventInput>,
+    ) -> tok_gateway::logic::EventTask<'_> {
         let context = input.context;
-        let tok_gateway::player::EventInput {
+        let tok_gateway::logic::EventInput {
             identity,
             request_id,
             event,
@@ -85,7 +85,7 @@ impl Executor for TestExecutor {
             let reply = self
                 .execute_request(tok_execution::Request::new(
                     context,
-                    tok_gateway::player::RequestInput {
+                    tok_gateway::logic::RequestInput {
                         identity,
                         message: LogicalMessage {
                             kind: MessageKind::Request,
@@ -104,9 +104,9 @@ impl Executor for TestExecutor {
 
     fn execute_request(
         &self,
-        input: tok_execution::Request<tok_gateway::player::RequestInput>,
+        input: tok_execution::Request<tok_gateway::logic::RequestInput>,
     ) -> Task<'_> {
-        let tok_gateway::player::RequestInput {
+        let tok_gateway::logic::RequestInput {
             identity,
             message: request,
         } = input.input;
@@ -123,12 +123,12 @@ impl Executor for TestExecutor {
             self.0.peak_total.fetch_max(total, Ordering::SeqCst);
             {
                 let mut players = self.0.players.lock().unwrap();
-                let counts = players.entry(identity.player_id.clone()).or_default();
+                let counts = players.entry(identity.subject_id.clone()).or_default();
                 counts.0 += 1;
                 counts.1 = counts.1.max(counts.0);
             }
-            let _inflight = Inflight(Arc::clone(&self.0), identity.player_id.clone());
-            self.0.started.send(identity.player_id.clone()).unwrap();
+            let _inflight = Inflight(Arc::clone(&self.0), identity.subject_id.clone());
+            self.0.started.send(identity.subject_id.clone()).unwrap();
             if request.body == b"block" {
                 self.0.permits.acquire().await.unwrap().forget();
             }
@@ -142,7 +142,7 @@ impl Executor for TestExecutor {
                     body: if request.message_id == 3 {
                         vec![7; 1024]
                     } else {
-                        identity.player_id.into_bytes()
+                        identity.subject_id.into_bytes()
                     },
                 }
                 .into(),
@@ -202,7 +202,7 @@ impl Fixture {
         let mut interests = None;
         let gateway = Gateway::new(tok_core_identity(), limits, |context| {
             let tasks = context.tasks();
-            let ingress = tok_gateway::player::Ingress::new(
+            let ingress = tok_gateway::logic::Ingress::new(
                 context,
                 config,
                 SessionOwner {
@@ -318,7 +318,7 @@ impl OwnershipStore for DelayedRenew {
     fn lookup(
         &self,
         player: &str,
-    ) -> BoxFuture<'_, tok_player::ownership::Result<Option<SessionOwnership>>> {
+    ) -> BoxFuture<'_, tok_session::ownership::Result<Option<SessionOwnership>>> {
         self.memory.lookup(player)
     }
     fn acquire(
@@ -328,14 +328,14 @@ impl OwnershipStore for DelayedRenew {
         owner: SessionOwner,
         expected: Option<u64>,
         ttl: Duration,
-    ) -> BoxFuture<'_, tok_player::ownership::Result<SessionOwnership>> {
+    ) -> BoxFuture<'_, tok_session::ownership::Result<SessionOwnership>> {
         self.memory.acquire(player, session, owner, expected, ttl)
     }
     fn renew(
         &self,
         record: SessionOwnership,
         ttl: Duration,
-    ) -> BoxFuture<'_, tok_player::ownership::Result<()>> {
+    ) -> BoxFuture<'_, tok_session::ownership::Result<()>> {
         Box::pin(async move {
             self.memory.renew(record, ttl).await?;
             self.renewals.fetch_add(1, Ordering::SeqCst);
@@ -349,7 +349,7 @@ impl OwnershipStore for DelayedRenew {
     fn release(
         &self,
         record: SessionOwnership,
-    ) -> BoxFuture<'_, tok_player::ownership::Result<bool>> {
+    ) -> BoxFuture<'_, tok_session::ownership::Result<bool>> {
         self.memory.release(record)
     }
 }
@@ -1503,11 +1503,11 @@ enum TestKind {
     Forward,
 }
 fn event_message(
-    target: tok_gateway::player::events::Target,
+    target: tok_gateway::logic::events::Target,
     kind: TestKind,
     body: &[u8],
-) -> tok_gateway::player::events::Delivery {
-    use tok_gateway::player::events::{Action, Delivery};
+) -> tok_gateway::logic::events::Delivery {
+    use tok_gateway::logic::events::{Action, Delivery};
     Delivery {
         target,
         action: match kind {
@@ -1546,8 +1546,8 @@ impl tok_events::Event for GameEvent {
         )
     }
 }
-fn publication(delivery: tok_gateway::player::events::Delivery) -> tok_events::Message {
-    use tok_gateway::player::events::{Action, Target};
+fn publication(delivery: tok_gateway::logic::events::Delivery) -> tok_events::Message {
+    use tok_gateway::logic::events::{Action, Target};
     let (notify, body) = match delivery.action {
         Action::Notify { body, .. } => (true, body),
         Action::Forward(event) => (false, event.body.clone()),
@@ -1560,7 +1560,7 @@ fn publication(delivery: tok_gateway::player::events::Delivery) -> tok_events::M
     };
     match delivery.target {
         Target::All => {}
-        Target::Players(players) => game.players = players,
+        Target::Subjects(players) => game.players = players,
         Target::Topic(topic) => game.topic = Some(topic),
     }
     tok_events::Message::new(
@@ -1575,13 +1575,13 @@ fn game_subscriber(sessions: SessionManager) -> tok_events::Registry {
             let event = &request.input.event.payload;
             let sessions = sessions.clone();
             Box::pin(async move {
-                use tok_gateway::player::events::Target;
+                use tok_gateway::logic::events::Target;
                 let target = if let Some(topic) = event.topic.clone() {
                     Target::Topic(topic)
                 } else if event.players.is_empty() {
                     Target::All
                 } else {
-                    Target::Players(event.players.clone())
+                    Target::Subjects(event.players.clone())
                 };
                 let kind = if event.notify {
                     TestKind::Broadcast
@@ -1609,7 +1609,7 @@ async fn client_cannot_submit_server_events_or_send_notify_frames() {
     let mut client = fixture.connect().await;
     assert_eq!(client.login(1, "1").await.error_code, 0);
     let event = publication(event_message(
-        tok_gateway::player::events::Target::All,
+        tok_gateway::logic::events::Target::All,
         TestKind::Forward,
         b"forged",
     ));
@@ -1645,7 +1645,7 @@ async fn events_share_request_fifo_have_independent_sequence_and_respect_queue_c
     client.request(2, 1, b"block").await;
     fixture.started.recv().await.unwrap();
     let message = event_message(
-        tok_gateway::player::events::Target::Players(vec!["1".into(), "1".into()]),
+        tok_gateway::logic::events::Target::Subjects(vec!["1".into(), "1".into()]),
         TestKind::Forward,
         b"event",
     );
@@ -1709,7 +1709,7 @@ async fn broadcast_filters_topics_and_offline_sessions_without_executing_player(
         ErrorCode::CapacityExceeded
     );
     let message = event_message(
-        tok_gateway::player::events::Target::Topic("guild:7".into()),
+        tok_gateway::logic::events::Target::Topic("guild:7".into()),
         TestKind::Broadcast,
         b"notice",
     );
@@ -1742,7 +1742,7 @@ async fn broadcast_filters_topics_and_offline_sessions_without_executing_player(
         0
     );
     let all = event_message(
-        tok_gateway::player::events::Target::All,
+        tok_gateway::logic::events::Target::All,
         TestKind::Broadcast,
         b"all",
     );
@@ -1778,7 +1778,7 @@ async fn broadcast_filters_topics_and_offline_sessions_without_executing_player(
             .deliver(tok_execution::Request::new(
                 delivery_context(),
                 event_message(
-                    tok_gateway::player::events::Target::Players(vec!["offline".into()]),
+                    tok_gateway::logic::events::Target::Subjects(vec!["offline".into()]),
                     TestKind::Forward,
                     b"skip"
                 )
@@ -1814,7 +1814,7 @@ async fn large_topic_delivery_yields_and_rechecks_membership_after_resuming() {
         clients.push(client);
     }
     let delivery = event_message(
-        tok_gateway::player::events::Target::Topic("large".into()),
+        tok_gateway::logic::events::Target::Topic("large".into()),
         TestKind::Broadcast,
         b"batch",
     );
@@ -1854,7 +1854,7 @@ async fn topic_index_survives_resume_and_cleans_up_replaced_and_closed_sessions(
     );
     assert!(matches!(resumed.read().await, Content::Recovered(_)));
     let delivery = event_message(
-        tok_gateway::player::events::Target::Topic("guild:7".into()),
+        tok_gateway::logic::events::Target::Topic("guild:7".into()),
         TestKind::Broadcast,
         b"notice",
     );
@@ -1953,7 +1953,7 @@ async fn nats_independent_gateways_route_all_players_topics_and_forward_to_their
         .await
         .unwrap();
     let all = event_message(
-        tok_gateway::player::events::Target::All,
+        tok_gateway::logic::events::Target::All,
         TestKind::Broadcast,
         b"all",
     );
@@ -1965,7 +1965,7 @@ async fn nats_independent_gateways_route_all_players_topics_and_forward_to_their
         matches!(two.read().await,Content::Notify(notify) if notify.body==b"all" && notify.server_seq==1)
     );
     let topic = event_message(
-        tok_gateway::player::events::Target::Topic("guild:7".into()),
+        tok_gateway::logic::events::Target::Topic("guild:7".into()),
         TestKind::Broadcast,
         b"topic",
     );
@@ -1974,7 +1974,7 @@ async fn nats_independent_gateways_route_all_players_topics_and_forward_to_their
         matches!(one.read().await,Content::Notify(notify) if notify.body==b"topic" && notify.server_seq==2)
     );
     let forward = event_message(
-        tok_gateway::player::events::Target::Players(vec!["1".into(), "2".into()]),
+        tok_gateway::logic::events::Target::Subjects(vec!["1".into(), "2".into()]),
         TestKind::Forward,
         b"forward",
     );
@@ -1999,7 +1999,7 @@ async fn nats_independent_gateways_route_all_players_topics_and_forward_to_their
 #[tokio::test]
 async fn built_in_event_handlers_and_custom_components_compose_independently() {
     use tok_events::{Handler, Outcome, Subscriber};
-    use tok_gateway::player::events::{Target, forward, notify};
+    use tok_gateway::logic::events::{Target, forward, notify};
     let fixture = Fixture::new(config()).await;
     let mut client = fixture.connect().await;
     assert_eq!(client.login(1, "1").await.error_code, 0);
@@ -2142,7 +2142,7 @@ async fn nats_independent_gateways_share_dynamic_topics_and_keep_fixed_interest_
         Topic,
         nats::{Bus, Config as NatsConfig},
     };
-    use tok_gateway::player::events::Target;
+    use tok_gateway::logic::events::Target;
     let config_nats = NatsConfig {
         namespace: format!("topics-{}", uuid::Uuid::new_v4()),
         max_message_bytes: 4096,

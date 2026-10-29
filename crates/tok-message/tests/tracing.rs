@@ -11,9 +11,9 @@ use std::{
 };
 use tok_core::ServiceDescriptor;
 use tok_grpc::{Client, Listener};
-use tok_player::rpc::CallContext;
-use tok_player::rpc::{CallTask, Handler, Service as RpcService};
 use tok_proto::internal::v1::{CallResponse, Payload};
+use tok_session::logic::rpc::CallContext;
+use tok_session::logic::rpc::{CallTask, Handler, Service as RpcService};
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
@@ -24,7 +24,7 @@ impl Handler for Capture {
     fn event(
         &self,
         request: tok_execution::Request<(CallContext, Arc<tok_events::Message>)>,
-    ) -> tok_player::rpc::EventTask<'_> {
+    ) -> tok_session::logic::rpc::EventTask<'_> {
         let context = request.input.0;
         Box::pin(async move {
             *self.0.lock().unwrap() = Some(
@@ -118,7 +118,7 @@ async fn trace_context_is_propagated_across_the_network_call() {
             "player",
             RpcService::new("local", "player", Arc::new(Capture(Arc::clone(&observed))))
                 .unwrap()
-                .into_player(),
+                .into_logic(),
         )
         .unwrap();
     endpoint.readiness().set("player", true);
@@ -216,8 +216,8 @@ async fn trace_context_is_propagated_across_the_network_call() {
         service_name: "player".into(),
         bid: Some("42".into()),
         request_id: 1,
-        session: Some(tok_player::SessionIdentity {
-            player_id: "42".into(),
+        session: Some(tok_session::SessionIdentity {
+            subject_id: "42".into(),
             session_id: "s".into(),
             epoch: 1,
         }),
@@ -225,7 +225,7 @@ async fn trace_context_is_propagated_across_the_network_call() {
     };
     use tracing::Instrument;
     let clients = Arc::new(Client::new(Duration::from_secs(2), 1).unwrap());
-    let player_client = tok_player::rpc::Client::new(Arc::clone(&clients));
+    let player_client = tok_session::logic::rpc::Client::new(Arc::clone(&clients));
     player_client
         .handle_event(
             &target,

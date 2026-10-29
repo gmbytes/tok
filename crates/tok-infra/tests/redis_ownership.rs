@@ -3,8 +3,8 @@
 use std::time::Duration;
 use tok_core::Identity as SessionOwner;
 use tok_infra::ownership::redis::{RedisOwnership, RedisOwnershipConfig};
-use tok_player::ownership::Error;
-use tok_player::ownership::{Record as SessionOwnership, Store as OwnershipStore};
+use tok_session::ownership::Error;
+use tok_session::ownership::{Record as SessionOwnership, Store as OwnershipStore};
 
 fn config() -> RedisOwnershipConfig {
     RedisOwnershipConfig {
@@ -63,7 +63,7 @@ fn keys(config: &RedisOwnershipConfig) -> [String; 3] {
 #[tokio::test]
 #[ignore = "需要真实 Redis；通过 just ownership-test 显式运行"]
 async fn relogin_atomically_rejects_superseded_credentials_after_lease_release() {
-    use tok_player::credentials::ResumeClaims;
+    use tok_session::credentials::ResumeClaims;
     let config = config();
     let store = RedisOwnership::new(config.clone()).unwrap();
     let ttl = Duration::from_secs(2);
@@ -71,7 +71,7 @@ async fn relogin_atomically_rejects_superseded_credentials_after_lease_release()
     let moved = store.transfer(first, owner("b"), ttl).await.unwrap();
     store.release(moved).await.unwrap();
     let claims = |session: &str| ResumeClaims {
-        player_id: "p".into(),
+        subject_id: "p".into(),
         session_id: session.into(),
     };
     let next = store
@@ -123,7 +123,7 @@ async fn acquire(
     node: &str,
     epoch: Option<u64>,
     ttl: Duration,
-) -> tok_player::ownership::Result<SessionOwnership> {
+) -> tok_session::ownership::Result<SessionOwnership> {
     store
         .acquire("p".into(), session.into(), owner(node), epoch, ttl)
         .await

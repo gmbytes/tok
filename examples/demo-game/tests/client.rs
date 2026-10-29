@@ -77,7 +77,7 @@ async fn client_to_rpc_reads_writes_queries_guild_and_maps_errors() {
     else {
         panic!("缺少登录回应");
     };
-    assert_eq!(login.player_id, "42");
+    assert_eq!(login.subject_id, "42");
     // 模拟发现快照失去 guild，player 的跨服务错误仍映射为业务请求回应。
     directory.unregister("local", "guild").unwrap();
     for (id, message, body, code) in [

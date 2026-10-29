@@ -13,7 +13,7 @@ lru = { version = "0.18.5", default-features = false }
 async-nats = { version = "0.50.0", default-features = false, features = ["ring", "nuid"] }
 futures-util = { version = "0.3", default-features = false, features = ["std", "async-await"] }
 tok-core = { path = "crates/tok-core", version = "0.1.0" }
-tok-player = { path = "crates/tok-player", version = "0.1.0" }
+tok-session = { path = "crates/tok-session", version = "0.1.0" }
 tok-execution = { path = "crates/tok-execution", version = "0.1.0" }
 tok-lifecycle = { path = "crates/tok-lifecycle", version = "0.1.0" }
 tok-proto = { path = "crates/tok-proto", version = "0.1.0" }

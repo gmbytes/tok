@@ -15,7 +15,7 @@ use tok::{
     core::ServiceDirectory,
     lifecycle::{self, Init, InitFuture, task::Task},
     message::rpc::Service as BusinessService,
-    player::rpc::{HandlerRegistry, Service as RpcService},
+    session::logic::rpc::{HandlerRegistry, Service as RpcService},
 };
 
 struct Factory {
@@ -96,7 +96,7 @@ fn endpoint() -> Listener {
             "player",
             RpcService::new("local", "player", Arc::new(HandlerRegistry::new()))
                 .unwrap()
-                .into_player(),
+                .into_logic(),
         )
         .unwrap()
         .add_service(
@@ -238,7 +238,7 @@ async fn configuration_requires_complete_and_unique_endpoint_bindings() {
             "player",
             RpcService::new("local", "player", Arc::new(HandlerRegistry::new()))
                 .unwrap()
-                .into_player(),
+                .into_logic(),
         )
         .unwrap();
     assert!(app.register_rpc_endpoint("internal", incomplete).is_err());
@@ -248,7 +248,7 @@ async fn configuration_requires_complete_and_unique_endpoint_bindings() {
 
 fn installing_factory(init: Init) -> InitFuture {
     Box::pin(async move {
-        if let Some(binding) = init.extensions.get::<tok::player::rpc::Binding>() {
+        if let Some(binding) = init.extensions.get::<tok::session::logic::rpc::Binding>() {
             assert!(!binding.is_installed());
             binding.install(&init, Arc::new(HandlerRegistry::new()))?;
             assert!(binding.is_installed());
@@ -272,7 +272,7 @@ async fn configured_rpc_factories_assemble_shared_endpoint_and_reject_missing_in
         let address = listener.local_addr().unwrap();
         drop(listener);
         let mut app = Application::new(config(address)).unwrap();
-        app.register_rpc_factory("player", installing_factory, RpcService::into_player)
+        app.register_rpc_factory("player", installing_factory, RpcService::into_logic)
             .unwrap();
         app.register_rpc_factory(
             "guild",
@@ -350,7 +350,7 @@ async fn rpc_factory_validation_is_atomic_and_custom_bindings_can_complete_the_s
         "player",
         RpcService::new("local", "player", Arc::new(HandlerRegistry::new()))
             .unwrap()
-            .into_player(),
+            .into_logic(),
     )
     .unwrap();
     assert!(
@@ -358,7 +358,7 @@ async fn rpc_factory_validation_is_atomic_and_custom_bindings_can_complete_the_s
             "guild",
             RpcService::new("local", "guild", Arc::new(HandlerRegistry::new()))
                 .unwrap()
-                .into_player()
+                .into_logic()
         )
         .is_err()
     );
@@ -439,7 +439,7 @@ async fn application_accepts_listener_layers_without_generic_registration() {
                 "player",
                 RpcService::new("local", "player", Arc::new(HandlerRegistry::new()))
                     .unwrap()
-                    .into_player(),
+                    .into_logic(),
             )
             .unwrap()
             .add_service(
@@ -488,7 +488,7 @@ async fn application_accepts_listener_layers_without_generic_registration() {
                             bid: Some("7".into()),
                             request_id: 1,
                         },
-                        tok::player::rpc::protocol::internal::v1::Payload {
+                        tok::session::logic::rpc::protocol::internal::v1::Payload {
                             message_id: 1,
                             body: vec![],
                         },

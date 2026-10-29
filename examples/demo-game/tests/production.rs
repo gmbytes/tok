@@ -9,10 +9,10 @@ use std::{
 };
 use tok::{
     infra::discovery::MemoryDirectory,
-    player::TimerTrigger,
-    player::rpc::timer::decode_update,
-    player::rpc::{CallContext, Handler, protocol::internal::v1::Payload, tonic::Code},
-    player::{SessionIdentity, TimerUpdate},
+    session::TimerTrigger,
+    session::logic::rpc::timer::decode_update,
+    session::logic::rpc::{CallContext, Handler, protocol::internal::v1::Payload, tonic::Code},
+    session::{SessionIdentity, TimerUpdate},
 };
 
 fn context() -> CallContext {
@@ -22,7 +22,7 @@ fn context() -> CallContext {
         bid: Some("42".into()),
         request_id: 1,
         session: Some(SessionIdentity {
-            player_id: "42".into(),
+            subject_id: "42".into(),
             session_id: "session".into(),
             epoch: 1,
         }),

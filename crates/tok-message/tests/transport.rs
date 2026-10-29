@@ -10,12 +10,12 @@ use std::{
 };
 use tok_core::ServiceDescriptor;
 use tok_grpc::{Client, Listener};
-use tok_player::SessionIdentity;
-use tok_player::rpc::CallContext;
-use tok_player::rpc::{CallTask, Handler, HandlerRegistry};
 use tok_proto::internal::v1::{
-    CallRequest, CallResponse, Payload, player_rpc_client::PlayerRpcClient,
+    CallRequest, CallResponse, Payload, logic_rpc_client::LogicRpcClient,
 };
+use tok_session::SessionIdentity;
+use tok_session::logic::rpc::CallContext;
+use tok_session::logic::rpc::{CallTask, Handler, HandlerRegistry};
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 use tonic::Code;
@@ -44,13 +44,13 @@ impl tok_message::rpc::Handler for BusinessBridge {
 }
 #[derive(Clone)]
 struct RpcService {
-    player: tok_player::rpc::Service,
+    player: tok_session::logic::rpc::Service,
     business: tok_message::rpc::Service,
 }
 impl RpcService {
     fn new(node: &str, service: &str, handler: Arc<dyn Handler>) -> Result<Self, tok_grpc::Error> {
         Ok(Self {
-            player: tok_player::rpc::Service::new(node, service, Arc::clone(&handler))?,
+            player: tok_session::logic::rpc::Service::new(node, service, Arc::clone(&handler))?,
             business: tok_message::rpc::Service::new(
                 node,
                 service,
@@ -58,10 +58,11 @@ impl RpcService {
             )?,
         })
     }
-    fn into_player(
+    fn into_logic(
         self,
-    ) -> tok_proto::internal::v1::player_rpc_server::PlayerRpcServer<tok_player::rpc::Service> {
-        self.player.into_player()
+    ) -> tok_proto::internal::v1::logic_rpc_server::LogicRpcServer<tok_session::logic::rpc::Service>
+    {
+        self.player.into_logic()
     }
     fn into_business(
         self,
@@ -126,7 +127,7 @@ fn context(target: &ServiceDescriptor) -> CallContext {
         bid: Some("42".into()),
         request_id: 99,
         session: Some(SessionIdentity {
-            player_id: "42".into(),
+            subject_id: "42".into(),
             session_id: "session".into(),
             epoch: 1,
         }),
@@ -141,11 +142,19 @@ fn payload(value: u64) -> Payload {
 fn handler() -> HandlerRegistry {
     let mut registry = HandlerRegistry::new();
     registry
-        .register(1, 2, |execution_request: tok_execution::Request<(tok_player::rpc::CallContext, Data)>| async move { let (_, data) = execution_request.input;
-            Ok(tok_execution::Response::new(Data {
-                value: data.value + 1,
-            }))
-        })
+        .register(
+            1,
+            2,
+            |execution_request: tok_execution::Request<(
+                tok_session::logic::rpc::CallContext,
+                Data,
+            )>| async move {
+                let (_, data) = execution_request.input;
+                Ok(tok_execution::Response::new(Data {
+                    value: data.value + 1,
+                }))
+            },
+        )
         .unwrap();
     registry
 }
@@ -159,7 +168,7 @@ async fn shared_endpoint_dispatches_and_rejects_unready_malformed_and_wrong_targ
             "player",
             RpcService::new("local", "player", Arc::new(handler()))
                 .unwrap()
-                .into_player(),
+                .into_logic(),
         )
         .unwrap()
         .add_service(
@@ -173,7 +182,7 @@ async fn shared_endpoint_dispatches_and_rejects_unready_malformed_and_wrong_targ
     let shutdown = CancellationToken::new();
     let server = tokio::spawn(endpoint.serve(listener, shutdown.clone()).unwrap());
     let clients = Arc::new(Client::new(Duration::from_secs(2), 1).unwrap());
-    let player_client = tok_player::rpc::Client::new(Arc::clone(&clients));
+    let player_client = tok_session::logic::rpc::Client::new(Arc::clone(&clients));
     let business_client = BusinessClient::new(Arc::clone(&clients));
     let player = target(address, "player");
     let guild = target(address, "guild");
@@ -254,7 +263,7 @@ async fn shared_endpoint_dispatches_and_rejects_unready_malformed_and_wrong_targ
             .code(),
         Code::InvalidArgument
     );
-    let mut raw = PlayerRpcClient::new(clients.channel(&player).unwrap());
+    let mut raw = LogicRpcClient::new(clients.channel(&player).unwrap());
     let mismatch = CallRequest {
         timer: None,
         context: Some(tok_proto::internal::v1::CallContext {
@@ -366,7 +375,7 @@ fn duplicate_message_and_proto_service_bindings_are_rejected() {
                 1,
                 3,
                 |execution_request: tok_execution::Request<(
-                    tok_player::rpc::CallContext,
+                    tok_session::logic::rpc::CallContext,
                     Data
                 )>| async move {
                     let (_, data) = execution_request.input;
@@ -381,7 +390,7 @@ fn duplicate_message_and_proto_service_bindings_are_rejected() {
                 0,
                 3,
                 |execution_request: tok_execution::Request<(
-                    tok_player::rpc::CallContext,
+                    tok_session::logic::rpc::CallContext,
                     Data
                 )>| async move {
                     let (_, data) = execution_request.input;
@@ -405,9 +414,9 @@ async fn user_tower_concurrency_limit_is_preserved_across_handler_clones() {
     let active = Arc::new(AtomicUsize::new(0));
     let peak = Arc::new(AtomicUsize::new(0));
     let tracked_peak = Arc::clone(&peak);
-    let service = tok_player::rpc::tower::ServiceBuilder::new()
+    let service = tok_session::logic::rpc::tower::ServiceBuilder::new()
         .concurrency_limit(1)
-        .service(tok_player::rpc::tower::service_fn(
+        .service(tok_session::logic::rpc::tower::service_fn(
             move |request: tok_execution::Request<(CallContext, Payload)>| {
                 let (context, payload) = request.input;
                 let active = Arc::clone(&active);
@@ -434,7 +443,7 @@ async fn user_tower_concurrency_limit_is_preserved_across_handler_clones() {
             RpcService::new(
                 "local",
                 "guild",
-                Arc::new(tok_player::rpc::TowerHandler(service)),
+                Arc::new(tok_session::logic::rpc::TowerHandler(service)),
             )
             .unwrap()
             .into_business(),
@@ -481,7 +490,7 @@ fn endpoint_binding_errors_identify_the_invalid_configuration() {
     let error = Listener::new()
         .add_service("guild", service.clone().into_business())
         .unwrap()
-        .add_service("guild", service.clone().into_player())
+        .add_service("guild", service.clone().into_logic())
         .err()
         .unwrap();
     assert!(error.to_string().contains("业务服务重复绑定：guild"));
@@ -581,7 +590,7 @@ async fn listener_tower_layers_cover_shared_routes_and_preserve_readiness() {
             "player",
             RpcService::new("local", "player", Arc::new(handler()))
                 .unwrap()
-                .into_player(),
+                .into_logic(),
         )
         .unwrap();
     let ready = endpoint.readiness();
@@ -639,7 +648,7 @@ async fn listener_tower_layers_cover_shared_routes_and_preserve_readiness() {
         42
     );
     let player = target(address, "player");
-    let player_client = tok_player::rpc::Client::new(Arc::new(client));
+    let player_client = tok_session::logic::rpc::Client::new(Arc::new(client));
     assert_eq!(
         player_client
             .call(

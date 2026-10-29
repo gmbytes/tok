@@ -9,9 +9,11 @@ use std::{
 use tok_core::ServiceDescriptor;
 use tok_events::{Event, EventId};
 use tok_grpc::{Client, Listener};
-use tok_player::rpc::CallContext;
-use tok_player::rpc::{HandlerRegistry, Service as RpcService, protocol::internal::v1::Payload};
-use tok_player::{SessionIdentity, TimerUpdate};
+use tok_session::logic::rpc::CallContext;
+use tok_session::logic::rpc::{
+    HandlerRegistry, Service as RpcService, protocol::internal::v1::Payload,
+};
+use tok_session::{SessionIdentity, TimerUpdate};
 use tokio_util::sync::CancellationToken;
 #[derive(Clone, PartialEq, prost::Message)]
 struct Update {
@@ -55,7 +57,7 @@ async fn event_handlers_are_inaccessible_to_requests_and_timers_and_require_sess
             let event = &request.input.event.payload;
             let seen = Arc::clone(&seen);
             Box::pin(async move {
-                assert_eq!(context.session.as_ref().unwrap().player_id, "42");
+                assert_eq!(context.session.as_ref().unwrap().subject_id, "42");
                 assert_eq!(id.as_str(), "operation-1");
                 assert_eq!(event.value, 7);
                 assert!(context.timer.is_none());
@@ -76,14 +78,14 @@ async fn event_handlers_are_inaccessible_to_requests_and_timers_and_require_sess
             "player",
             RpcService::new("node", "player", Arc::new(registry))
                 .unwrap()
-                .into_player(),
+                .into_logic(),
         )
         .unwrap();
     endpoint.readiness().set("player", true);
     let stop = CancellationToken::new();
     let server = tokio::spawn(endpoint.serve(listener, stop.clone()).unwrap());
     let clients = Arc::new(Client::new(Duration::from_secs(2), 2).unwrap());
-    let player_client = tok_player::rpc::Client::new(Arc::clone(&clients));
+    let player_client = tok_session::logic::rpc::Client::new(Arc::clone(&clients));
     let target = ServiceDescriptor {
         node_id: "node".into(),
         service_name: "player".into(),
@@ -96,7 +98,7 @@ async fn event_handlers_are_inaccessible_to_requests_and_timers_and_require_sess
         bid: Some("42".into()),
         request_id: 1,
         session: Some(SessionIdentity {
-            player_id: "42".into(),
+            subject_id: "42".into(),
             session_id: "s".into(),
             epoch: 1,
         }),
@@ -131,7 +133,7 @@ async fn event_handlers_are_inaccessible_to_requests_and_timers_and_require_sess
         tonic::Code::Unimplemented
     );
     let mut timer = context.clone();
-    timer.timer = Some(tok_player::TimerTrigger {
+    timer.timer = Some(tok_session::TimerTrigger {
         timer_id: "t".into(),
         scheduled_at_ms: 1,
         fired_at_ms: 1,
@@ -217,7 +219,7 @@ async fn event_handlers_are_inaccessible_to_requests_and_timers_and_require_sess
         .unwrap();
     assert_eq!(response.output.request_id, 1);
     assert!(
-        matches!(tok_player::rpc::timer::decode_update(response.output.timers.unwrap()).unwrap(),TimerUpdate::ReplaceAll(timers) if timers.is_empty())
+        matches!(tok_session::logic::rpc::timer::decode_update(response.output.timers.unwrap()).unwrap(),TimerUpdate::ReplaceAll(timers) if timers.is_empty())
     );
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     stop.cancel();
@@ -226,8 +228,8 @@ async fn event_handlers_are_inaccessible_to_requests_and_timers_and_require_sess
 
 #[tokio::test]
 async fn ordered_event_handlers_compose_timer_effects_without_client_payloads() {
-    fn spec(id: &str) -> tok_player::TimerSpec {
-        tok_player::TimerSpec {
+    fn spec(id: &str) -> tok_session::TimerSpec {
+        tok_session::TimerSpec {
             timer_id: id.into(),
             message_id: 1,
             body: vec![],
@@ -302,14 +304,14 @@ async fn ordered_event_handlers_compose_timer_effects_without_client_payloads() 
             session: None,
             timer: None,
         };
-        let response = tok_player::rpc::Handler::event(
+        let response = tok_session::logic::rpc::Handler::event(
             &registry,
             tok_execution::Request::new(execution, (call, event)),
         )
         .await
         .unwrap();
         assert_eq!(
-            tok_player::rpc::timer::decode_update(response.output.timers.unwrap()).unwrap(),
+            tok_session::logic::rpc::timer::decode_update(response.output.timers.unwrap()).unwrap(),
             expected
         );
     }

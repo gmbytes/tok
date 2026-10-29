@@ -42,18 +42,18 @@ tok-gateway 是这套基础设施的内置扩展，增加连接、认证、sessi
 | [`core`] / tok-core | 服务身份、Extensions、发现、路由和通用请求锁契约 |
 | [`execution`] / tok-execution | Context / StopReason、Request、Tower 调用执行及按自定义键分发处理链 |
 | [`lifecycle`] / tok-lifecycle | 服务工厂、生命周期编排和有界任务监督 |
-| [`player`] / tok-player | SessionIdentity、LogicalMessage、TimerSpec / TimerTrigger / TimerUpdate、所有权与恢复凭证契约 |
+| [`session`] / tok-session | SessionIdentity、LogicalMessage、TimerSpec / TimerTrigger / TimerUpdate、所有权与恢复凭证契约 |
 | [`grpc`] / tok-grpc | 通用 Channel 缓存、共享端点、追踪、期限及类型化执行，不理解游戏正文 |
 | [`message::protobuf`] | 泛型键 protobuf 正文编解码；不依赖生成协议，本模块属于 tok-message |
 | [`message`] / tok-message | 非零编号消息注册与本地处理；message::rpc 提供远程协议适配 |
 | [`gateway`] / tok-gateway | 连接、session FIFO、计时调度、下行和恢复的运行实现 |
 
-调用执行层和生命周期层均不依赖 tok-player，彼此也不依赖。tok-player 提供玩家契约、通知和玩家 RPC 适配，依赖 tok-message、tok-grpc、tok-events、tok-lifecycle 与协议类型，供网关和基础设施后端共同使用；不能反向依赖 gateway 或门面。tok-message 的正常依赖不包含 tok-player。[`player::TimerTrigger`] 表达玩家会话的实际计时触发，与同库 TimerSpec / TimerUpdate 组成计时契约；通用执行设施不依赖这些类型。
+调用执行层和生命周期层均不依赖 tok-session，彼此也不依赖。tok-session 提供逻辑会话契约、客户端通知和 logic RPC 适配，依赖 tok-message、tok-grpc、tok-events、tok-lifecycle 与协议类型，供网关和基础设施后端共同使用；不能反向依赖 gateway 或门面。tok-message 的正常依赖不包含 tok-session。[`session::TimerTrigger`] 表达逻辑会话的实际计时触发，与同库 TimerSpec / TimerUpdate 组成计时契约；通用执行设施不依赖这些类型。场景接入尚未实现。
 
-所有权使用 [`player::ownership::Store`]、[`player::ownership::Record`]，持有者复用 [`core::Identity`]；恢复凭证使用 [`player::credentials::ResumeTokenCodec`]。两者分别返回 [`player::ownership::Result`] 和 [`player::credentials::Result`]，不提供玩家根 Error / Result。所有权错误区分 Conflict、CapacityExceeded、Unavailable、参数、配置及可选操作；凭证验证的非法或过期结果为 Ok(None)，本地组件故障才返回 Err。请求锁使用 core::lock，不要求玩家会话。
-锁、所有权与发现接口统一使用 [`core::BoxFuture`]，其中输出参数是完整类型，不隐含 Result。锁返回 `BoxFuture<'a, core::lock::Result<T>>`，发现返回 `BoxFuture<'a, core::discovery::Result<T>>`，所有权返回 `BoxFuture<'a, player::ownership::Result<T>>`。别名不会自行排队、启动或监督任务；lifecycle::task::Task 继续表达交给监督范围的工作。原 Operation 与 RegistrationTask 别名已移除。
+所有权使用 [`session::ownership::Store`]、[`session::ownership::Record`]，持有者复用 [`core::Identity`]；恢复凭证使用 [`session::credentials::ResumeTokenCodec`]。两者分别返回 [`session::ownership::Result`] 和 [`session::credentials::Result`]，不提供玩家根 Error / Result。所有权错误区分 Conflict、CapacityExceeded、Unavailable、参数、配置及可选操作；凭证验证的非法或过期结果为 Ok(None)，本地组件故障才返回 Err。请求锁使用 core::lock，不要求玩家会话。
+锁、所有权与发现接口统一使用 [`core::BoxFuture`]，其中输出参数是完整类型，不隐含 Result。锁返回 `BoxFuture<'a, core::lock::Result<T>>`，发现返回 `BoxFuture<'a, core::discovery::Result<T>>`，所有权返回 `BoxFuture<'a, session::ownership::Result<T>>`。别名不会自行排队、启动或监督任务；lifecycle::task::Task 继续表达交给监督范围的工作。原 Operation 与 RegistrationTask 别名已移除。
 
-普通业务使用 message::rpc::CallContext，玩家业务使用 player::rpc::CallContext；共同执行 Context / StopReason 从 execution 导入，Extensions 从 core 根导入。player::rpc::Client 提供玩家 RPC 适配，gateway::player 负责连接与会话运行。
+普通业务使用 message::rpc::CallContext，session 驱动的 logic 业务使用 session::logic::rpc::CallContext；共同执行 Context / StopReason 从 execution 导入，Extensions 从 core 根导入。session::logic::rpc::Client 提供 logic RPC 适配，gateway::logic 负责连接与会话运行。
 
 ### 玩家凭证与所有权
 
@@ -64,8 +64,8 @@ use std::time::Duration;
 use tok::{
     core::Identity,
     infra::ownership::MemoryOwnership,
-    gateway::player::resume_token::SignedResumeTokens,
-    player::{credentials::ResumeTokenCodec, ownership::Store},
+    gateway::logic::resume_token::SignedResumeTokens,
+    session::{credentials::ResumeTokenCodec, ownership::Store},
 };
 
 # #[tokio::main]
@@ -104,19 +104,19 @@ tok-core 不提供根 Error / Result；各能力只定义和返回自己能够�
 | 服务发现和目录 | [`core::discovery::Error`]：InvalidInput、InvalidConfig、RegistrationConflict、CapacityExceeded、StateUnavailable、Unavailable、Unsupported |
 | 请求锁 | [`core::lock::Error`]：InvalidInput、InvalidConfig、WaitTimeout、CapacityExceeded、Unavailable |
 | 业务选点 | [`core::routing::Error`]：InvalidInput、NoAvailableService、Discovery；Discovery 保留发现错误及 source |
-| 会话所有权 | [`player::ownership::Error`]：InvalidInput、InvalidConfig、Unsupported、Conflict、CapacityExceeded、Unavailable |
-| 恢复凭证 | [`player::credentials::Error`]：InvalidInput、InvalidConfig、Unavailable；非法或过期凭证为 Ok(None) |
+| 会话所有权 | [`session::ownership::Error`]：InvalidInput、InvalidConfig、Unsupported、Conflict、CapacityExceeded、Unavailable |
+| 恢复凭证 | [`session::credentials::Error`]：InvalidInput、InvalidConfig、Unavailable；非法或过期凭证为 Ok(None) |
 | 执行上下文创建 | [`execution::ContextError`]：InvalidService、InvalidOperation、DeadlineOverflow |
 | 任务范围创建 | [`lifecycle::task::CreateError`]：InvalidCapacity、ParentStopping |
 | 服务构建器创建 | [`lifecycle::CreateError`]：InvalidIdentity、Tasks；Tasks 保留任务范围构造错误 |
 | 应用配置 | [`config::Error`]：Invalid；配置校验按组件参数给出原因 |
-| 玩家接入配置 | [`gateway::player::ConfigError`] |
+| 玩家接入配置 | [`gateway::logic::ConfigError`] |
 | 注册处理链 | [`execution::registry::Error`]：DuplicateKey |
 | 按键分发执行 | [`execution::Error`]：Stopped / Inner；默认表的 [`execution::registry::DispatchError`]：Unknown / Handler，保留键与原始业务错误 |
 
 各领域接口返回自己的 Result；组合服务由上层聚合，例如 application::Error::Discovery 单独承载发现失败，不再经 Core 透传。发现与锁后端配置校验采用相应领域错误，Application 的整体配置校验将组件校验失败转换为 config::Error::Invalid。application::Error::Configuration 与 Create 分别保留配置和服务构建错误的来源，Unsupported 表达应用尚未实现的可选能力。
 
-调用方根据变体判断，不解析 Display 文本。新增错误类别应对应新的处理语义；增加一种底层网络错误通常仍映射到既有不可用类别。其他领域继续使用自己的错误类型，例如 player::ownership::Error、player::credentials::Error、message::rpc::Error 或 tonic::Status；跨领域转换由适配层负责。内置后端的错误信息隐藏凭据，不将底层 URL 或 token 作为诊断正文。
+调用方根据变体判断，不解析 Display 文本。新增错误类别应对应新的处理语义；增加一种底层网络错误通常仍映射到既有不可用类别。其他领域继续使用自己的错误类型，例如 session::ownership::Error、session::credentials::Error、message::rpc::Error 或 tonic::Status；跨领域转换由适配层负责。内置后端的错误信息隐藏凭据，不将底层 URL 或 token 作为诊断正文。
 
 ## 通用执行与处理链
 
@@ -159,9 +159,9 @@ Context 不固定调用来源。入口适配器通过 Extensions 提供自己的
 
 | 入口 | 已提供的扩展 |
 | --- | --- |
-| 消息 RPC | 普通调用使用 [`message::rpc::CallContext`]，玩家调用使用 [`player::rpc::CallContext`]；timer 调用另有 [`player::TimerTrigger`] |
+| 消息 RPC | 普通调用使用 [`message::rpc::CallContext`]，玩家调用使用 [`session::logic::rpc::CallContext`]；timer 调用另有 [`session::TimerTrigger`] |
 | 事件分发 | [`events::EventId`]、[`events::Topic`]；编码接收另保留 `Arc<events::Message>` |
-| 玩家请求准入与执行 | [`gateway::player::ClientRequest`]，只含 request_id / message_id |
+| 玩家请求准入与执行 | [`gateway::logic::ClientRequest`]，只含 request_id / message_id |
 | session 事件与 timer 执行 | 事件头及原始 `Arc<Message>`，或既有 TimerTrigger |
 
 事件 Registry 派生子上下文，使用当前事件的 ID / topic 覆盖继承值，不改变父上下文；本地派生事件清除继承的原始编码消息。其余适用扩展由注册表显式克隆到派生 Request，因此 RPC 关联信息与事件头可以共存。这些值用于中间件观察，不构成认证或分发权限；请求、事件和 timer 仍由各自协议入口及分发表隔离。
@@ -247,7 +247,7 @@ assert!(directory.snapshot("guild")?.is_empty());
 
 [`lifecycle::Factory`] 是公共构建契约，可实现 trait 或使用返回 InitFuture 的闭包。
 工厂创建状态、入口和 Tower 链，返回主任务；普通服务不要求网络端点或 session。
-Application 通过类型化 [`application::Binding`] 扩展注入端点和发现查询；RPC 入口可通过 Service::deferred 创建绑定槽，再在工厂中使用 message::rpc::Binding::install 安装实际处理链；示例 player/guild 已按此方式初始化状态。端点仍由 Application 共享监听，就绪后才接受调用。
+Application 通过类型化 [`application::Binding`] 扩展注入端点和发现查询；RPC 入口可通过 Service::deferred 创建绑定槽，再在工厂中使用 message::rpc::Binding::install 安装实际处理链；示例 logic/guild 已按此方式初始化状态。端点仍由 Application 共享监听，就绪后才接受调用。
 
 任务范围与服务生命周期分别管理：
 
@@ -353,7 +353,7 @@ trace_filter = "info"
 trace_sample_ratio = 0.1
 ```
 
-指标不使用 player_id、bid 或 request_id 作为标签。token 和协议正文默认不记录。
+指标不使用 subject_id、bid 或 request_id 作为标签。token 和协议正文默认不记录。
 内部 RPC 已通过 metadata 传播 W3C TraceContext；Core NATS 已通过标准 headers 传播，转发进入 session 后继续关联至内部事件 RPC。
 
 ## 执行错误与处理链组合
@@ -543,7 +543,7 @@ let rpc = message::rpc::Service::new("local", "custom", Arc::new(adapter))?;
 业务中间件通过 register_service 安装，本地与 RPC 调用共用该链。普通业务 RPC 适配要求 u32 消息 ID，拒绝零请求消息 ID 和零回应消息 ID；message::Registry 在注册时校验请求/回应 ID 非零，RPC HandlerRegistry 复用该表，通用分发表和 protobuf 适配本身不施加该规则。
 示例公会的 guild::handlers 返回 message::Registry 及消息注册错误，业务错误保留其自身类型；RPC 组装只负责提取目标、映射错误并安装请求锁。运行 `just dispatch-smoke` 验证直接本地调用，`just rpc-smoke client-smoke` 验证同一业务链在真实 RPC/TCP 中的使用。
 
-player::rpc::HandlerRegistry 的普通请求表委托消息分发表；timer、事件及其玩家附加结果由玩家协议层组合。玩家通知已移至 player::notification；通用请求锁已迁入 execution::lock，RPC 仅保留协议策略与映射。通用锁返回 `execution::Error<execution::lock::Error<E>>`，原调用停止统一位于外层；锁自身获取、执行与释放上限属于内层具体错误。
+session::logic::rpc::HandlerRegistry 的普通请求表委托消息分发表；timer、事件及其玩家附加结果由玩家协议层组合。玩家通知已移至 session::notification；通用请求锁已迁入 execution::lock，RPC 仅保留协议策略与映射。通用锁返回 `execution::Error<execution::lock::Error<E>>`，原调用停止统一位于外层；锁自身获取、执行与释放上限属于内层具体错误。
 
 ## 执行上下文的承载与边界
 
@@ -589,12 +589,12 @@ assert_eq!(response.output, "42");
 
 ## 内部 RPC 与共享端点
 
-通用 RPC 设施从 [`grpc`] 导入；普通编号消息 RPC 从 [`message::rpc`] 导入；玩家事件、timer 和玩家 RPC 从 [`player::rpc`] 导入。通用 Client / Listener 直接从 grpc 导入，消息协议适配器不重导出它们。
+通用 RPC 设施从 [`grpc`] 导入；普通编号消息 RPC 从 [`message::rpc`] 导入；玩家事件、timer 和玩家 RPC 从 [`session::logic::rpc`] 导入。通用 Client / Listener 直接从 grpc 导入，消息协议适配器不重导出它们。
 
 自定义 protobuf 不需要依赖游戏协议：用 [`grpc::Client::execute`] 包装生成客户端；服务端由 [`grpc::Server::request`] 建立预算、追踪和取消范围并安装本地请求扩展，再用 [`grpc::Server::execute`] 调用任意类型化 Tower Service。协议适配器负责认证、输入校验、操作名和类型化元信息，Server 不负责解码或决定业务入口。
 
-普通业务用 [`message::Registry`] 和 [`message::rpc::business::Handler`] 组装，再以 [`message::rpc::Service`] 绑定；玩家业务用 [`player::rpc::HandlerRegistry`] 和 [`player::rpc::Service`]。
-玩家服务使用 `into_player`，普通业务服务使用 `into_business`，两者使用不同的 protobuf 服务。
+普通业务用 [`message::Registry`] 和 [`message::rpc::business::Handler`] 组装，再以 [`message::rpc::Service`] 绑定；logic 业务用 [`session::logic::rpc::HandlerRegistry`] 和 [`session::logic::rpc::Service`]。
+玩家服务使用 `into_logic`，普通业务服务使用 `into_business`，两者使用不同的 protobuf 服务。
 其他业务也可以使用自己生成的 gRPC 服务，通过 [`grpc::Listener::add_service`] 绑定。
 同一端点不能重复注册同一个 protobuf 服务；多个普通业务服务共享端点时，应分别定义不同的 protobuf 服务。
 
@@ -654,7 +654,7 @@ endpoint = "internal-rpc"
 }
 ```
 
-Application::register_rpc_factory 按配置的 factory（默认服务名）建立入口，根据入口类型将 `message::rpc::Binding` 或 `player::rpc::Binding` 注入 Init.extensions；工厂安装实际处理链，未安装会在初始化结束时失败，不发布服务。多个服务可共用工厂，但同一端点仍不能重复绑定同一个 protobuf 服务。协议转换函数不决定锁或中间件。
+Application::register_rpc_factory 按配置的 factory（默认服务名）建立入口，根据入口类型将 `message::rpc::Binding` 或 `session::logic::rpc::Binding` 注入 Init.extensions；工厂安装实际处理链，未安装会在初始化结束时失败，不发布服务。多个服务可共用工厂，但同一端点仍不能重复绑定同一个 protobuf 服务。协议转换函数不决定锁或中间件。
 
 自定义 protobuf 服务通过 `Application::bind_rpc(service_name, server)` 声明；生命周期沿用 register_factory。已有完整 Listener 可交给 register_rpc_endpoint，端点必须与配置完全匹配，同一端点不与逐服务声明混用。高级自定义组装仍可手动使用 Service::deferred；不需要普通使用者维护一份按服务名查询的绑定表。
 
@@ -665,7 +665,7 @@ Application::register_rpc_factory 按配置的 factory（默认服务名）建�
 调用方通过 [`application::Application::service_directory`] 或 [`application::Binding::directory`]
 查询服务，再用 [`infra::routing::route`] 按 bid 选点。
 [`grpc::Client`] 管理共享连接、缓存撤销、默认期限及通用调用执行，不包含 Player 或 Business 方法。
-[`player::rpc::Client`] 提供 call / handle_event，[`message::rpc::business::Client`] 提供普通业务 call；
+[`session::logic::rpc::Client`] 提供 call / handle_event，[`message::rpc::business::Client`] 提供普通业务 call；
 构造时分别传入同一个 `Arc<Client>`，协议适配器共享连接但保持各自的调用约束。call 接收 `execution::Request<(CallContext, Payload)>`，handle_event 接收 `execution::Request<(CallContext, Arc<events::Message>)>`；协议 CallContext 表示远端关联与目标，外层 Context.service 保留本地执行身份。
 自定义 protobuf 客户端推荐通过 Client::execute 传入 `execution::Request<tonic::Request<T>>`，接续本地调用范围和扩展；也可以使用 Client::channel 取得 Channel，自行管理调用预算和协议适配。
 Client 的期限上限须大于零且不超过一天。execute 保留上游原截止点、取消和更短的请求 grpc-timeout，准备与发送共用本地截止点，超期结果不会成功返回；这不会中断阻塞代码或回滚远端副作用。
@@ -773,13 +773,13 @@ from_server 接受包含 Tower Layer 的 Tonic Server，监听级 Layer 包住�
 [`grpc::Server`] 是逻辑服务的调用执行入口；[`grpc::Listener`] 负责网络监听和 protobuf 服务绑定。
 [`grpc::Readiness::set`] 返回是否命中已绑定的服务名，直接指定服务时应检查结果；Application 遍历多个端点时允许未命中。
 Channel 缓存有界，按 LRU 淘汰最久未访问的连接；命中会刷新访问顺序，Client 克隆共享同一访问顺序与容量。节点和地址相同的服务复用连接；节点变更时调用 `invalidate` 撤销该节点全部地址的缓存，其他节点的访问顺序保持不变。淘汰或撤销只移除缓存持有的 Channel，已有克隆仍可完成在途调用。
-普通调用携带 [`message::rpc::CallContext`]；玩家调用携带 [`player::rpc::CallContext`]，并要求匹配的 [`player::SessionIdentity`]。
+普通调用携带 [`message::rpc::CallContext`]；玩家调用携带 [`session::logic::rpc::CallContext`]，并要求匹配的 [`session::SessionIdentity`]。
 上下文校验检查目标和字段一致性，不能代替内部调用身份认证或全局 session 所有权校验。
 
 每次调用配置期限且不自动重试。超时不表示远端业务已回滚；未知结果由游戏处理。
 用户可通过 [`message::rpc::TowerHandler`] 注入自行组装的 Tower Service，选择并发限制、过载和锁策略。
 普通业务入口不会自动加锁。
-[`player::notification`] 编码强类型通知，真正下行序号和补发由后续网关 session 分配。
+[`session::notification`] 编码强类型通知，真正下行序号和补发由后续网关 session 分配。
 
 运行 `just rpc-smoke` 可以验证示例 player 与 guild 的内部调用并退出。
 此检查使用构造的内部会话上下文；登录认证和客户端 session 由 `just client-smoke` 单独验证。
@@ -889,13 +889,13 @@ let rpc = Service::new("node-a", "guild", Arc::new(TowerHandler(layer.layer(serv
 [`application::Application::directory`] 返回本进程的内存注册目录。
 
 [`infra::ownership::MemoryOwnership`] 是有界的单进程所有权后端，实现
-[`player::ownership::Store`] 的条件获取、续租与释放。
+[`session::ownership::Store`] 的条件获取、续租与释放。
 接管必须匹配旧 epoch，旧持有者不能续租或释放新所有权。
 其 epoch 仅在后端存活期间有效，不能用于跨进程或进程重启后的协调；跨网关共享所有权使用下面的 Redis 后端。
 
 ## Redis session 所有权与超时边界
 
-[`infra::ownership::redis::RedisOwnership`] 实现 [`player::ownership::Store`]，
+[`infra::ownership::redis::RedisOwnership`] 实现 [`session::ownership::Store`]，
 提供原子获取、显式 expected_epoch 接管、条件续租和释放。`ownership` 与 `discovery` 独立选择，默认均可使用 Memory：
 
 ```toml
@@ -916,7 +916,7 @@ operation_timeout_ms = 2000
 以上是配置头部，继续追加端点和服务声明。示例 redis-gateway.toml 已显式启用共享所有权，redis-game.toml 无需持有玩家租约。
 增加网关进程时复制网关配置，修改 node_id、监听及发布端口；所有网关必须共享同一所有权 URL、数据库和 namespace。
 [`infra::ownership::redis::RedisOwnershipConfig`] 验证 namespace 和操作期限，Debug 隐藏 URL。
-单次操作期限为正且不超过 60 秒，也不能超过网关 rpc_timeout_ms；租期与续租间隔仍由 player_gateway 配置。
+单次操作期限为正且不超过 60 秒，也不能超过网关 rpc_timeout_ms；租期与续租间隔仍由 logic_gateway 配置。
 同一配置的持有者必须使用相同身份规范化规则，Redis 后端不自行转换玩家 ID。
 
 每个玩家有两个键：`tok:ownership:{namespace:<玩家 ID 十六进制>}:lease` 和 `:epoch`。
@@ -1083,10 +1083,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 }
 ```
 
-游戏通过 [`gateway::player::Authenticator`] 返回规范化的可信玩家 ID，同一玩家的凭据别名必须归一到相同 ID。
-`gateway::Gateway::player` 注入认证器、[`player::ownership::Store`] 和
-[`gateway::player::Executor`]；[`gateway::player::RpcExecutor`] 可组合
-[`infra::routing::RendezvousRouter`] 与 [`player::rpc::Client`] 调用 player 服务，后者复用共享 Client。
+游戏通过 [`gateway::logic::Authenticator`] 返回规范化的可信玩家 ID，同一玩家的凭据别名必须归一到相同 ID。
+`gateway::Gateway::logic` 注入认证器、[`session::ownership::Store`] 和
+[`gateway::logic::Executor`]；[`gateway::logic::RpcExecutor`] 可组合
+[`infra::routing::RendezvousRouter`] 与 [`session::logic::rpc::Client`] 调用 player 服务，后者复用共享 Client。
 网关工厂先绑定 TCP 监听，再把监听及服务退出 token 交给 `serve` 的受监督任务。
 客户端正文不提供 session 身份；示例 player 从可信的调用上下文读取玩家 ID。
 
@@ -1102,7 +1102,7 @@ player 内部按职责组织会话通信与执行：
 | `SignedResumeTokens` | 使用本地共享密钥签发和验证，不存储逐 token 记录 |
 | `timer::Scheduler`（内部） | 调度 timer 并将到期任务送入会话队列 |
 
-通信、缓存和计时机制封装在私有 `session` 模块内，恢复凭证位于 `player::resume_token`。
+通信、缓存和计时机制封装在私有 `session` 模块内，恢复凭证位于 `session::resume_token`。
 对外从 `player` 导入 `SessionManager`、`SessionHandle`、`PendingResponse`、`ReplayBatch`；无需依赖内部文件路径。
 
 内部实现按职责组织：`session/manager.rs` 管理目录、登录、恢复及凭证刷新协调；
@@ -1110,13 +1110,13 @@ player 内部按职责组织会话通信与执行：
 `handoff.rs` 实现跨网关交接；`channel.rs`、`replay.rs`、`timer.rs` 分别管理通信绑定、确认缓存和计时调度。
 这些模块保持私有或仅在 `player` 内可见，公共 API 经 `player` 统一导出。
 
-原模块路径 `player::outbound`、`player::resume` 已相应调整。
+原模块路径 `session::outbound`、`session::resume` 已相应调整。
 
-[`gateway::player::Config`] 对连接数、会话数、请求队列、下行队列、包长及期限提供有界默认值。
-TOML 的可选 `[player_gateway]` 节可覆盖参数，未知字段和非法容量会使配置校验失败：
+[`gateway::logic::Config`] 对连接数、会话数、请求队列、下行队列、包长及期限提供有界默认值。
+TOML 的可选 `[logic_gateway]` 节可覆盖参数，未知字段和非法容量会使配置校验失败：
 
 ```toml
-[player_gateway]
+[logic_gateway]
 max_connections = 128
 max_sessions = 1024
 queue_capacity = 64
@@ -1137,10 +1137,10 @@ resume_token_ttl_ms = 3600000
 ```
 
 同一玩家的业务请求顺序执行，不同玩家可以并发。队列满立即返回错误，RPC 超时不重试。
-通过 `gateway.ingress().sessions()` 获取 [`gateway::player::SessionManager`]，可查询当前
-[`gateway::player::SessionHandle`]；`notify` 与响应共用有界下行队列，不调用 player。
+通过 `gateway.ingress().sessions()` 获取 [`gateway::logic::SessionManager`]，可查询当前
+[`gateway::logic::SessionHandle`]；`notify` 与响应共用有界下行队列，不调用 player。
 下行队列满会断开慢连接并进入宽限期，后续消息继续进入有界缓存。框架错误见 [`gateway::ErrorCode`]，业务响应的非零错误码保留原值，
-游戏可通过 [`gateway::player::RpcErrorMapper`] 自定义 tonic 状态映射。
+游戏可通过 [`gateway::logic::RpcErrorMapper`] 自定义 tonic 状态映射。
 
 重复登录使用新连接：先关闭旧入口，等待当前执行结束或达到执行期限，再条件释放所有权并建立新的 session_id 和 epoch。
 旧队列不再执行，外部网关持有的所有权直接拒绝。连接断开后默认保留 session 30 秒，期间继续 timer 与续租；到期收束在途执行并条件释放所有权。显式关闭、非法协议、所有权失效和网关退出仍终止 session。
@@ -1170,8 +1170,8 @@ ACK 不使用 `request_id`，不进入 player 队列，不触发 RPC。零值、
 这些值均须为正；默认 30 秒、256 条、4 MiB 是开发参数，单会话上限并非整个网关内存预算。
 合法 ACK 释放已确认记录；过期记录在发布、ACK 或缓存查询时清理，重读快照不延长原始保留时间。
 
-[`gateway::player::SessionHandle::replay_after`] 查询给定确认位置之后的完整缓存，返回
-[`gateway::player::ReplayBatch`]，其 `through_seq` 是查询时的最大序号，`frames` 是按序编码正文。
+[`gateway::logic::SessionHandle::replay_after`] 查询给定确认位置之后的完整缓存，返回
+[`gateway::logic::ReplayBatch`]，其 `through_seq` 是查询时的最大序号，`frames` 是按序编码正文。
 范围有缺口或位置越界返回 `None`；已确认释放的字节不能再从更早位置查询，关闭后返回 `SessionClosed`。
 查询不发送、不确认消息；调用方持有快照会延长对应字节的生命期，应及时释放。
 `try_request` 的独立回应只交给调用方，仍无下行序号，也不自动写入客户端缓存。
@@ -1180,8 +1180,8 @@ ACK 不使用 `request_id`，不进入 player 队列，不触发 RPC。零值、
 
 成功登录的 `LoginResponse` 包含 `resume_token` 和 `resume_token_ttl_ms`。
 凭证由 HMAC-SHA256 认证，载荷包含玩家、原 session、签发和过期时刻；客户端原样保存，不假定固定长度。
-[`player::credentials::ResumeTokenCodec`] 是同步的本地签发/验签契约，不访问 Redis 或其他网络来源。
-[`gateway::player::resume_token::SignedResumeTokens`] 使用启动时加载的共享密钥签发和验证。
+[`session::credentials::ResumeTokenCodec`] 是同步的本地签发/验签契约，不访问 Redis 或其他网络来源。
+[`gateway::logic::resume_token::SignedResumeTokens`] 使用启动时加载的共享密钥签发和验证。
 默认生成进程临时密钥，重启后旧 token 无法验证；配置相同共享密钥后各网关可独立验证，不共享凭证表。
 凭证默认有效 1 小时，宽限期默认 30 秒，两者独立；恢复、交接及验签不刷新原过期时刻。
 
@@ -1203,7 +1203,7 @@ ACK 不使用 `request_id`，不进入 player 队列，不触发 RPC。零值、
 
 
 新登录仍会失效旧入口。签名有效不代表能进入当前会话：Resume 必须匹配原 session；快速重登通过
-[`player::ownership::Store::acquire_for_relogin`] 原子比较该玩家最新登录的 session_id，再获取新所有权。
+[`session::ownership::Store::acquire_for_relogin`] 原子比较该玩家最新登录的 session_id，再获取新所有权。
 新登录更新此标记，交接与租约释放保留，因此旧 token 不能顶回新会话，也不能在新会话下线后重新进入。
 Redis 只保存所有权与最新登录标记，不保存 token；这属于会话协调，不是验签的一部分。
 
@@ -1236,7 +1236,7 @@ demo 的 `GetPlayer` 从服务端保存的生产截止时间重建 timer，已�
 
 ### 跨网关交接
 
-示例使用 `ownership = "redis"` 和多节点发现，并在 `[player_gateway]` 设置 `handoff_enabled = true`。
+示例使用 `ownership = "redis"` 和多节点发现，并在 `[logic_gateway]` 设置 `handoff_enabled = true`。
 参与节点配置相同的固定共享密钥；`[resume_token]` 示例为：
 
 ```toml
@@ -1251,8 +1251,8 @@ clock_skew_ms = 5000
 `clock_skew_ms` 只容忍签发时刻领先本机，不延长过期时间；跨节点仍依赖部署侧时间同步。
 
 每个节点配置名为 `gateway-rpc` 的网关内部 gRPC 服务；`gateway_rpc_service_name` 可覆盖发现名称。
-自定义组装先通过 [`gateway::player::Ingress::with_resume_token_codec`] 注入本地 codec，
-再通过 [`gateway::player::Ingress::with_gateway_rpc`] 注入目录并向
+自定义组装先通过 [`gateway::logic::Ingress::with_resume_token_codec`] 注入本地 codec，
+再通过 [`gateway::logic::Ingress::with_gateway_rpc`] 注入目录并向
 [`gateway::rpc::GatewayRpcService`] 登记会话管理器；内部服务交给 [`grpc::Listener::add_service`]。
 统一入口当前提供 PrepareHandoff、CommitHandoff、CancelHandoff、CompleteHandoff，未来网关管理 RPC 在同一服务扩展。
 登记不受 handoff_enabled 限制，交接关闭时由具体交接操作拒绝；不会为每组方法重复登记管理器。
@@ -1288,15 +1288,15 @@ just run examples/demo-game/config/redis-handoff-b.toml
 timerSpec 由服务端业务逻辑生成，不作为客户端调度接口。客户端只发起“开始生产”等业务动作，
 耗时、执行消息、参数与产出均由服务端规则决定。
 
-业务请求通过 [`player::rpc::HandlerRegistry::register_with_timers`] 返回 [`player::rpc::HandlerReply`]，
-其 `timers` 使用 [`player::TimerUpdate`]。`None` 保持原集合，`ReplaceAll` 全量替换，空集合清空；
+业务请求通过 [`session::logic::rpc::HandlerRegistry::register_with_timers`] 返回 [`session::logic::rpc::HandlerReply`]，
+其 `timers` 使用 [`session::TimerUpdate`]。`None` 保持原集合，`ReplaceAll` 全量替换，空集合清空；
 `Patch` 可增改或取消指定 ID。timer ID 必须非空且不超过 256 字节，消息 ID 非零，周期必须大于零；
 同一次更新不能重复操作同一 ID。数量和 ID、正文总字节数受 `max_timers`、`max_timer_bytes` 限制，
 默认分别为 128 和 1048576。更新先完整校验再替换；非法或超容量的更新会终止 session，避免继续驱动旧集合。
 
 ```rust
 use prost::Message;
-use tok::player::{TimerSpec, TimerUpdate, rpc::{HandlerRegistry, HandlerReply}};
+use tok::session::{TimerSpec, TimerUpdate, logic::rpc::{HandlerRegistry, HandlerReply}};
 
 #[derive(Clone, PartialEq, Message)]
 struct StartProduction {}
@@ -1305,9 +1305,9 @@ struct ProductionFinished {}
 
 # fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 let mut handlers = HandlerRegistry::new();
-handlers.register_with_timers(1, 2, |_request: tok::execution::Request<(tok::player::rpc::CallContext, StartProduction)>| async move {
+handlers.register_with_timers(1, 2, |_request: tok::execution::Request<(tok::session::logic::rpc::CallContext, StartProduction)>| async move {
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
-        .map_err(|_| tok::player::rpc::tonic::Status::internal("系统时钟无效"))?.as_millis() as i64;
+        .map_err(|_| tok::session::logic::rpc::tonic::Status::internal("系统时钟无效"))?.as_millis() as i64;
     Ok(tok::execution::Response::new(HandlerReply {
         message: StartProduction {},
         timers: Some(TimerUpdate::ReplaceAll(vec![TimerSpec {
@@ -1316,7 +1316,7 @@ handlers.register_with_timers(1, 2, |_request: tok::execution::Request<(tok::pla
         }])),
     }))
 })?;
-handlers.register_timer(3, |request: tok::execution::Request<(tok::player::rpc::CallContext, ProductionFinished)>| async move {
+handlers.register_timer(3, |request: tok::execution::Request<(tok::session::logic::rpc::CallContext, ProductionFinished)>| async move {
     let (context, _event) = request.input;
     let trigger = context.timer.expect("分发表已确认内部计时来源");
     // 在这里根据可信 session 和服务端生产规则结算产出。
@@ -1327,10 +1327,10 @@ handlers.register_timer(3, |request: tok::execution::Request<(tok::player::rpc::
 # }
 ```
 
-[`player::rpc::HandlerRegistry::register_timer`] 独立于客户端请求分发表；`CallContext.timer` 由内部 RPC 信封传递，
+[`session::logic::rpc::HandlerRegistry::register_timer`] 独立于客户端请求分发表；`CallContext.timer` 由内部 RPC 信封传递，
 客户端不能通过填写 timer 的消息 ID 进入该处理函数。它包含 ID、预定与实际触发时刻，仍需遵循部署侧的内部调用身份约定。
 业务正文只包含游戏参数，timer 更新和触发来源不直接发送客户端。
-直接构造 [`player::rpc::CallContext`] 的普通调用需填写 `timer: None`；自定义 Handler 和 Tower 中间件可以读取该字段识别内部计时来源。
+直接构造 [`session::logic::rpc::CallContext`] 的普通调用需填写 `timer: None`；自定义 Handler 和 Tower 中间件可以读取该字段识别内部计时来源。
 
 session 建立时对齐 UTC 与单调时钟，此后按同一基准等待，墙钟调整不会重放已调度的周期。
 每个 session 使用一个调度 future，与执行循环共同受网关监督，不为每个 timer 创建任务。
@@ -1339,7 +1339,7 @@ session 建立时对齐 UTC 与单调时钟，此后按同一基准等待，墙�
 周期错过的时刻不逐次追赶，完成后按原基准计算下一个未来时刻；一次性 timer 触发后移除。
 timer 失败或超时只记录本次失败，不重试；周期的后续触发独立进行。
 
-自定义 [`gateway::player::Executor`] 的 `execute_request` 返回 [`gateway::player::Reply`]，
+自定义 [`gateway::logic::Executor`] 的 `execute_request` 返回 [`gateway::logic::Reply`]，
 普通 `LogicalMessage` 可通过 `.into()` 转换；需要计时执行时实现 `execute_timer` 方法。
 原 `execute`、`timer` 方法已分别改为上述名称，自定义实现需同步调整。
 `execute_timer` 的关联序号由 session 独立生成，不消耗客户端 request_id；计时结果可继续返回更新，不产生客户端回应。
@@ -1349,12 +1349,12 @@ timer 失败或超时只记录本次失败，不重试；周期的后续触发�
 
 ## 在工厂中安装 RPC 处理链
 
-普通应用使用 `Application::register_rpc_factory` 自动注入一次性 [`player::rpc::Binding`]。下面是高级手动组装方式：[`player::rpc::Service::deferred`] 返回端点服务和绑定，再在所属 Factory 中安装状态与处理链。
+普通应用使用 `Application::register_rpc_factory` 自动注入一次性 [`session::logic::rpc::Binding`]。下面是高级手动组装方式：[`session::logic::rpc::Service::deferred`] 返回端点服务和绑定，再在所属 Factory 中安装状态与处理链。
 绑定校验服务身份、拒绝重复安装；安装前调用返回 Unavailable，服务停止后拒绝继续执行业务。共享端点的就绪门控仍由 Application 管理。
 
 ```rust
 use std::sync::Arc;
-use tok::{player::rpc::{Service, HandlerRegistry}, lifecycle::{Factory, Init, InitFuture, task::Task}};
+use tok::{session::logic::rpc::{Service, HandlerRegistry}, lifecycle::{Factory, Init, InitFuture, task::Task}};
 # fn example() -> Result<(), Box<dyn std::error::Error>> {
 let (endpoint, binding) = Service::deferred("node-a", "player")?;
 let factory = move |init: Init| -> InitFuture {
@@ -1432,7 +1432,7 @@ ID 限制为 1 到 128 个可打印 ASCII 非空白字节，追踪头每字段�
 
 ## Core NATS 即时事件
 
-本节介绍当前按 topic 和类型建立的固定兴趣订阅。P5 已接通传输路由，本地与远程注册表及 gateway/session 处理链沿用共同协议；P6 已提供按组件绑定的会话兴趣聚合，不按 player_id 自动订阅。
+本节介绍当前按 topic 和类型建立的固定兴趣订阅。P5 已接通传输路由，本地与远程注册表及 gateway/session 处理链沿用共同协议；P6 已提供按组件绑定的会话兴趣聚合，不按 subject_id 自动订阅。
 
 调用链内使用 [`events::nats::Bus::publish_request`] 传入 `Request<Envelope<E>>`，或使用 [`events::nats::Bus::publisher`] 组合 `Service<Request<Message>>`；保留本地期限、取消与追踪，Extensions 不进入网络。原生 [`events::nats::Bus::publish_event`] / publish 仍供显式独立传输出口使用。任何服务都可以发布，用 [`events::Registry`] 订阅自己关心的类型。
 目标由业务正文表达，订阅者自行解释；总线不要求 player、session 或 RPC。
@@ -1507,15 +1507,15 @@ Core NATS 拒绝 Persistent，不静默降级；JetStream、离线加载和去�
 共同事件上下文和 gateway/session 处理链已接通；固定订阅可直接组装，动态主题通过 interest::Pool 与所选组件绑定，处理者使用相同 Registry。
 
 [`events::Subscriber`] 将 Handler 与可选 group 组合为独立订阅组件；同一网关可安装多个组件，各自选择类型、消费组和处理行为。
-[`gateway::player::events::forward`] 提供基本的玩家转发处理者，游戏从完整 Envelope 的 topic 或正文选择 Target，原始事件进入 session FIFO。
-[`gateway::player::events::notify`] 提供广播通知处理者，游戏负责选择 Target 和通知正文，并指定客户端消息 ID。
+[`gateway::logic::events::forward`] 提供基本的玩家转发处理者，游戏从完整 Envelope 的 topic 或正文选择 Target，原始事件进入 session FIFO。
+[`gateway::logic::events::notify`] 提供广播通知处理者，游戏负责选择 Target 和通知正文，并指定客户端消息 ID。
 这两个内置处理者返回 Registry，可交给 Subscriber 组装；自定义 Registry 或 Handler 使用同一抽象，没有固定的组件种类枚举。
 示例将玩家转发与通知分别组装为两个组件；None 只是该示例本地筛选方式的选择，不是网关限制。
 
 事件订阅由游戏服务工厂组装。取得 Gateway::tasks()，显式预留后台任务容量，再把 subscription.run(stop) 交给该运行时监督。
 Ingress 不依赖 NATS，也不限制只能安装一个事件消费任务；可在 `serve` 前确认订阅并提交任务。发布/订阅连接的关闭由持有者负责。
 用 ingress.sessions() 捕获会话目录并注册游戏处理者；普通服务则通过 `Init.service.tasks().launch` 提交同一个消费 future。
-处理函数可执行自定义网关操作，也可创建 [`gateway::player::events::Delivery`] 交给 SessionManager::deliver：
+处理函数可执行自定义网关操作，也可创建 [`gateway::logic::events::Delivery`] 交给 SessionManager::deliver：
 
 - `Action::Notify { message_id, body }`：显式转换为客户端协议通知，不执行 player；成功准入后沿 server_seq 进入补发缓存。
 - `Action::Forward(payload)`：服务器事件排入 session 原有 FIFO，与请求和 timer 串行；不产生客户端 Response。
@@ -1530,9 +1530,9 @@ Ingress 不依赖 NATS，也不限制只能安装一个事件消费任务；可�
 索引保存弱引用及完整会话身份，加入/退出与会话状态在同一锁下更新；关闭或析构清理，恢复保留，交接重建，旧代次清理不影响新代次。
 取消分发 future 不回滚已准入目标；让出调度期间发生退出、关闭或冻结，后续目标会重新检查。
 
-需要会话内定制处理时，注入自己的 [`gateway::player::Executor`]，实现 execute_event 并委托其他来源给 RpcExecutor。
-事件仍先进入会话 FIFO，续租并检查所有权后执行；默认 RPC 适配调用 PlayerRpc.HandleEvent，返回独立 EventResponse（序号、错误、timer 更新），类型上没有客户端 payload。
-[`player::rpc::HandlerRegistry::register_event`] 与普通请求、timer 表隔离；自定义 Handler 可实现 event，TowerHandler 适配携带共同 Request 的 Call 输入，事件路由通过同一事件 Registry 安装 Layer。
+需要会话内定制处理时，注入自己的 [`gateway::logic::Executor`]，实现 execute_event 并委托其他来源给 RpcExecutor。
+事件仍先进入会话 FIFO，续租并检查所有权后执行；默认 RPC 适配调用 LogicRpc.HandleEvent，返回独立 EventResponse（序号、错误、timer 更新），类型上没有客户端 payload。
+[`session::logic::rpc::HandlerRegistry::register_event`] 与普通请求、timer 表隔离；自定义 Handler 可实现 event，TowerHandler 适配携带共同 Request 的 Call 输入，事件路由通过同一事件 Registry 安装 Layer。
 GatewayIngress、Handler、SessionManager 服务器 API、Executor 分别覆盖接入、网关事件编排、会话筛选和串行执行扩展。
 游戏附加内存状态不会自动迁移，若需跨网关恢复，应另外设计快照与恢复规则。
 
@@ -1580,7 +1580,7 @@ Pool 不创建自己的运行循环；调用方必须持续驱动所传任务范
 
 ```rust,no_run
 use std::sync::Arc;
-use tok::{events::{self, Event, Topic, TopicFilter}, gateway::player::{Ingress, events::{Target, notify}}};
+use tok::{events::{self, Event, Topic, TopicFilter}, gateway::logic::{Ingress, events::{Target, notify}}};
 
 #[derive(Clone, PartialEq, prost::Message)]
 struct ChatMessage {
@@ -1633,7 +1633,7 @@ Player/Scene 共用 Gateway 外壳，P2 已统一后台任务监督；P4 已接�
 
 [`gateway::Gateway`] 共用连接接收、容量控制、后台任务监督与退出流程。
 [`gateway::GatewayIngress`] 定义连接处理和清理钩子，当前
-[`gateway::player::Ingress`] 实现玩家认证、所有权和串行 session。
+[`gateway::logic::Ingress`] 实现玩家认证、所有权和串行 session。
 运行框架通过 [`gateway::transport::GatewayTransport`] 接收连接，当前具体适配为 TCP；
 其他传输和 Scene 组件仍待实现，不需要复制网关运行循环。
 
@@ -1664,7 +1664,7 @@ RPC 端点仍显式绑定服务名；业务调用方、路由与发现查询使�
 
 独立构造使用 `Gateway::new(identity, config, build)`；服务工厂中使用 `Gateway::new_in(config, &init, build)`。构造回调取得 [`gateway::Handle`]，可查询身份与能力；其 `tasks()` 取得共同任务句柄，提交受监督任务。`Gateway::tasks()` 仍直接返回任务句柄。
 [`gateway::GatewayConfig`] 单独限制连接数和后台任务总数，任务总数包含等待启动的任务。
-Player 保留 `[player_gateway]` 配置布局，`Config::gateway_limits` 从连接数和最大 session 数
+Player 保留 `[logic_gateway]` 配置布局，`Config::gateway_limits` 从连接数和最大 session 数
 生成网关容量；会话、队列、所有权与协议参数仍由 Player 组件使用。
 
 普通连接错误只关闭该连接；连接 panic、后台任务错误或 panic 会使网关退出。
@@ -1672,7 +1672,7 @@ Player 保留 `[player_gateway]` 配置布局，`Config::gateway_limits` 从连�
 `stop` 必须可重复调用；组件收到取消后应停止新业务并完成清理，整体退出期限由外层 Application 或调用方控制。
 运行 future 被强制丢弃时会取消并中止受监督任务、调用 `stop`，无法等待异步 `finish`。
 
-玩家接入统一使用 `Gateway::player` 或 `Gateway::new` 与 `Ingress` 组装，
+玩家接入统一使用 `Gateway::logic` 或 `Gateway::new` 与 `Ingress` 组装，
 通过 `gateway.ingress().sessions()` 获取会话管理器。
 玩家接入参数使用 `Config`，网关容量使用 `gateway::GatewayConfig`。
 Scene 目前仅预留模块，不套用 Player 的串行与所有权语义。
@@ -1680,21 +1680,21 @@ Scene 目前仅预留模块，不套用 Player 的串行与所有权语义。
 ## 网关与会话能力
 
 [`gateway::Handle`] 提供网关身份、阶段、连接/后台容量、取消、停止请求与完整结束等待。其阶段为 Prepared、Serving、Stopping、Stopped，Stopped 包含组件 finish；`tasks().wait_finished()` 只观察任务范围。
-[`gateway::player::SessionManager`] 提供 owner、gateway、snapshot、cancellation、request_stop 和 wait_finished；其 Open / Stopping / Stopped 记录玩家接入范围的准入与活动工作。停止管理器不强制关闭其他接入组件，网关 finish 的额外清理通过 gateway 句柄观察。
-[`gateway::player::SessionHandle`] 提供身份、snapshot、extensions、关闭、取消及 wait_finished。会话阶段区分 Opening、Online、Detached、Resuming、Handoff、Stopping、Stopped；快照包含连接代次、主题、请求/下行位置及 FIFO 容量。快照不是后续操作的许可，框架在实际准入或发布时重新检查。
+[`gateway::logic::SessionManager`] 提供 owner、gateway、snapshot、cancellation、request_stop 和 wait_finished；其 Open / Stopping / Stopped 记录玩家接入范围的准入与活动工作。停止管理器不强制关闭其他接入组件，网关 finish 的额外清理通过 gateway 句柄观察。
+[`gateway::logic::SessionHandle`] 提供身份、snapshot、extensions、关闭、取消及 wait_finished。会话阶段区分 Opening、Online、Detached、Resuming、Handoff、Stopping、Stopped；快照包含连接代次、主题、请求/下行位置及 FIFO 容量。快照不是后续操作的许可，框架在实际准入或发布时重新检查。
 
 `SessionManager::extensions()` 返回当前管理器作用域的能力副本，包含 gateway 和 manager 句柄；工厂创建的服务生命周期句柄也随网关能力继承。
 将它交给 `Subscriber::with_extensions` 后，网关事件回调与消息中间件可查询相同作用域能力。会话执行再增加当前 SessionHandle 和会话工厂的能力；远程 RPC 不传播这些本地对象。
 
 ## 玩家中间件与扩展状态
 
-[`gateway::player::Pipeline`] 使用同一 Tower 协议，分别安装 `with_admission_layer`、`with_request_layer`、`with_event_layer`、`with_timer_layer`、`with_downlink_layer`。
+[`gateway::logic::Pipeline`] 使用同一 Tower 协议，分别安装 `with_admission_layer`、`with_request_layer`、`with_event_layer`、`with_timer_layer`、`with_downlink_layer`。
 准入与新下行使用 `Request<LogicalMessage>`，准入结果返回 `Response<Request<LogicalMessage>>`，以保留中间件写入的输入扩展；执行器使用 `Request<RequestInput>`、`Request<EventInput>`、`Request<TimerInput>`，不再使用无共同上下文的多参数调用。
 准入成功后传递原截止点与扩展到 FIFO，等待消耗预算；停止关系显式转交 session，在途业务不随连接替换被取消。回应发布采用独立有限范围，继承请求标记，使超时错误仍可下发。每个入口以 Response 包装自己的结果类型；try_request 返回的 PendingResponse 保留执行结果扩展，客户端编码和 replay 只消费正文。事件只返回 timer 效果，不生成客户端 Response；timer 也不自动下发客户端回应。
 
 ```rust
 use std::sync::Arc;
-use tok::{player::LogicalMessage, gateway::player::{Executor, Pipeline, SessionHandle}, execution::Request, message::rpc::tower::util::MapRequestLayer};
+use tok::{session::LogicalMessage, gateway::logic::{Executor, Pipeline, SessionHandle}, execution::Request, message::rpc::tower::util::MapRequestLayer};
 fn pipeline(executor: Arc<dyn Executor>) -> Pipeline {
     let downlink = MapRequestLayer::new(|mut request: Request<LogicalMessage>| {
         // 此时尚未编号和编码；可查询当前会话并修改新消息正文。
@@ -1717,7 +1717,7 @@ fn pipeline(executor: Arc<dyn Executor>) -> Pipeline {
 新下行中间件在异步串行门锁内执行；通道状态锁不跨 await，完成后重新校验连接/主题等条件，再分配序号、编码和缓存。`SessionHandle::notify` 改为显式 await；异步处理期间退出主题不会产生新缓存或序号。
 缓存补发直接重用原编码，不再运行 Layer。普通通知被中间件拒绝时返回错误，内部/会话关闭错误才自动关闭会话；回应发布失败则关闭会话，不重执原业务。
 
-[`gateway::player::session::extension::Factory`] 创建每个逻辑会话的线程安全能力，并提供 initialize、snapshot、validate、restore 和 on_change。网关与管理器作用域的数据由服务工厂初始化，分别通过 Init.extensions 和 Ingress::with_extensions 安装。
+[`gateway::logic::session::extension::Factory`] 创建每个逻辑会话的线程安全能力，并提供 initialize、snapshot、validate、restore 和 on_change。网关与管理器作用域的数据由服务工厂初始化，分别通过 Init.extensions 和 Ingress::with_extensions 安装。
 扩展能力可包含游戏自定义句柄或状态；它们不授予任意改写内建状态的权限。业务内部借用 `&mut` 的本地执行仍使用统一事件注册表，不要求为了本地分发把状态放入共享锁。
 生命周期通知覆盖初始化、绑定/解除绑定、恢复开始/完成、交接准备/取消/提交、目标恢复、关闭和执行结束，携带相应连接代次。回调同步、短小且在通道锁外执行；查询到的是当前状态，可能晚于通知描述的代次。回调 panic 会记录并关闭会话，不回滚内建迁移。
 

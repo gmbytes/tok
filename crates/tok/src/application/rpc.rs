@@ -27,7 +27,7 @@ impl RpcBinding for tok_message::rpc::Binding {
         self.is_installed()
     }
 }
-impl RpcBinding for tok_player::rpc::Binding {
+impl RpcBinding for tok_session::logic::rpc::Binding {
     fn is_installed(&self) -> bool {
         self.is_installed()
     }
@@ -51,8 +51,8 @@ impl RpcEntry for tok_message::rpc::Service {
         Self::deferred(node_id, service_name)
     }
 }
-impl RpcEntry for tok_player::rpc::Service {
-    type Binding = tok_player::rpc::Binding;
+impl RpcEntry for tok_session::logic::rpc::Service {
+    type Binding = tok_session::logic::rpc::Binding;
     fn deferred(
         node_id: &str,
         service_name: &str,
@@ -133,7 +133,7 @@ impl Application {
         });
         Ok(())
     }
-    /// 注册统一 RPC 工厂；按配置创建入口并将一次性 player::rpc::Binding 注入 Init.extensions。
+    /// 注册统一 RPC 工厂；按入口类型将相应的一次性 Binding 注入 Init.extensions。
     /// 工厂必须在初始化中安装实际状态和处理链；protocol 只选择协议，不推导业务锁或中间件。
     /// 参数校验失败不保留部分工厂或绑定；没有匹配配置时仅注册工厂。
     pub fn register_rpc_factory<R: RpcEntry, S>(

@@ -5,18 +5,18 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
     task::{Context, Poll},
 };
-use tok::player::rpc::tower::{Layer, Service, ServiceExt};
+use tok::session::logic::rpc::tower::{Layer, Service, ServiceExt};
 use tok::{core::Extensions, execution::Request};
 use tok::{
     gateway::{
         ErrorCode, GatewayError, Result,
-        player::{
+        logic::{
             SessionHandle, SessionManager,
             session::extension::{self, Change},
         },
     },
     observability::tracing,
-    player::SessionIdentity,
+    session::SessionIdentity,
 };
 
 #[derive(Default)]
@@ -56,9 +56,9 @@ where
                 .extensions()
                 .get::<SessionManager>()
                 .ok_or(ErrorCode::InvalidState)?;
-            if request.context.operation().starts_with("player/request/")
-                || request.context.operation().starts_with("player/event/")
-                || request.context.operation().starts_with("player/timer/")
+            if request.context.operation().starts_with("logic/request/")
+                || request.context.operation().starts_with("logic/event/")
+                || request.context.operation().starts_with("logic/timer/")
             {
                 request
                     .extensions()
@@ -67,7 +67,7 @@ where
                     .executions
                     .fetch_add(1, Ordering::Relaxed);
             }
-            tracing::debug!(operation=request.context.operation(),player_id=%session.identity().player_id,gateway=%manager.owner().service_name,"进入玩家处理链");
+            tracing::debug!(operation=request.context.operation(),subject_id=%session.identity().subject_id,gateway=%manager.owner().service_name,"进入玩家处理链");
             inner.oneshot(request).await
         })
     }
