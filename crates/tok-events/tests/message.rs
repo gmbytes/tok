@@ -1,4 +1,5 @@
 //! 通用即时事件编码与版本、大小校验；不依赖外部服务。
+#![cfg(feature = "protobuf")]
 use prost::Message as _;
 use tok_events::{DeliveryPolicy, Envelope, Event, EventId, Message};
 #[derive(Clone, PartialEq, prost::Message)]

@@ -1,12 +1,12 @@
 //! 统一强类型事件注册和异步执行，本地借用与远程解码共用 Tower 处理链。
-//! Core NATS 即时投递；JetStream 与离线加载尚未实现。
+//! 传输适配由其他 crate 提供，离线业务加载由应用负责。
 
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
 
 mod contract;
 pub mod interest;
 mod message;
-pub mod nats;
+mod publisher;
 mod registry;
 /// 服务工厂中声明和监督事件订阅。
 pub mod service;
@@ -15,6 +15,7 @@ mod topic;
 
 pub use contract::{Envelope, Event, EventId, TraceContext, validate_name};
 pub use message::Message;
+pub use publisher::{Publication, Publisher, PublisherService};
 pub use registry::{Callback, DispatchError, Handler, Input, Outcome, Registry, Task, handler};
 pub use subscriber::Subscriber;
 pub use topic::{Topic, TopicFilter};
@@ -22,9 +23,9 @@ pub use topic::{Topic, TopicFilter};
 /// 通用服务器事件的投递策略，与业务目标和处理方式无关。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeliveryPolicy {
-    /// Core NATS 即时投递，不积压离线消息。
+    /// 即时投递，不积压离线消息。
     Immediate,
-    /// JetStream 持久化投递，消费端需要处理重复。
+    /// 持久化投递，消费端需要处理重复。
     Persistent,
 }
 

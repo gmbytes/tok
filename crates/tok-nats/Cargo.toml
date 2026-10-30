@@ -1,0 +1,31 @@
+[package]
+name = "tok-nats"
+description = "tok 框架的 NATS 传输适配"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+tok-events.workspace = true
+tok-execution.workspace = true
+tok-lifecycle.workspace = true
+tok-core.workspace = true
+async-nats.workspace = true
+futures-util.workspace = true
+prost.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tower.workspace = true
+serde.workspace = true
+opentelemetry.workspace = true
+tracing.workspace = true
+tracing-opentelemetry.workspace = true
+metrics.workspace = true
+
+[dev-dependencies]
+uuid.workspace = true
+tok-proto.workspace = true
+
+[lints]
+workspace = true

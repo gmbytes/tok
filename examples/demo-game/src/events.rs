@@ -76,13 +76,14 @@ pub fn value_notifier(
 /// 真实 TCP + NATS + RPC 验证：内部事件修改状态，广播进入客户端 Notify。
 pub async fn smoke(
     address: std::net::SocketAddr,
-    config: tok::events::nats::Config,
+    config: tok::nats::Config,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    use tok::events::{Envelope, EventId, Message as EventMessage, nats::Bus};
+    use tok::events::{Envelope, EventId, Message as EventMessage};
     use tok::gateway::{
         codec::{FrameCodec, VERSION},
         protocol::{self, Frame, frame::Content},
     };
+    use tok::nats::Bus;
     let bus = Bus::connect(config).await?;
     let mut stream = tokio::net::TcpStream::connect(address).await?;
     let codec = FrameCodec::new(1_048_576, std::time::Duration::from_secs(2))?;

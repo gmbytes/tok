@@ -107,8 +107,51 @@ impl tower::Service<Request<Arc<Message>>> for RegistryService {
     }
     fn call(&mut self, request: Request<Arc<Message>>) -> Self::Future {
         let registry = Arc::clone(&self.0);
-        Box::pin(async move { registry.handle(request).await })
+        Box::pin(async move {
+            match registry.receive(&mut (), request).await {
+                Ok(results) => Ok(results.map(Outcome::combine)),
+                Err(crate::DispatchError::Unknown) => {
+                    Err(EventError::InvalidInput("事件未注册或未安装解码器"))
+                }
+                Err(
+                    crate::DispatchError::Invalid(error) | crate::DispatchError::Handler(error),
+                ) => Err(error),
+                Err(crate::DispatchError::Stopped(reason)) => Err(EventError::Stopped(reason)),
+            }
+        })
     }
+}
+
+/// 使用注册表安装订阅，并从其解码器推导事件类型；可通过闭包组合外层 Tower 链。
+///
+/// `config.event_types` 为空时自动填充；非空时必须与注册表一致，避免订阅后静默忽略事件。
+pub async fn install_registry<S>(
+    init: &Init,
+    transport: &dyn Transport,
+    mut config: Config,
+    registry: RegistryService,
+    layer: impl FnOnce(RegistryService) -> S,
+) -> Result<(), Error>
+where
+    S: tower::Service<Request<Arc<Message>>, Response = Response<Outcome>, Error = EventError>
+        + Clone
+        + Send
+        + Sync
+        + 'static,
+    S::Future: Send + 'static,
+{
+    let types = registry.event_types();
+    if !config.event_types.is_empty() {
+        let mut configured = config.event_types.clone();
+        configured.sort();
+        let mut registered = types.clone();
+        registered.sort();
+        if configured != registered {
+            return Err(EventError::InvalidInput("订阅类型与事件注册表不一致").into());
+        }
+    }
+    config.event_types = types;
+    install(init, transport, config, layer(registry)).await
 }
 
 /// 在初始化期间建立并确认订阅，再交由服务任务范围监督。

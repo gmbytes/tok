@@ -22,5 +22,7 @@
 | Crate | 最近审查的主要范围 | 记录或依据 |
 | --- | --- | --- |
 | [tok-session（原 tok-player）](../crates/tok-session/src/lib.rs) | 模块划分、命名、导出和错误 | 使用者曾明确要求审查，随后要求修复并提交；相关提交为 `18ea656`。近期玩家 RPC 已迁入该 crate，迁移后的整体边界尚未最终确认。 |
+| [tok-events](../crates/tok-events/src/lib.rs) | 事件契约、传输抽象、模块与可靠性 | 已审查并修复部分问题；NATS 拆分和通用发布接口属于后续变更，整体尚未重新确认。 |
+| [tok-nats](../crates/tok-nats/src/lib.rs) | 新拆出的 NATS 与 JetStream 适配 | 新 crate 尚未经过独立审查确认。 |
 
 未列出的 crate 不代表已经或尚未审查；本表只记录有明确依据的确认和上述审查。新增确认时记录日期、范围及对应提交或文档依据，涉及重大后续变更时重新核对。

@@ -40,7 +40,7 @@ impl Subscriber {
         self.topics = topics;
         self
     }
-    /// 安装本服务的本地能力，接收时复制到执行上下文，不向远端传播。
+    /// 安装本服务的本地能力，接收时复制到请求扩展，不向远端传播。
     pub fn with_extensions(mut self, extensions: tok_core::Extensions) -> Self {
         self.extensions = extensions;
         self
@@ -52,5 +52,26 @@ impl Subscriber {
     /// 此组件声明的消费组；不从网关身份或服务名称推导。
     pub fn group(&self) -> Option<&str> {
         self.group.as_deref()
+    }
+    /// 接收端所属服务身份；传输用它建立独立的本地执行范围。
+    pub fn service(&self) -> &tok_core::service::Identity {
+        &self.service
+    }
+    /// 装配方明确授予接收端的本地能力，不跨传输发送。
+    pub fn extensions(&self) -> &tok_core::Extensions {
+        &self.extensions
+    }
+    /// 处理链声明的事件类型，传输根据它建立订阅。
+    pub fn event_types(&self) -> Vec<&str> {
+        self.handler.event_types()
+    }
+    /// 取得订阅者的处理链，供需要长期持有处理入口的传输适配器使用。
+    pub fn handler(&self) -> &Arc<dyn Handler> {
+        &self.handler
+    }
+    /// 将传输校验后建立的本地执行请求交给处理链。
+    /// 传输负责建立独立预算、停止关系和追踪，不得继承发布方的本地能力。
+    pub fn handle(&self, request: tok_execution::Request<Arc<crate::Message>>) -> crate::Task<'_> {
+        self.handler.handle(request)
     }
 }

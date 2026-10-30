@@ -10,7 +10,7 @@ license = "Apache-2.0"
 
 [workspace.dependencies]
 lru = { version = "0.18.5", default-features = false }
-async-nats = { version = "0.50.0", default-features = false, features = ["ring", "nuid"] }
+async-nats = { version = "0.50.0", default-features = false, features = ["ring", "nuid", "jetstream", "server_2_10"] }
 futures-util = { version = "0.3", default-features = false, features = ["std", "async-await"] }
 tok-core = { path = "crates/tok-core", version = "0.1.0" }
 tok-session = { path = "crates/tok-session", version = "0.1.0" }
@@ -20,6 +20,7 @@ tok-proto = { path = "crates/tok-proto", version = "0.1.0" }
 tok-message = { path = "crates/tok-message", version = "0.1.0" }
 tok-grpc = { path = "crates/tok-grpc", version = "0.1.0" }
 tok-events = { path = "crates/tok-events", version = "0.1.0" }
+tok-nats = { path = "crates/tok-nats", version = "0.1.0" }
 tok-infra = { path = "crates/tok-infra", version = "0.1.0" }
 tok-gateway = { path = "crates/tok-gateway", version = "0.1.0" }
 tok = { path = "crates/tok", version = "0.1.0" }

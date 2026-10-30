@@ -29,7 +29,7 @@ struct ServiceCapability;
 async fn logic_service_consumes_configuration_and_session_events_in_distinct_scopes() {
     use proto::logic_rpc_server::LogicRpc;
     let bus = Arc::new(
-        tok_events::nats::Bus::connect(tok_events::nats::Config {
+        tok_nats::Bus::connect(tok_nats::Config {
             url: std::env::var("TOK_TEST_NATS_URL")
                 .unwrap_or_else(|_| "nats://127.0.0.1:4222".into()),
             namespace: format!("test-{}", EventId::generate()),

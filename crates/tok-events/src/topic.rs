@@ -23,6 +23,7 @@ impl Topic {
     pub fn as_str(&self) -> Option<&str> {
         self.0.as_deref()
     }
+    #[cfg(feature = "protobuf")]
     pub(crate) fn from_wire(name: Option<String>) -> Result<Self, Error> {
         name.map_or_else(|| Ok(Self::default()), Self::named)
     }

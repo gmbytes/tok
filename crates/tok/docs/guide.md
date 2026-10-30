@@ -1438,7 +1438,7 @@ ID 限制为 1 到 128 个可打印 ASCII 非空白字节，追踪头每字段�
 ```rust,no_run
 use std::{sync::Arc, time::Duration};
 use tok::{events::{self, Message, Outcome, TopicFilter}, execution::{Request, Response}, lifecycle::{Init, InitFuture, task::Task}};
-fn factory(bus: Arc<events::nats::Bus>) -> impl Fn(Init) -> InitFuture + Send + Sync {
+fn factory(bus: Arc<tok::nats::Bus>) -> impl Fn(Init) -> InitFuture + Send + Sync {
     move |init| {
         let bus = Arc::clone(&bus);
         Box::pin(async move {
@@ -1466,7 +1466,11 @@ fn factory(bus: Arc<events::nats::Bus>) -> impl Fn(Init) -> InitFuture + Send + 
 
 `extensions` 只安装明确选择的本服务能力；不自动继承发布方或 session 能力。传输为每次消费建立独立预算和追踪范围，业务结果不返回发布者。`group: None` 表示各实例独立接收；同名 group 的订阅者分担匹配事件。初始化失败、取消或超时不会发布部分就绪服务；服务停止时通知消费任务退出，整体收束受服务关闭期限约束。
 
-调用链内使用 [`events::nats::Bus::publish_request`] 传入 `Request<Envelope<E>>`，或使用 [`events::nats::Bus::publisher`] 组合 `Service<Request<Message>>`；保留本地期限、取消与追踪，Extensions 不进入网络。原生 [`events::nats::Bus::publish_event`] / publish 仍供显式独立传输出口使用。任何服务都可以发布，用 [`events::Registry`] 订阅自己关心的类型。
+调用链内使用 [`nats::Bus::publish_request`] 传入 `Request<Envelope<E>>`，或使用 [`nats::Bus::publisher`] 组合 `Service<Request<Message>>`；保留本地期限、取消与追踪，Extensions 不进入网络。原生 [`nats::Bus::publish_event`] / publish 仍供显式独立传输出口使用。任何服务都可以发布，用 [`events::Registry`] 订阅自己关心的类型。
+
+使用 [`events::Publisher`] 可以对传输编程：[`events::Publication`] 携带编码消息和即时或持久投递要求，NATS Bus 实现该接口；不支持的后端必须拒绝持久投递。protobuf 是 `tok-events` 的默认可选功能，不使用默认功能时可只使用本地事件和自定义编码。`Publication::protobuf` 在调用前编码，编码所占资源由调用方约束；需要 NATS 发布容量覆盖编码时，使用 `Bus::publish_request`。
+
+[`events::PublisherService`] 将发布器接入 Tower 并保护原执行预算；[`events::Registry::enable_decoder`] 允许注册自定义正文解码器。当前 `tok-nats` 的事件信封仍采用框架的 protobuf 线格式；正文可以由业务选择编码方式，不暗示所有后端都使用此线格式。
 目标由业务正文表达，订阅者自行解释；总线不要求 player、session 或 RPC。
 每个 Registry 可对一种类型有序注册多个处理函数；多个服务可以分别订阅同一种事件。
 处理函数可捕获状态与发布连接，也可以实现 [`events::Handler`] 自定义分发。
@@ -1487,7 +1491,7 @@ impl Event for GuildChanged {
 }
 
 # async fn example(stop: CancellationToken) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-let bus = events::nats::Bus::connect(events::nats::Config::default()).await?;
+let bus = tok::nats::Bus::connect(tok::nats::Config::default()).await?;
 let topic = events::Topic::named("realm:42")?;
 let mut handlers = events::Registry::new(16)?;
 handlers.register::<GuildChanged, _>(|request| Box::pin(async move {
@@ -1530,7 +1534,43 @@ handler 有有限等待期限，退出或超时会取消在途 future，已产�
 内部 Executor::execute_event 只返回可选 TimerUpdate，类型上不包含客户端回应；业务执行结果由会话处理，不返回 NATS 发布者。
 
 发布成功仅表示客户端已接受发布操作，不保证 broker 接收或订阅者执行完成，断线仍可能丢失事件。无订阅者、队列满、离线及冻结窗口可能丢失事件，不自动重试或去重。
-Core NATS 拒绝 Persistent，不静默降级；JetStream、离线加载和去重辅助仍待实现。
+`Event::DELIVERY` 选择投递模式：Immediate 由 Core NATS 即时发布；Persistent 使用 JetStream，发布成功表示 broker 已确认存储，失败或超时的结果可能未知。两种模式使用不同 subject 范围，同一 `Bus` 可以同时发布。部署方须预先创建覆盖 `tok.persistent.<namespace>.>` 的 stream，并配置存储、保留、容量和副本。
+
+持久订阅使用 [`nats::jetstream::Consumer`] 实现同一个 `interest::Transport` 接口，通过 `events::service::install` 安装。其配置显式指定 stream、稳定 durable 名称、确认等待时间、最大投递次数和失败重投延迟；相同 durable 的实例共享进度，同名 group 必须与 durable 名称一致。需要各实例独立消费时，须为每个实例配置稳定且不同的 durable。已有消费者配置与所需过滤条件不一致时，安装失败而不修改已有消费者。
+
+```rust,no_run
+use std::{sync::Arc, time::Duration};
+use tok::{events::{self, DeliveryPolicy, Event, Envelope, EventId, Message, Outcome, TopicFilter}, execution::{Request, Response}, lifecycle::Init};
+#[derive(Clone, PartialEq, prost::Message)]
+struct PaymentCompleted { #[prost(uint64, tag = "1")] order_id: u64 }
+impl Event for PaymentCompleted {
+    const NAME: &'static str = "payment.completed.v1";
+    const DELIVERY: DeliveryPolicy = DeliveryPolicy::Persistent;
+}
+async fn install(init: &Init, bus: tok::nats::Bus) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let consumer = tok::nats::jetstream::Consumer::new(bus.clone(), tok::nats::jetstream::Config {
+        stream: "GAME_EVENTS".into(), consumer: "payments".into(),
+        ack_wait: Duration::from_secs(30), max_deliver: 10, retry_delay: Duration::from_secs(2),
+    })?;
+    let chain = tower::service_fn(|request: Request<Arc<Message>>| async move {
+        // 在此解码并完成幂等业务处理；仅完成后返回 Handled。
+        let _ = request;
+        Ok::<_, events::Error>(Response::new(Outcome::Handled))
+    });
+    events::service::install(init, &consumer, events::service::Config {
+        name: "payments".into(), event_types: vec![PaymentCompleted::NAME.into()],
+        topics: TopicFilter::All, group: Some("payments".into()),
+        extensions: Default::default(), timeout: Duration::from_secs(5),
+    }, chain).await?;
+    // 先由部署方创建 stream，且不要把发布成功当成业务处理成功。
+    bus.publish_event(Envelope::new(EventId::generate(), PaymentCompleted { order_id: 42 })?).await?;
+    Ok(())
+}
+```
+
+持久处理链仅在返回 `Handled` 后确认；`Ignored`、`Rejected`、`Partial`、处理错误或超时请求延迟重投。确认超时、进程崩溃或重投可能导致重复执行，业务负责幂等。达到最大投递次数的事件需要运维处理；框架不自动删除 durable、加载离线玩家或提供事务性去重。处理者必须在自身业务职责完成后返回成功，不能把事件仅放入 session 内存队列就当成已完成。
+
+一个 durable 的事件类型和 topic 过滤集合固定。不要将同一个持久 Consumer 直接用于 `interest::Pool` 的多个动态 topic；此模式需要单独设计 durable 的命名、生命周期与历史消息归属。
 仅订阅初始化通过同连接临时 inbox 自回环确认订阅命令已被 broker 处理，需要相应发布与订阅权限；只确认当前连接，不保证其他节点已就绪。发布不创建探测订阅、不等待回环。async-nats 0.50 的 flush 只确认本地写出，不承担订阅就绪确认。
 通用 protobuf 事件协议使用初始版本 1；尚未发布，不保留开发中间字段编号或维护其兼容。
 
@@ -1627,7 +1667,7 @@ impl Event for ChatMessage {
         Topic::named(format!("chat:{}", self.channel_id))
     }
 }
-# async fn assemble(init: &tok::lifecycle::Init, ingress: Ingress, bus: events::nats::Bus, chat_message_id: u32)
+# async fn assemble(init: &tok::lifecycle::Init, ingress: Ingress, bus: tok::nats::Bus, chat_message_id: u32)
 # -> Result<(Ingress, events::interest::Lease), Box<dyn std::error::Error + Send + Sync>> {
 // 由可信游戏策略选择初始频道；生产可从已验证身份和状态计算。
 let ingress = ingress.with_topic_policy(|_request| Ok(vec!["chat:7".into()]));
@@ -1773,7 +1813,7 @@ fn pipeline(executor: Arc<dyn Executor>) -> Pipeline {
 | [`observability`] | 日志、指标与追踪 |
 
 目前示例监听共享内部 gRPC 和客户端 TCP 端点，已接通注入认证、有界串行 session、状态读写及服务组合。
-Redis 开发发现、session 所有权、timer、ACK 缓存、同网关恢复、可选跨网关交接和 Core NATS 已接通；JetStream、离线加载及生产安全仍待实现。
+Redis 开发发现、session 所有权、timer、ACK 缓存、同网关恢复、可选跨网关交接、Core NATS 和基础 JetStream 持久消费已接通；离线加载及生产安全仍待实现。
 配置端点地址本身不启动监听；内部 RPC 使用 register_rpc_factory / bind_rpc 或显式完整端点注册，TCP 由网关工厂绑定。
 Kubernetes 配置可校验，运行该发现后端仍会明确报错。
 游戏业务协议和 handler 由游戏定义，框架组件不反向依赖具体游戏。

@@ -174,14 +174,14 @@ impl Fixture {
     async fn with_backend_and_events(
         config: Config,
         backend: impl FnOnce(Arc<MemoryOwnership>) -> Arc<dyn OwnershipStore>,
-        events: Option<&tok_events::nats::Bus>,
+        events: Option<&tok_nats::Bus>,
     ) -> Self {
         Self::with_dynamic_events(config, backend, events, false).await
     }
     async fn with_dynamic_events(
         config: Config,
         backend: impl FnOnce(Arc<MemoryOwnership>) -> Arc<dyn OwnershipStore>,
-        events: Option<&tok_events::nats::Bus>,
+        events: Option<&tok_nats::Bus>,
         dynamic: bool,
     ) -> Self {
         let (started, receiver) = mpsc::unbounded_channel();
@@ -1925,18 +1925,14 @@ async fn topic_index_survives_resume_and_cleans_up_replaced_and_closed_sessions(
 #[tokio::test]
 #[ignore = "需要真实 NATS；通过 just nats-test 显式运行"]
 async fn nats_independent_gateways_route_all_players_topics_and_forward_to_their_own_queues() {
-    let config = tok_events::nats::Config {
+    let config = tok_nats::Config {
         url: std::env::var("TOK_TEST_NATS_URL").unwrap_or_else(|_| "nats://127.0.0.1:4222".into()),
         namespace: format!("gateways-{}", uuid::Uuid::new_v4()),
         ..Default::default()
     };
-    let a_bus = tok_events::nats::Bus::connect(config.clone())
-        .await
-        .unwrap();
-    let b_bus = tok_events::nats::Bus::connect(config.clone())
-        .await
-        .unwrap();
-    let publisher = tok_events::nats::Bus::connect(config).await.unwrap();
+    let a_bus = tok_nats::Bus::connect(config.clone()).await.unwrap();
+    let b_bus = tok_nats::Bus::connect(config.clone()).await.unwrap();
+    let publisher = tok_nats::Bus::connect(config).await.unwrap();
     let mut a =
         Fixture::with_backend_and_events(crate::config(), |memory| memory, Some(&a_bus)).await;
     let mut b =
@@ -2138,11 +2134,9 @@ fn tok_core_identity() -> tok_core::service::Identity {
 #[tokio::test]
 #[ignore = "需要真实 NATS；通过 just nats-test 显式运行"]
 async fn nats_independent_gateways_share_dynamic_topics_and_keep_fixed_interest_separate() {
-    use tok_events::{
-        Topic,
-        nats::{Bus, Config as NatsConfig},
-    };
+    use tok_events::Topic;
     use tok_gateway::logic::events::Target;
+    use tok_nats::{Bus, Config as NatsConfig};
     let config_nats = NatsConfig {
         namespace: format!("topics-{}", uuid::Uuid::new_v4()),
         max_message_bytes: 4096,

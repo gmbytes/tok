@@ -31,7 +31,7 @@ impl logic::Authenticator for DemoAuthenticator {
 
 /// 初始化 TCP 监听并组装统一 Gateway 与 logic::Ingress。
 pub struct PlayerIngressFactory {
-    events: Option<tok::events::nats::Config>,
+    events: Option<tok::nats::Config>,
     config: logic::Config,
     ownership: Arc<dyn OwnershipStore>,
     tokens: Option<Arc<dyn tok::session::credentials::ResumeTokenCodec>>,
@@ -49,7 +49,7 @@ impl PlayerIngressFactory {
         }
     }
     /// 显式开启 Core NATS；启动时确认订阅，消费任务由 Gateway 监督。
-    pub fn with_events(mut self, events: tok::events::nats::Config) -> Self {
+    pub fn with_events(mut self, events: tok::nats::Config) -> Self {
         self.events = Some(events);
         self
     }
@@ -101,7 +101,7 @@ impl Factory for PlayerIngressFactory {
                 .with_downlink_layer(middleware::Observe);
             let limits = config.gateway_limits();
             let bus = match events {
-                Some(events) => Some(tok::events::nats::Bus::connect(events).await?),
+                Some(events) => Some(tok::nats::Bus::connect(events).await?),
                 None => None,
             };
             let gateway = Gateway::new_in(limits, &init, |gateway_context| {

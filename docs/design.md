@@ -44,6 +44,7 @@ flowchart TD
     session[tok-session] --> core
     events[tok-events] --> execution
     events --> lifecycle
+    nats[tok-nats] --> events
     grpc[tok-grpc] --> execution
     message[tok-message] --> execution
     message --> grpc
@@ -113,7 +114,7 @@ P6 已提供固定兴趣、会话动态兴趣和可信身份策略（如区服�
 
 无 group 时各匹配实例独立接收，同名 group 内分担，不同组独立接收。聊天主题跨多个网关时，直接本地广播的组件必须让各目标网关收到事件；共享 group 本身不提供扇出或玩家归属路由，框架不固定 gateway 的 group。
 
-发布成功只表示传输接受，不代表 broker 接收、handler 完成、player 执行或客户端处理。仅订阅建立做有界就绪确认。Core NATS 允许即时消息在离线、过载及冻结窗口丢失，不自动重试/去重。持久化、重新投递与消费确认留给后续 JetStream 设计；届时不得把进入 session 内存队列当成业务完成。
+Core NATS 即时发布成功只表示客户端接受，不代表 broker 接收或业务处理；允许消息在离线、过载及冻结窗口丢失。Persistent 使用独立 subject 和预建 JetStream stream，发布成功表示 broker 确认存储；消费结果成功后确认，失败或确认不确定可能重投，业务负责幂等。持久消费不得把进入 session 内存队列当成业务完成。
 
 ## gateway、logic 与 scene 边界
 
@@ -153,7 +154,7 @@ Kubernetes 配置可校验但后端未实现，部署目录尚无可运行清单
 
 ## 工程与可观测
 
-现有 workspace 包括 tok-core、tok-execution、tok-lifecycle、tok-session、tok-proto、tok-grpc、tok-message、tok-events、tok-gateway、tok-infra、tok-observability 和 tok。游戏协议属于 demo/game；框架协议属于 tok-proto。protobuf 构建期生成到 Cargo OUT_DIR，不提交生成的 Rust 文件。
+现有 workspace 包括 tok-core、tok-execution、tok-lifecycle、tok-session、tok-proto、tok-grpc、tok-message、tok-events、tok-nats、tok-gateway、tok-infra、tok-observability 和 tok。tok-events 定义事件契约与处理，tok-nats 实现 NATS 和 JetStream 传输。游戏协议属于 demo/game；框架协议属于 tok-proto。protobuf 构建期生成到 Cargo OUT_DIR，不提交生成的 Rust 文件。
 
 游戏消息 ID 可由 proto 枚举在构建期按名字生成关联，运行时仍按数字分发，配对与权限显式注册。未发布 API/协议直接校正，不增加开发中间状态兼容别名；正式发布后的破坏性变更再按版本策略处理。
 
@@ -163,7 +164,7 @@ Kubernetes 配置可校验但后端未实现，部署目录尚无可运行清单
 
 ## 后续范围
 
-本轮已沿七批计划完成统一执行、构建、生命周期、gateway 扩展和动态 topic，并收敛配置组装；验收结果与平台边界分别记录。JetStream、离线加载、通用跨节点去重、生产安全、Kubernetes、Redis Cluster、Scene、配置式中间件及无缝场景切换另行实施。
+本轮已沿七批计划完成统一执行、构建、生命周期、gateway 扩展和动态 topic，并收敛配置组装；验收结果与平台边界分别记录。JetStream 提供基础持久消费；离线加载、通用跨节点去重、生产安全、Kubernetes、Redis Cluster、Scene、配置式中间件及无缝场景切换另行实施。
 
 Redis Cluster 缓存与 MongoDB 集群是存储选型方向，存储 API 由业务定义、实现独立；缓存失效、持久化时机、事务和版本检查尚未设计，不纳入本轮。跨实体一致性由业务处理，框架不扩展通用补偿事务。
 

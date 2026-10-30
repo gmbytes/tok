@@ -62,9 +62,9 @@ gRPC 接收 → 协议校验与本地 Request 构造 → 入口 Service
 
 session 驱动的目标事件有不同的目标和生命周期：gateway 订阅事件，根据业务选择本地会话，将事件准入对应 session FIFO，再经 logic 入口执行目标主体的业务。不能把服务级配置更新自动扇出为每个 session 的工作，也不能将 session 句柄或主体身份自动注入服务级事件。两种路径可使用同一事件契约、注册和 Tower 执行模型，但各自定义处理预算、就绪、停止、错误和确认边界。
 
-服务级订阅的 topic 与 group 均由组装者决定。所有服务实例需要各自收到配置更新时，采用让每个匹配实例独立接收的订阅方式；同一个竞争消费 group 在成员之间分担，不能保证每个实例都收到。Core NATS 即时投递不保证离线补收、每个实例必达或处理完成确认；启动期间、断线或失败可能漏事件，配置一致性应由游戏选择权威配置读取与版本校验 / 重载等机制，不由本轮框架隐式承诺。JetStream 和持久恢复不是当前交付范围。
+服务级订阅的 topic 与 group 均由组装者决定。所有服务实例需要各自收到配置更新时，采用让每个匹配实例独立接收的订阅方式；同一个竞争消费 group 在成员之间分担，不能保证每个实例都收到。Core NATS 即时投递不保证离线补收、每个实例必达或处理完成确认；配置一致性应由游戏选择权威配置读取与版本校验 / 重载等机制。JetStream 另用稳定 durable 保存进度并重投；持久确认仅表示该消费者的处理职责完成，不提供事务性去重或离线玩家加载。
 
-`tok-events` 提供事件契约、注册、订阅与传输，`tok-message` 提供消息与普通 RPC，`tok-session` 提供 session 驱动的 logic 适配；服务组装层协调多个入口与同一生命周期。无需为事件订阅依赖消息 crate，也未新增 `tok-registry`。`tok_events::service::install` 提供服务工厂内的 Tower 订阅装配，`RegistryService` 适配现有注册表；普通服务、logic 服务及仅事件服务的组合和已验证环境见[实施计划](implementation-plan.md#服务入口与事件统一专项计划)。
+`tok-events` 提供事件契约、注册及传输无关的发布与订阅接口；`tok-nats` 实现 Core NATS 与 JetStream 传输；`tok-message` 提供消息与普通 RPC，`tok-session` 提供 session 驱动的 logic 适配。事件 crate 不依赖 NATS，可关闭默认 protobuf 功能使用本地事件；应用可通过 `Publisher` 携带投递策略发布已编码事件。`tok_events::service::install` 提供服务工厂内的 Tower 订阅装配，`RegistryService` 适配现有注册表；普通服务、logic 服务及仅事件服务的组合和已验证环境见[实施计划](implementation-plan.md#服务入口与事件统一专项计划)。
 
 ```text
 RPC / 客户端业务消息 / 本地或 NATS 事件 / timer

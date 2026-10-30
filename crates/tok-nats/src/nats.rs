@@ -1,10 +1,10 @@
 //! Core NATS 通用服务器事件；按 topic 与事件类型订阅，可显式使用 group 分担消费。
 
-use crate::{Error, Handler, Message};
 use async_nats::{Client, Subscriber};
 use futures_util::{StreamExt, stream::SelectAll};
 use serde::Deserialize;
 use std::{sync::Arc, time::Duration};
+use tok_events::{self as events, Error, Handler, Message};
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
@@ -95,7 +95,7 @@ impl Config {
         }
         Ok(())
     }
-    fn timeout(&self) -> Duration {
+    pub(crate) fn timeout(&self) -> Duration {
         Duration::from_millis(self.operation_timeout_ms)
     }
 }
@@ -104,13 +104,13 @@ impl Config {
 /// 连接中断后不接受新发布，需重新组装；已发出的消息结果可能未知，不重试业务消息。
 #[derive(Clone)]
 pub struct Bus {
-    client: Client,
-    config: Config,
-    failed: CancellationToken,
+    pub(crate) client: Client,
+    pub(crate) config: Config,
+    pub(crate) failed: CancellationToken,
     publishing: Arc<tokio::sync::Semaphore>,
-    subscription: Arc<tokio::sync::Semaphore>,
-    setups: Arc<tokio::sync::Semaphore>,
-    buffer: Arc<tokio::sync::Semaphore>,
+    pub(crate) subscription: Arc<tokio::sync::Semaphore>,
+    pub(crate) setups: Arc<tokio::sync::Semaphore>,
+    pub(crate) buffer: Arc<tokio::sync::Semaphore>,
     consumers_failed: CancellationToken,
 }
 impl Bus {
@@ -167,7 +167,7 @@ impl Bus {
             consumers_failed,
         })
     }
-    fn healthy(&self) -> Result<(), Error> {
+    pub(crate) fn healthy(&self) -> Result<(), Error> {
         if self.failed.is_cancelled()
             || self.client.connection_state() != async_nats::connection::State::Connected
         {
@@ -175,7 +175,7 @@ impl Bus {
         }
         Ok(())
     }
-    fn subject(&self, topic: &crate::Topic, event_type: &str) -> String {
+    pub(crate) fn subject(&self, topic: &events::Topic, event_type: &str) -> String {
         let token = match topic.as_str() {
             None => "d".to_owned(),
             Some(name) => {
@@ -192,10 +192,10 @@ impl Bus {
         };
         format!("tok.events.{}.{token}.{event_type}", self.config.namespace)
     }
-    fn interest(&self, topics: &crate::TopicFilter, event_type: &str) -> String {
+    pub(crate) fn interest(&self, topics: &events::TopicFilter, event_type: &str) -> String {
         match topics {
-            crate::TopicFilter::Exact(topic) => self.subject(topic, event_type),
-            crate::TopicFilter::All => {
+            events::TopicFilter::Exact(topic) => self.subject(topic, event_type),
+            events::TopicFilter::All => {
                 format!("tok.events.{}.*.{event_type}", self.config.namespace)
             }
         }
@@ -244,7 +244,7 @@ impl Bus {
                 let bus = bus.clone();
                 async move {
                     let mut message = request.input;
-                    let mut trace = crate::TraceContext::default();
+                    let mut trace = events::TraceContext::default();
                     opentelemetry::global::get_text_map_propagator(|propagator| {
                         propagator.inject_context(&request.context.span().context(), &mut trace);
                     });
@@ -263,26 +263,69 @@ impl Bus {
         })
     }
     /// 在当前调用范围内编码并发布强类型事件；本地能力不进入事件正文。
-    pub async fn publish_request<E: crate::Event + prost::Message>(
+    pub async fn publish_request<E: events::Event + prost::Message>(
         &self,
-        request: tok_execution::Request<crate::Envelope<E>>,
+        request: tok_execution::Request<events::Envelope<E>>,
     ) -> Result<tok_execution::Response<()>, Error> {
-        use tower::ServiceExt as _;
-        request.context.check().map_err(Error::Stopped)?;
-        let request = request.try_map(|event| Message::new(&event))?;
-        self.publisher().oneshot(request).await
+        use tower::{Layer as _, ServiceExt as _};
+        let bus = self.clone();
+        tok_execution::Layer
+            .layer(tower::service_fn(
+                move |request: tok_execution::Request<events::Envelope<E>>| {
+                    let bus = bus.clone();
+                    async move {
+                        bus.healthy()?;
+                        let _permit = bus
+                            .publishing
+                            .try_acquire()
+                            .map_err(|_| Error::CapacityExceeded)?;
+                        let explicit_trace = request.input.trace_context.clone();
+                        let mut message = Message::from_protobuf(&request.input)?;
+                        // 本次调用使用显式载体或请求 span，不能沿用当前任务的隐式 span。
+                        message.trace_context = explicit_trace;
+                        let mut trace = events::TraceContext::default();
+                        opentelemetry::global::get_text_map_propagator(|propagator| {
+                            propagator
+                                .inject_context(&request.context.span().context(), &mut trace);
+                        });
+                        if trace.traceparent.is_some() {
+                            message.trace_context = trace;
+                        }
+                        request.context.check().map_err(Error::Stopped)?;
+                        match E::DELIVERY {
+                            events::DeliveryPolicy::Immediate => bus.send(&message).await,
+                            events::DeliveryPolicy::Persistent => {
+                                bus.send_persistent(&message).await
+                            }
+                        }
+                        .map(tok_execution::Response::new)
+                    }
+                },
+            ))
+            .oneshot(request)
+            .await
+            .map_err(|error| match error {
+                tok_execution::Error::Stopped(reason) => Error::Stopped(reason),
+                tok_execution::Error::Inner(error) => error,
+            })
     }
-    /// 发布强类型事件；先占用发布容量再编码，成功仅表示客户端接受发布操作。
-    pub async fn publish_event<E: crate::Event + prost::Message>(
+    /// 发布强类型事件；先占用发布容量再编码。
+    /// Immediate 成功表示客户端接受；Persistent 成功表示 JetStream 确认存储。
+    /// 两者均不表示业务消费完成，持久发布超时后结果可能未知。
+    pub async fn publish_event<E: events::Event + prost::Message>(
         &self,
-        envelope: crate::Envelope<E>,
+        envelope: events::Envelope<E>,
     ) -> Result<(), Error> {
         self.healthy()?;
         let _permit = self
             .publishing
             .try_acquire()
             .map_err(|_| Error::CapacityExceeded)?;
-        self.send(&Message::new(&envelope)?).await
+        let message = Message::from_protobuf(&envelope)?;
+        match E::DELIVERY {
+            events::DeliveryPolicy::Immediate => self.send(&message).await,
+            events::DeliveryPolicy::Persistent => self.send_persistent(&message).await,
+        }
     }
     /// 发布已有编码事件；成功仅表示客户端接受发布操作，不等待 broker 或订阅者确认。
     /// 断线仍可能丢失事件，不自动重试。
@@ -293,6 +336,49 @@ impl Bus {
             .try_acquire()
             .map_err(|_| Error::CapacityExceeded)?;
         self.send(message).await
+    }
+    async fn send_persistent(&self, message: &Message) -> Result<(), Error> {
+        let bytes = message.encode(self.config.max_message_bytes)?;
+        let trace = &message.trace_context;
+        let headers_len = if trace.traceparent.is_none() && trace.tracestate.is_none() {
+            0
+        } else {
+            12
+        } + trace
+            .traceparent
+            .as_ref()
+            .map_or(0, |value| value.len() + 15)
+            + trace
+                .tracestate
+                .as_ref()
+                .map_or(0, |value| value.len() + 14);
+        if bytes.len().saturating_add(headers_len) > self.config.max_message_bytes {
+            return Err(Error::InvalidInput("事件与追踪头总字节数超出上限"));
+        }
+        let mut headers = async_nats::HeaderMap::new();
+        if let Some(value) = &message.trace_context.traceparent {
+            headers.insert("traceparent", value.as_str());
+        }
+        if let Some(value) = &message.trace_context.tracestate {
+            headers.insert("tracestate", value.as_str());
+        }
+        let subject = self.subject(&message.topic, &message.event_type).replacen(
+            "tok.events.",
+            "tok.persistent.",
+            1,
+        );
+        let context = async_nats::jetstream::new(self.client.clone());
+        tokio::time::timeout(self.config.timeout(), async {
+            let ack = context
+                .publish_with_headers(subject, headers, bytes.into())
+                .await
+                .map_err(|_| Error::Unavailable("JetStream 发布失败"))?;
+            ack.await
+                .map_err(|_| Error::Unavailable("JetStream 发布确认失败"))?;
+            Ok(())
+        })
+        .await
+        .map_err(|_| Error::Unavailable("JetStream 发布确认超时，结果未知"))?
     }
     async fn send(&self, message: &Message) -> Result<(), Error> {
         let bytes = message.encode(self.config.max_message_bytes)?;
@@ -344,14 +430,12 @@ impl Bus {
     /// 安装独立订阅组件，按其声明的 topic、处理者事件类型与消费组建立订阅。
     /// 返回前确认该连接上的订阅命令已被 broker 处理，不等待 handler 执行。
     /// 相同 group 的实例分担匹配事件，不提供 bid 路由或业务去重。
-    pub async fn subscribe(&self, subscriber: crate::Subscriber) -> Result<Subscription, Error> {
-        let crate::Subscriber {
-            service,
-            extensions,
-            handler,
-            group,
-            topics,
-        } = subscriber;
+    pub async fn subscribe(&self, subscriber: events::Subscriber) -> Result<Subscription, Error> {
+        let service = subscriber.service().clone();
+        let extensions = subscriber.extensions().clone();
+        let handler = Arc::clone(subscriber.handler());
+        let group = subscriber.group().map(str::to_owned);
+        let topics = subscriber.topics().clone();
         let group = group.as_deref();
         self.healthy()?;
         if self.consumers_failed.is_cancelled() {
@@ -360,7 +444,7 @@ impl Bus {
             ));
         }
         if let Some(group) = group {
-            crate::validate_name(group)?;
+            events::validate_name(group)?;
         }
         let _setup = self
             .setups
@@ -372,7 +456,7 @@ impl Bus {
         }
         let mut unique = std::collections::BTreeSet::new();
         for name in &names {
-            crate::validate_name(name)?;
+            events::validate_name(name)?;
             if !unique.insert(*name) {
                 return Err(Error::InvalidInput("订阅事件类型重复"));
             }
@@ -431,7 +515,7 @@ pub struct Subscription {
     service: tok_core::service::Identity,
     extensions: tok_core::Extensions,
     bus: Bus,
-    topics: crate::TopicFilter,
+    topics: events::TopicFilter,
     subscribers: SelectAll<Subscriber>,
     handler: Arc<dyn Handler>,
     _permit: tokio::sync::OwnedSemaphorePermit,
@@ -463,7 +547,7 @@ impl Subscription {
                     let Some(message) = message else { break Err(Error::Unavailable("NATS 订阅结束")); };
                     if message.length > self.bus.config.max_message_bytes { tracing::error!("拒绝超大 NATS 事件"); continue; }
                     let headers = message.headers.as_ref();
-                    let trace = crate::TraceContext {
+                    let trace = events::TraceContext {
                         traceparent: headers.and_then(|headers| headers.get("traceparent")).map(ToString::to_string),
                         tracestate: headers.and_then(|headers| headers.get("tracestate")).map(ToString::to_string),
                     };
@@ -502,7 +586,12 @@ impl Subscription {
                         result = tokio::time::timeout(Duration::from_millis(self.bus.config.handler_timeout_ms), self.handler.handle(request)).instrument(span.clone()) => result,
                     };
                     let outcome = match result {
-                        Ok(Ok(outcome)) => outcome.output.label(),
+                        Ok(Ok(outcome)) => match outcome.output {
+                            events::Outcome::Ignored => "ignored",
+                            events::Outcome::Handled => "handled",
+                            events::Outcome::Rejected => "rejected",
+                            events::Outcome::Partial => "partial",
+                        },
                         Ok(Err(error)) => { tracing::error!(parent: &span, %error, "服务器事件处理失败，不重试"); "error" },
                         Err(_) => { tracing::error!(parent: &span, "服务器事件处理超时，结果未知，不重试"); "timeout" },
                     };
@@ -528,15 +617,62 @@ impl Subscription {
     }
 }
 
-impl crate::interest::Transport for Bus {
+impl events::interest::Transport for Bus {
     fn subscribe(
         &self,
-        subscriber: crate::Subscriber,
+        subscriber: events::Subscriber,
         stop: CancellationToken,
-    ) -> crate::Task<'_, crate::Task<'static, ()>> {
+    ) -> events::Task<'_, events::Task<'static, ()>> {
         Box::pin(async move {
             let subscription = Bus::subscribe(self, subscriber).await?;
-            Ok(Box::pin(subscription.run(stop)) as crate::Task<'static, ()>)
+            Ok(Box::pin(subscription.run(stop)) as events::Task<'static, ()>)
+        })
+    }
+}
+
+impl events::Publisher for Bus {
+    fn publish(
+        &self,
+        request: tok_execution::Request<events::Publication>,
+    ) -> events::Task<'_, tok_execution::Response<()>> {
+        use tower::{Layer as _, ServiceExt as _};
+        let bus = self.clone();
+        Box::pin(async move {
+            tok_execution::Layer
+                .layer(tower::service_fn(
+                    move |request: tok_execution::Request<events::Publication>| {
+                        let bus = bus.clone();
+                        async move {
+                            bus.healthy()?;
+                            let _permit = bus
+                                .publishing
+                                .try_acquire()
+                                .map_err(|_| Error::CapacityExceeded)?;
+                            let mut message = request.input.message;
+                            let mut trace = events::TraceContext::default();
+                            opentelemetry::global::get_text_map_propagator(|propagator| {
+                                propagator
+                                    .inject_context(&request.context.span().context(), &mut trace);
+                            });
+                            if trace.traceparent.is_some() {
+                                message.trace_context = trace;
+                            }
+                            match request.input.delivery {
+                                events::DeliveryPolicy::Immediate => bus.send(&message).await,
+                                events::DeliveryPolicy::Persistent => {
+                                    bus.send_persistent(&message).await
+                                }
+                            }
+                            .map(tok_execution::Response::new)
+                        }
+                    },
+                ))
+                .oneshot(request)
+                .await
+                .map_err(|error| match error {
+                    tok_execution::Error::Stopped(reason) => Error::Stopped(reason),
+                    tok_execution::Error::Inner(error) => error,
+                })
         })
     }
 }

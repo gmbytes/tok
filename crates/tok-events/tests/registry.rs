@@ -1,4 +1,5 @@
 //! 通用服务订阅：类型隔离、状态捕获、异步处理和容量，不依赖网关。
+#![cfg(feature = "protobuf")]
 mod support;
 use std::sync::{
     Arc,

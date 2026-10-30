@@ -30,6 +30,7 @@ hmac.workspace = true
 sha2.workspace = true
 
 [dev-dependencies]
+tok-nats.workspace = true
 tok-infra.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 

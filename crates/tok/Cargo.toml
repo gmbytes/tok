@@ -12,6 +12,7 @@ tok-session.workspace = true
 tok-execution.workspace = true
 tok-lifecycle.workspace = true
 tok-events.workspace = true
+tok-nats.workspace = true
 tok-gateway.workspace = true
 tok-infra.workspace = true
 tok-grpc.workspace = true

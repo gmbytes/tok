@@ -28,7 +28,7 @@ impl Event for ConfigChanged {
 #[ignore = "需要真实 NATS"]
 async fn public_service_shares_state_between_rpc_and_its_own_event_subscription() {
     let bus = Arc::new(
-        events::nats::Bus::connect(events::nats::Config {
+        tok::nats::Bus::connect(tok::nats::Config {
             url: std::env::var("TOK_TEST_NATS_URL")
                 .unwrap_or_else(|_| "nats://127.0.0.1:4222".into()),
             namespace: format!("test-{}", EventId::generate()),

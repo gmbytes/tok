@@ -3,10 +3,8 @@ use std::{
     sync::{Arc, Mutex},
     time::Duration,
 };
-use tok_events::{
-    Envelope, Event, EventId, Handler, Message, Outcome, Task,
-    nats::{Bus, Config},
-};
+use tok_events::{Envelope, Event, EventId, Handler, Message, Outcome, Task};
+use tok_nats::{Bus, Config};
 use tokio_util::sync::CancellationToken;
 #[derive(Clone, PartialEq, prost::Message)]
 struct Changed {

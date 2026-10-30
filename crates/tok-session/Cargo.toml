@@ -22,5 +22,8 @@ tonic.workspace = true
 prost.workspace = true
 thiserror.workspace = true
 
+[dev-dependencies]
+tok-nats.workspace = true
+
 [lints]
 workspace = true

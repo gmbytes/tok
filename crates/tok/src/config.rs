@@ -92,7 +92,7 @@ pub struct EndpointConfig {
 pub struct AppConfig {
     /// 可选 Core NATS 即时事件连接，独立于发现和 session 所有权。
     #[serde(default)]
-    pub events: Option<tok_events::nats::Config>,
+    pub events: Option<tok_nats::Config>,
     /// 可选的本地固定共享密钥；省略时使用单进程临时密钥。
     #[serde(default)]
     pub resume_token: Option<tok_gateway::logic::resume_token::Config>,

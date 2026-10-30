@@ -13,6 +13,8 @@ pub use tok_grpc as grpc;
 pub use tok_infra as infra;
 /// 编号业务消息注册与协议适配。
 pub use tok_message as message;
+/// NATS 即时和持久事件传输适配。
+pub use tok_nats as nats;
 pub use tok_observability as observability;
 /// 玩家会话、逻辑消息、计时需求、所有权与恢复凭证契约。
 pub use tok_session as session;

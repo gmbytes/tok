@@ -6,22 +6,22 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+[features]
+default = ["protobuf"]
+protobuf = ["dep:prost", "dep:tok-proto"]
+
 [dependencies]
 tok-execution.workspace = true
 tok-lifecycle.workspace = true
 tok-core.workspace = true
 tower.workspace = true
-async-nats.workspace = true
-futures-util.workspace = true
-prost.workspace = true
-tok-proto.workspace = true
+prost = { workspace = true, optional = true }
+tok-proto = { workspace = true, optional = true }
 tokio.workspace = true
 tokio-util.workspace = true
-serde.workspace = true
 opentelemetry.workspace = true
 tracing.workspace = true
 tracing-opentelemetry.workspace = true
-metrics.workspace = true
 thiserror.workspace = true
 uuid.workspace = true
 

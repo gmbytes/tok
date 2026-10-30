@@ -39,11 +39,14 @@ AGENTS.md 已记录有官方依据的 API 组织规则：功能命名空间公�
 | RPC | [tok-grpc](../crates/tok-grpc/src/lib.rs) 提供连接、端点和通用执行；[tok-message](../crates/tok-message/src/lib.rs) 提供普通业务 RPC 与可选请求锁；[tok-session](../crates/tok-session/src/lib.rs) 提供 logic RPC、事件与 timer 适配 | RPC 工厂初始化必须安装处理链，未安装不发布；同一端点不能覆盖同名 protobuf 服务 |
 | 事件 | [Registry](../crates/tok-events/src/registry.rs) 本地借用及远程解码共用处理表，有序多处理者、原始错误及 Arc 保留 | 本地 dispatch 显式等待；远程发布不等待业务结果，不提供事务或隐式去重 |
 | topic / group | Event::topic 默认全局，可固定或由正文字段派生；[Pool](../crates/tok-events/src/interest.rs) 按组件/主题聚合固定与会话引用 | group 属于订阅组件；无组独立接收，同组分担不等于玩家归属路由 |
-| NATS | [Bus](../crates/tok-events/src/nats.rs) 按 namespace、topic、类型安全路由，有限 SID、建立操作、缓冲与处理预算 | Core NATS 即时事件；发布只表示接受，订阅建立有限回环就绪；没有 JetStream |
+| NATS | [Bus](../crates/tok-nats/src/nats.rs) 按 namespace、topic、类型安全路由，有限 SID、建立操作、缓冲与处理预算；[JetStream 消费](../crates/tok-nats/src/jetstream.rs) 使用显式 durable | Core NATS 即时发布只表示接受；Persistent 发布等待 JetStream 存储确认，成功消费后确认，失败可重投 |
+
 | gateway / session | [Gateway](../crates/tok-gateway/src/server.rs) 作为共同设施的内置扩展，提供快照、状态工厂、生命周期观察及准入/执行/新下行 Layer | 通信、FIFO、timer、ACK、恢复与交接保留各自状态机；不强制普通服务具备 session |
 | 动态成员 | 异步 join/leave 等待所选组件就绪，可信策略在登录前准备初始主题；目标交接提交前准备兴趣 | 宽限期与冻结期间保留兴趣；离线/恢复/冻结不投递即时事件，冻结窗口不补收 |
 | 发现与协调 | Memory / Redis 发现、会话所有权、请求级锁；发现缓存和路由分离 | Memory 仅单进程；租约与超时是尽力保护，不保证严格 fencing 或恰好一次 |
-| 工程与文档 | 十二个框架 crate、demo、构建期 protobuf/消息 ID 生成、中文 rustdoc、workspace lint、LF、Windows/Linux CI | CI 配置不等于本地已执行 Linux 验证；真实外部服务与 release 结果分别记录 |
+| 工程与文档 | 框架 crate、demo、构建期 protobuf/消息 ID 生成、中文 rustdoc、workspace lint、LF、Windows/Linux CI | CI 配置不等于本地已执行 Linux 验证；真实外部服务与 release 结果分别记录 |
+
+`tok-events` 不依赖 NATS，默认 protobuf 编解码可通过关闭默认功能移除；通用 `Publisher` 接收带投递策略的 `Publication`，`tok-nats::Bus` 实现发布接口并通过订阅传输契约接入相同处理链。
 
 ## 使用与失败边界
 
@@ -59,7 +62,7 @@ AGENTS.md 已记录有官方依据的 API 组织规则：功能命名空间公�
 
 ## 后续范围
 
-本轮模型与组装收敛不等于所有游戏服务器能力都已完成。JetStream、离线玩家加载、全局去重、玩家归属扇出中继、通用路由器/熔断器、生产安全、Kubernetes、Redis Cluster、Scene 接入、热配置与存储层仍属后续设计。在线成员为零时释放兴趣是未提供的可选优化，当前按逻辑会话生命期保留；不承诺即时事件无丢失。
+本轮模型与组装收敛不等于所有游戏服务器能力都已完成。离线玩家加载、全局去重、玩家归属扇出中继、通用路由器/熔断器、生产安全、Kubernetes、Redis Cluster、Scene 接入、热配置与存储层仍属后续设计。JetStream 当前要求部署方预建 stream，使用明确 durable 与有界重投；不能把网关入队当成业务完成。在线成员为零时释放兴趣是未提供的可选优化，当前按逻辑会话生命期保留；不承诺即时事件无丢失。
 
 ## P7 验证与复现
 
@@ -224,14 +227,14 @@ Listener::from_server 已支持带 Tower Layer 的 Tonic Server。内部改为 R
 | 3 | [玩家准入链](../crates/tok-gateway/src/logic/pipeline.rs) 的 admission 输出仅 LogicalMessage；[BoundSession::submit](../crates/tok-gateway/src/logic/session/handle.rs) 准入后只将正文入队；[RequestJob / worker](../crates/tok-gateway/src/logic/session/worker.rs) 出队后重建执行 Context | 准入中写入的自定义扩展无法进入请求执行链；队列没有携带截止点，执行预算从出队后重新开始。需要保留执行承载并明确准入与已接受工作的范围边界；保留断线后在途业务收束的既有语义，不能直接将连接取消令牌替换为所有阶段共同取消令牌。即使声明准入与执行为独立范围，也须明确扩展转移及预算起点，不能静默丢弃 |
 | 4 | [事件转发/通知组件](../crates/tok-gateway/src/logic/events.rs) 调 deliver 时只传 Delivery；[SessionManager::deliver](../crates/tok-gateway/src/logic/session/events.rs) 不接收 Context；EventJob 只保留事件与当前 Span；[下行入口](../crates/tok-gateway/src/logic/session/handle.rs) 每次新建 Context | 事件中间件写入的本地扩展与消费期限无法接续到投递/下行；异步玩家事件执行只继承部分追踪。应将投递与下行适配接入共同执行承载，区分当前订阅者等待的准入范围与成功入队后的独立 session 工作。跨 session fan-out 由目标安装自身能力并显式筛选源元信息，不复制源 SessionHandle；补发仍不重复执行新下行中间件 |
 | 5 | [GatewayRpcService](../crates/tok-gateway/src/rpc.rs) 四个交接方法直接 into_inner，再调用 SessionManager；[交接协调](../crates/tok-gateway/src/logic/session/handoff.rs) 直接使用生成的 GatewayRpcClient 与 timeout_at | 内部交接服务未通过 Server::context / 共同执行链，接收端丢弃 metadata，出站与接收入口缺少一致的本地能力、追踪和预算适配。现有 budget_ms、handoff deadline、租约和补偿状态机必须保留；接入 Context 后合并限制，不能将已有取消/完成补偿简单绑定到已失效的原调用 |
-| 6 | [NATS 发布](../crates/tok-events/src/nats.rs) publish / publish_event 接收 Message / Envelope，调用方通过正文追踪载体传递信息，没有接收执行 Context 的框架发布适配 | 原生传输出口可保留；需要为当前处理链内的发布提供显式、保持 Context 的适配，约束本地发布等待和追踪提取。不能因此将 Extensions 序列化，或让独立订阅消费继承发布者的短期调用期限；Core NATS 发布成功仍不是 broker / 订阅者确认 |
+| 6 | [NATS 发布](../crates/tok-nats/src/nats.rs) publish / publish_event 接收 Message / Envelope，调用方通过正文追踪载体传递信息，没有接收执行 Context 的框架发布适配 | 原生传输出口可保留；需要为当前处理链内的发布提供显式、保持 Context 的适配，约束本地发布等待和追踪提取。不能因此将 Extensions 序列化，或让独立订阅消费继承发布者的短期调用期限；Core NATS 发布成功仍不是 broker / 订阅者确认 |
 
 ### 已符合或不应机械迁移的部分
 
 - [Context::child](../crates/tok-execution/src/context.rs) 保留当前服务、原截止点、父子取消关系与 Span；输入扩展由 Request 转换与显式拆装保留；[通用分发表](../crates/tok-execution/src/registry.rs)、[protobuf 适配](../crates/tok-message/src/protobuf.rs)、[游戏处理适配](../crates/tok-message/src/rpc/handler.rs) 转换输入时移交原 context。无需因文件拆分重建另一套上下文。
 - [本地事件 Registry](../crates/tok-events/src/registry.rs) 从父范围派生事件操作，保留自定义扩展，显式覆盖事件头并清除不适用于新事件的原编码；这是有意的扩展作用域处理，不是任意丢失。
 - [普通 RPC 接收端](../crates/tok-message/src/rpc/service.rs) 经 Server::request 重建本地范围，注入本地请求能力和可信协议关联，再进入共同执行链。远端重建本身符合规范，不要求恢复源进程的 Extensions。
-- [NATS 消费](../crates/tok-events/src/nats.rs) 使用订阅服务身份、消费预算、停止信号与 [Subscriber 本地扩展](../crates/tok-events/src/subscriber.rs) 建立独立执行范围，随后提交 Request。无需复制发布者的本地能力或执行期限。
+- [NATS 消费](../crates/tok-nats/src/nats.rs) 使用订阅服务身份、消费预算、停止信号与 [Subscriber 本地扩展](../crates/tok-events/src/subscriber.rs) 建立独立执行范围，随后提交 Request。无需复制发布者的本地能力或执行期限。
 - timer 触发、独立生命周期通知和新登录初始化建立新范围有合理职责；应明确入口语义，而不是把所有 Context::new 都替换为 child。SessionManager / SessionHandle 的目标本地能力注入应保留。
 - Extensions、生命周期初始化容器、发现/路由/锁/所有权后端、编解码和底层 Channel 不是业务处理链承载，无需机械增加 Request 参数。scene 仍是预留实现，不计为已完成的执行适配。
 

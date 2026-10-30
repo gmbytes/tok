@@ -23,15 +23,7 @@ pub enum Outcome {
     Partial,
 }
 impl Outcome {
-    pub(crate) fn label(self) -> &'static str {
-        match self {
-            Self::Ignored => "ignored",
-            Self::Handled => "handled",
-            Self::Rejected => "rejected",
-            Self::Partial => "partial",
-        }
-    }
-    fn combine(results: Vec<Self>) -> Self {
+    pub(crate) fn combine(results: Vec<Self>) -> Self {
         let handled = results
             .iter()
             .any(|r| matches!(r, Self::Handled | Self::Partial));
@@ -93,7 +85,7 @@ impl<F> From<tok_execution::Error<F>> for DispatchError<F> {
 }
 
 type Erased = dyn Any + Send + Sync;
-type Decoder = fn(&Message) -> Result<Box<Erased>, Error>;
+type Decoder = Box<dyn Fn(&Message) -> Result<Box<Erased>, Error> + Send + Sync>;
 trait Route<C, O, F>: Send + Sync {
     fn call<'a>(
         &'a self,
@@ -209,15 +201,24 @@ impl<C: Send, O, F> Registry<C, O, F> {
         Ok(())
     }
     /// 为已注册类型安装 protobuf 解码适配；本地事件不需要 prost 或此操作。
+    #[cfg(feature = "protobuf")]
     pub fn enable_protobuf<E: Event + prost::Message + Default>(&mut self) -> Result<(), Error> {
+        self.enable_decoder::<E>(|body| {
+            E::decode(body).map_err(|_| Error::InvalidInput("事件正文解码失败"))
+        })
+    }
+    /// 为已注册事件安装自定义正文解码器；解码后仍校验事件 topic 契约。
+    pub fn enable_decoder<E: Event>(
+        &mut self,
+        decode: fn(&[u8]) -> Result<E, Error>,
+    ) -> Result<(), Error> {
         let entry = self
             .entries
             .get_mut(E::NAME)
             .filter(|entry| entry.type_id == TypeId::of::<E>())
             .ok_or(Error::InvalidInput("先注册事件处理者再安装解码器"))?;
-        entry.decoder = Some(|message| {
-            let payload = E::decode(message.body.as_slice())
-                .map_err(|_| Error::InvalidInput("事件正文解码失败"))?;
+        entry.decoder = Some(Box::new(move |message| {
+            let payload = decode(message.body.as_slice())?;
             let envelope = Envelope {
                 topic: message.topic.clone(),
                 event_id: message.event_id.clone(),
@@ -226,7 +227,7 @@ impl<C: Send, O, F> Registry<C, O, F> {
             };
             envelope.validate()?;
             Ok(Box::new(envelope))
-        });
+        }));
         Ok(())
     }
     /// 在当前任务直接分发强类型事件；没有订阅者返回空结果，不产生客户端回应。
@@ -276,7 +277,7 @@ impl<C: Send, O, F> Registry<C, O, F> {
             .entries
             .get(&request.input.event_type)
             .ok_or(DispatchError::Unknown)?;
-        let decoder = entry.decoder.ok_or(DispatchError::Unknown)?;
+        let decoder = entry.decoder.as_ref().ok_or(DispatchError::Unknown)?;
         let event = decoder(&request.input).map_err(DispatchError::Invalid)?;
         execution.extensions_mut().insert(request.input);
         Self::execute(entry, state, execution, event.as_ref()).await
