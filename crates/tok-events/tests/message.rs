@@ -1,43 +1,48 @@
 //! 通用即时事件编码与版本、大小校验；不依赖外部服务。
-#![cfg(feature = "protobuf")]
 use prost::Message as _;
-use tok_events::{DeliveryPolicy, Envelope, Event, EventId, Message};
-#[derive(Clone, PartialEq, prost::Message)]
+mod codec_support;
+use tok_events::{Envelope, Event, EventId, Message};
+#[derive(Clone, PartialEq)]
 struct Changed {
-    #[prost(int64, tag = "1")]
     value: i64,
+}
+impl codec_support::Body for Changed {
+    fn encode_body(&self) -> Vec<u8> {
+        self.value.to_le_bytes().to_vec()
+    }
+    fn decode_body(body: &[u8]) -> Result<Self, std::io::Error> {
+        let bytes: [u8; 8] = body.try_into().map_err(std::io::Error::other)?;
+        Ok(Self {
+            value: i64::from_le_bytes(bytes),
+        })
+    }
 }
 impl Event for Changed {
     const NAME: &'static str = "test.changed.v1";
-}
-#[derive(Clone, PartialEq, prost::Message)]
-struct Persistent {}
-impl Event for Persistent {
-    const NAME: &'static str = "test.persistent";
-    const DELIVERY: DeliveryPolicy = DeliveryPolicy::Persistent;
 }
 fn envelope() -> Envelope<Changed> {
     Envelope::new(EventId::generate(), Changed { value: 7 }).unwrap()
 }
 #[test]
 fn immediate_messages_round_trip_without_changing_event_identity_or_body() {
-    let message = Message::new(&envelope()).unwrap();
+    let message = codec_support::message(&envelope()).unwrap();
     {
         let decoded = Message::decode(&message.encode(4096).unwrap(), 4096).unwrap();
         assert_eq!(decoded.event_id, message.event_id);
-        assert_eq!(Changed::decode(decoded.body.as_slice()).unwrap().value, 7);
+        assert_eq!(
+            <Changed as codec_support::Body>::decode_body(&decoded.body)
+                .unwrap()
+                .value,
+            7
+        );
     }
 }
 #[test]
-fn persistent_policy_is_rejected_before_publication() {
-    assert!(matches!(
-        Message::new(&Envelope::<Persistent>::new(EventId::generate(), Persistent {}).unwrap()),
-        Err(tok_events::Error::Unsupported(_))
-    ));
-}
-#[test]
 fn bounded_decode_rejects_unknown_versions_and_invalid_payloads() {
-    let valid = Message::new(&envelope()).unwrap().encode(4096).unwrap();
+    let valid = codec_support::message(&envelope())
+        .unwrap()
+        .encode(4096)
+        .unwrap();
     let original = tok_proto::internal::v1::EventEnvelope::decode(valid.as_slice()).unwrap();
     let wire = tok_proto::internal::v1::EventEnvelope {
         version: 0,
@@ -46,37 +51,53 @@ fn bounded_decode_rejects_unknown_versions_and_invalid_payloads() {
     assert!(Message::decode(&wire.encode_to_vec(), 4096).is_err());
     assert!(Message::decode(&valid, valid.len() - 1).is_err());
     assert!(Message::decode(&[255], 4096).is_err());
-    assert!(Message::new(&envelope()).unwrap().encode(1).is_err());
+    assert!(
+        codec_support::message(&envelope())
+            .unwrap()
+            .encode(1)
+            .is_err()
+    );
 }
 
-#[derive(Clone, PartialEq, prost::Message)]
+#[derive(Clone, PartialEq)]
 struct Large {
-    #[prost(bytes, tag = "1")]
     body: Vec<u8>,
+}
+impl codec_support::Body for Large {
+    fn encode_body(&self) -> Vec<u8> {
+        self.body.clone()
+    }
+    fn decode_body(body: &[u8]) -> Result<Self, std::io::Error> {
+        Ok(Self {
+            body: body.to_vec(),
+        })
+    }
 }
 impl Event for Large {
     const NAME: &'static str = "test.large.v1";
 }
 #[test]
-fn typed_constructor_rejects_oversized_protobuf_payloads() {
+fn typed_constructor_rejects_oversized_payloads() {
     let envelope = Envelope::<Large>::new(
         EventId::generate(),
         Large {
-            body: vec![0; 1_048_576],
+            body: vec![0; 1_048_577],
         },
     )
     .unwrap();
     assert!(matches!(
-        Message::new(&envelope),
-        Err(tok_events::Error::InvalidInput(_))
+        codec_support::message(&envelope),
+        Err(tok_events::EncodeError::Event(
+            tok_events::Error::InvalidInput(_)
+        ))
     ));
 }
 
 #[test]
 fn topic_round_trip_distinguishes_default_from_named_and_rejects_bad_wire_names() {
-    let default = Message::new(&envelope()).unwrap();
+    let default = codec_support::message(&envelope()).unwrap();
     let routed = |route: &str| {
-        Message::new(
+        codec_support::message(
             &Envelope::new(
                 EventId::generate(),
                 Routed {
@@ -107,12 +128,18 @@ fn topic_round_trip_distinguishes_default_from_named_and_rejects_bad_wire_names(
     assert!(tok_events::Topic::named("a".repeat(256)).is_ok());
 }
 
-#[derive(Clone, PartialEq, prost::Message)]
+#[derive(Clone, PartialEq)]
 struct Routed {
-    #[prost(int64, tag = "1")]
     value: i64,
-    #[prost(string, optional, tag = "2")]
     route: Option<String>,
+}
+impl codec_support::Body for Routed {
+    fn encode_body(&self) -> Vec<u8> {
+        self.value.to_le_bytes().to_vec()
+    }
+    fn decode_body(_: &[u8]) -> Result<Self, std::io::Error> {
+        Err(std::io::Error::other("不用于解码"))
+    }
 }
 impl Event for Routed {
     const NAME: &'static str = "test.routed.v1";
@@ -129,7 +156,7 @@ fn typed_events_reject_routes_that_disagree_with_the_event_contract() {
     let mut global = envelope();
     global.topic = tok_events::Topic::named("other").unwrap();
     assert!(global.validate().is_err());
-    assert!(Message::new(&global).is_err());
+    assert!(codec_support::message(&global).is_err());
     assert!(
         Envelope::new(
             EventId::generate(),

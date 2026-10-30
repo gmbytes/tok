@@ -14,7 +14,7 @@ mod subscriber;
 mod topic;
 
 pub use contract::{Envelope, Event, EventId, TraceContext, validate_name};
-pub use message::Message;
+pub use message::{EncodeError, Message};
 pub use publisher::{Publication, Publisher, PublisherService};
 pub use registry::{Callback, DispatchError, Handler, Input, Outcome, Registry, Task, handler};
 pub use subscriber::Subscriber;

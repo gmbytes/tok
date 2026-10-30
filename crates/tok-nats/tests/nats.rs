@@ -1,8 +1,16 @@
 //! 真实 Core NATS：独立订阅、环境隔离、坏包跳过和断线退出。
+#[path = "../../../tests/support_codec/codec.rs"]
+mod test_codec;
+#[path = "../../../tests/support_codec/events.rs"]
+mod test_events;
+#[path = "../../../tests/support_codec/nats.rs"]
+mod test_nats;
 use std::{
     sync::{Arc, Mutex},
     time::Duration,
 };
+use test_events::RegistryExt as _;
+use test_nats::PublisherExt as _;
 use tok_events::{Envelope, Event, EventId, Handler, Message, Outcome, Task};
 use tok_nats::{Bus, Config};
 use tokio_util::sync::CancellationToken;
@@ -23,7 +31,8 @@ fn config() -> Config {
     }
 }
 fn message() -> Message {
-    Message::new(&Envelope::new(EventId::generate(), Changed { value: 7 }).unwrap()).unwrap()
+    test_events::immediate(&Envelope::new(EventId::generate(), Changed { value: 7 }).unwrap())
+        .unwrap()
 }
 #[derive(Default)]
 struct Capture(Mutex<Vec<Arc<Message>>>);
@@ -1270,11 +1279,11 @@ async fn topic_routes_isolate_default_named_namespaces_and_groups_and_reject_for
             .collect::<String>()
     );
     let subject = format!("tok.events.{}.{token}.{}", config.namespace, Routed::NAME);
-    let forged = Message::new(&event(b.clone(), 888)).unwrap();
+    let forged = test_events::immediate(&event(b.clone(), 888)).unwrap();
     raw.publish(subject.clone(), forged.encode(4096).unwrap().into())
         .await
         .unwrap();
-    let correct = Message::new(&event(a.clone(), 777)).unwrap();
+    let correct = test_events::immediate(&event(a.clone(), 777)).unwrap();
     raw.publish(
         format!("tok.events.{}.d.{}", config.namespace, Routed::NAME),
         correct.encode(4096).unwrap().into(),

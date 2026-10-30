@@ -1,7 +1,6 @@
 use super::CallContext;
 use crate::TimerTrigger;
 use crate::TimerUpdate;
-use prost::Message;
 use std::{collections::BTreeMap, future::Future, pin::Pin, sync::Arc};
 use tok_execution::{Request as ExecutionRequest, Response, StopReason};
 use tok_proto::internal::v1::{self as proto, CallResponse, Payload};
@@ -28,7 +27,7 @@ pub struct HandlerReply<M> {
 
 /// 消息与 timer 的编解码路由；服务器事件委托统一事件 Registry。
 pub struct HandlerRegistry<
-    G: tok_execution::Registry + ?Sized = tok_message::protobuf::Table<
+    G: tok_execution::Registry + ?Sized = tok_message::codec::Table<
         u32,
         CallContext,
         Option<TimerUpdate>,
@@ -48,7 +47,7 @@ impl Default for HandlerRegistry {
 impl HandlerRegistry {
     /// 使用默认静态 Table 创建空表；事件处理者总量上限为 65536。
     pub fn new() -> Self {
-        Self::from_registry(tok_message::protobuf::Table::new(), |error| {
+        Self::from_registry(tok_message::codec::Table::new(), |error| {
             table_status(error, |status| status)
         })
     }
@@ -86,71 +85,31 @@ where
     G: tok_execution::Registry<
             Key = u32,
             Input = (CallContext, Vec<u8>),
-            Output = tok_message::protobuf::Reply<
-                tok_message::protobuf::Message<u32>,
+            Output = tok_message::codec::Reply<
+                tok_message::codec::Message<u32>,
                 Option<TimerUpdate>,
             >,
-            HandlerError = tok_message::protobuf::Error<Status>,
+            HandlerError = tok_message::codec::Error<Status>,
         > + Clone
         + 'static,
     G::RegistrationError: std::fmt::Display,
 {
-    /// 注册 protobuf 请求与对应回应；同步于当前执行范围，不隐式重试。
-    pub fn register<Req, Resp, F, Fut>(
+    /// 使用指定正文编解码器安装请求处理链。
+    pub fn register_service_with_codec<Req, Resp, D, A, S>(
         &mut self,
         request_id: u32,
         response_id: u32,
-        handler: F,
-    ) -> Result<(), super::Error>
-    where
-        Req: Message + Default + Send + 'static,
-        Resp: Message + Send + 'static,
-        F: Fn(ExecutionRequest<(CallContext, Req)>) -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = Result<Response<Resp>, Status>> + Send + 'static,
-    {
-        self.register_with_timers(request_id, response_id, move |request| {
-            let future = handler(request);
-            async move {
-                Ok(future.await?.map(|message| HandlerReply {
-                    message,
-                    timers: None,
-                }))
-            }
-        })
-    }
-    /// 注册可返回 timer 更新的回调，保留执行上下文；需要组合中间件时使用 register_service。
-    pub fn register_with_timers<Req, Resp, F, Fut>(
-        &mut self,
-        request_id: u32,
-        response_id: u32,
-        handler: F,
-    ) -> Result<(), super::Error>
-    where
-        Req: Message + Default + Send + 'static,
-        Resp: Message + Send + 'static,
-        F: Fn(ExecutionRequest<(CallContext, Req)>) -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = Result<Response<HandlerReply<Resp>>, Status>> + Send + 'static,
-    {
-        let handler = Arc::new(handler);
-        self.register_service(
-            request_id,
-            response_id,
-            tower::service_fn(move |request: ExecutionRequest<(CallContext, Req)>| {
-                let handler = Arc::clone(&handler);
-                async move { handler(request).await }
-            }),
-        )
-    }
-    /// 安装请求路由的类型化 Tower 链；与事件、timer 使用同一 Request 和 Layer 协议。
-    pub fn register_service<Req, Resp, S>(
-        &mut self,
-        request_id: u32,
-        response_id: u32,
+        decoder: D,
+        encoder: A,
         service: S,
     ) -> Result<(), super::Error>
     where
-        Req: Message + Default + Send + 'static,
-        Resp: Message + Send + 'static,
+        Req: Send + 'static,
+        Resp: Send + 'static,
+        D: tok_core::codec::Decode<Req> + Send + Sync + 'static,
+        D::Error: std::error::Error + Send + Sync + 'static,
+        A: tok_core::codec::Encode<Resp> + Send + Sync + 'static,
+        A::Error: std::error::Error + Send + Sync + 'static,
         S: Service<
                 ExecutionRequest<(CallContext, Req)>,
                 Response = Response<HandlerReply<Resp>>,
@@ -162,11 +121,13 @@ where
         S::Future: Send + 'static,
     {
         self.handlers
-            .register_service(
+            .register_service_with_codec(
                 request_id,
                 response_id,
+                decoder,
+                encoder,
                 service.map_response(|response: Response<HandlerReply<Resp>>| {
-                    response.map(|reply| tok_message::protobuf::Reply {
+                    response.map(|reply| tok_message::codec::Reply {
                         message: reply.message,
                         output: reply.timers,
                     })
@@ -176,10 +137,16 @@ where
     }
 }
 impl<G: tok_execution::Registry + ?Sized> HandlerRegistry<G> {
-    /// 安装服务器事件的共同注册链；多个处理者按序执行，timer 更新依次合成。
-    pub fn register_event<E, H>(&mut self, handler: H) -> Result<(), super::Error>
+    /// 使用指定正文解码器注册服务器事件。
+    pub fn register_event_with_codec<E, D, H>(
+        &mut self,
+        decoder: D,
+        handler: H,
+    ) -> Result<(), super::Error>
     where
-        E: tok_events::Event + Message + Default,
+        E: tok_events::Event,
+        D: tok_core::codec::Decode<E> + Send + Sync + 'static,
+        D::Error: std::error::Error + Send + Sync + 'static,
         H: for<'a> Fn(
                 ExecutionRequest<tok_events::Input<'a, CallContext, E>>,
             ) -> tok_events::Task<'a, Response<Option<TimerUpdate>>, Status>
@@ -190,7 +157,9 @@ impl<G: tok_execution::Registry + ?Sized> HandlerRegistry<G> {
         self.events
             .register::<E, _>(handler)
             .map_err(configuration)?;
-        self.events.enable_protobuf::<E>().map_err(configuration)
+        self.events
+            .enable_codec::<E, _>(decoder)
+            .map_err(configuration)
     }
     /// 读取同一事件表，在当前调用中直接分发本地事件。
     pub fn events(&self) -> &tok_events::Registry<CallContext, Option<TimerUpdate>, Status> {
@@ -202,34 +171,16 @@ impl<G: tok_execution::Registry + ?Sized> HandlerRegistry<G> {
     ) -> &mut tok_events::Registry<CallContext, Option<TimerUpdate>, Status> {
         &mut self.events
     }
-    /// 注册内部 timer 回调，客户端业务请求不进入此表。
-    pub fn register_timer<Req, F, Fut>(
+    /// 使用指定解码器安装 timer 的类型化 Tower 链，保留原上下文及无客户端回应的结果约束。
+    pub fn register_timer_service_with_codec<Req, D, S>(
         &mut self,
         message_id: u32,
-        handler: F,
-    ) -> Result<(), super::Error>
-    where
-        Req: Message + Default + Send + 'static,
-        F: Fn(ExecutionRequest<(CallContext, Req)>) -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = Result<Response<Option<TimerUpdate>>, Status>> + Send + 'static,
-    {
-        let handler = Arc::new(handler);
-        self.register_timer_service(
-            message_id,
-            tower::service_fn(move |request: ExecutionRequest<(CallContext, Req)>| {
-                let handler = Arc::clone(&handler);
-                async move { handler(request).await }
-            }),
-        )
-    }
-    /// 安装 timer 的类型化 Tower 链，保留原上下文及无客户端回应的结果约束。
-    pub fn register_timer_service<Req, S>(
-        &mut self,
-        message_id: u32,
+        decoder: D,
         service: S,
     ) -> Result<(), super::Error>
     where
-        Req: Message + Default + Send + 'static,
+        Req: Send + 'static,
+        D: tok_core::codec::Decode<Req> + Send + Sync + 'static,
         S: Service<
                 ExecutionRequest<(CallContext, Req)>,
                 Response = Response<Option<TimerUpdate>>,
@@ -245,13 +196,16 @@ impl<G: tok_execution::Registry + ?Sized> HandlerRegistry<G> {
                 "计时消息 ID 必须非零且只能注册一次".into(),
             ));
         }
+        let decoder = Arc::new(decoder);
         self.timers.insert(
             message_id,
             Arc::new(move |request| {
                 let service = service.clone();
+                let decoder = Arc::clone(&decoder);
                 Box::pin(async move {
                     let (context, (call, body), extensions) = request.into_parts();
-                    let input = Req::decode(body.as_slice())
+                    let input = decoder
+                        .decode(body.as_slice())
                         .map_err(|_| Status::invalid_argument("计时参数解码失败"))?;
                     let id = call.request_id;
                     let timers = tok_execution::Layer
@@ -280,11 +234,11 @@ where
     G: tok_execution::Registry<
             Key = u32,
             Input = (CallContext, Vec<u8>),
-            Output = tok_message::protobuf::Reply<
-                tok_message::protobuf::Message<u32>,
+            Output = tok_message::codec::Reply<
+                tok_message::codec::Message<u32>,
                 Option<TimerUpdate>,
             >,
-            HandlerError = tok_message::protobuf::Error<Status>,
+            HandlerError = tok_message::codec::Error<Status>,
         > + 'static,
     G::DispatchError: Send + 'static,
 {
@@ -350,7 +304,7 @@ where
                     context,
                     (
                         call,
-                        tok_message::protobuf::Message {
+                        tok_message::codec::Message {
                             key: payload.message_id,
                             body: payload.body,
                         },
@@ -383,16 +337,19 @@ pub(super) fn dispatch_status<E>(
     }
 }
 pub(super) fn table_status<E>(
-    error: tok_execution::registry::DispatchError<u32, tok_message::protobuf::Error<E>>,
+    error: tok_execution::registry::DispatchError<u32, tok_message::codec::Error<E>>,
     map_error: impl FnOnce(E) -> Status,
 ) -> Status {
     use tok_execution::registry::DispatchError;
     match error {
         DispatchError::Unknown(_) => Status::unimplemented("游戏消息尚未注册"),
-        DispatchError::Handler(tok_message::protobuf::Error::Decode(_)) => {
+        DispatchError::Handler(tok_message::codec::Error::Decode(_)) => {
             Status::invalid_argument("游戏消息解码失败")
         }
-        DispatchError::Handler(tok_message::protobuf::Error::Handler(error)) => map_error(error),
+        DispatchError::Handler(tok_message::codec::Error::Encode(_)) => {
+            Status::internal("游戏消息编码失败")
+        }
+        DispatchError::Handler(tok_message::codec::Error::Handler(error)) => map_error(error),
     }
 }
 
@@ -411,6 +368,7 @@ fn execution_status(error: tok_execution::Error<Status>) -> Status {
 fn event_status(error: tok_events::DispatchError<Status>) -> Status {
     match error {
         tok_events::DispatchError::Handler(error) => error,
+        tok_events::DispatchError::Decode(_) => Status::invalid_argument("事件正文解码失败"),
         tok_events::DispatchError::Invalid(error) => Status::invalid_argument(error.to_string()),
         tok_events::DispatchError::Unknown => Status::unimplemented("事件尚未注册"),
         tok_events::DispatchError::Stopped(reason) => {

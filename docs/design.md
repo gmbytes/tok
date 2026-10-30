@@ -29,7 +29,7 @@ RPC 返回回应，事件返回当前处理阶段的结果，不自动生成客�
 | tok-core 基础契约 | 服务身份、Extensions、发现、路由及请求锁契约 | 不依赖玩家运行契约、gateway、具体 RPC 协议或 NATS |
 | tok-session 会话契约与适配 | 逻辑会话身份、所有权与恢复凭证，客户端通知、timer、事件及 logic RPC 适配 | 复用 tok-message、tok-grpc 与事件设施；不实现网络监听、会话调度或存储后端 |
 | 调用执行设施 | 执行上下文、类型化请求、Tower 处理链与预算/取消约束 | tok-execution，不管理服务构建与后台任务 |
-| 按键分发模块 | 根据泛型键选择输入、结果和错误均可自定义的处理链 | tok-execution::registry，不规定编码或协议；protobuf 适配归 tok-message::protobuf |
+| 按键分发模块 | 根据泛型键选择输入、结果和错误均可自定义的处理链 | tok-execution::registry，不规定编码或协议；tok-message::codec 组合选定的正文编解码器 |
 | 服务生命周期设施 | 服务工厂、启动阶段、退出与有界任务监督 | tok-lifecycle，不依赖执行层或 Tower |
 | 通信与事件适配 | 协议、编解码、发布订阅与结果映射 | 复用共同执行核心，不各建中间件引擎 |
 | tok-gateway | 连接、认证、session、FIFO、timer、下行恢复与交接 | 通用服务的内置扩展，不是普通服务的必选基类 |
@@ -45,6 +45,7 @@ flowchart TD
     events[tok-events] --> execution
     events --> lifecycle
     nats[tok-nats] --> events
+    protobuf[tok-protobuf] --> core
     grpc[tok-grpc] --> execution
     message[tok-message] --> execution
     message --> grpc
@@ -154,7 +155,7 @@ Kubernetes 配置可校验但后端未实现，部署目录尚无可运行清单
 
 ## 工程与可观测
 
-现有 workspace 包括 tok-core、tok-execution、tok-lifecycle、tok-session、tok-proto、tok-grpc、tok-message、tok-events、tok-nats、tok-gateway、tok-infra、tok-observability 和 tok。tok-events 定义事件契约与处理，tok-nats 实现 NATS 和 JetStream 传输。游戏协议属于 demo/game；框架协议属于 tok-proto。protobuf 构建期生成到 Cargo OUT_DIR，不提交生成的 Rust 文件。
+现有 workspace 包括 tok-core、tok-execution、tok-lifecycle、tok-session、tok-proto、tok-protobuf、tok-grpc、tok-message、tok-events、tok-nats、tok-gateway、tok-infra、tok-observability 和 tok。tok-core 定义正文编解码契约，tok-protobuf 提供 prost 实现；tok-events 定义事件契约与处理，tok-nats 实现 NATS 和 JetStream 传输。游戏协议属于 demo/game；框架协议属于 tok-proto。protobuf 构建期生成到 Cargo OUT_DIR，不提交生成的 Rust 文件。
 
 游戏消息 ID 可由 proto 枚举在构建期按名字生成关联，运行时仍按数字分发，配对与权限显式注册。未发布 API/协议直接校正，不增加开发中间状态兼容别名；正式发布后的破坏性变更再按版本策略处理。
 
@@ -192,7 +193,7 @@ RPC 客户端连接策略可通过 Client::with_endpoint_factory 扩展，服务
 
 tok-execution::registry::Registry<K, T, R, E> 根据泛型键选择并执行处理链，不固定 u32 消息 ID、字节正文、回应结构或编码格式。K 只需 Ord + Clone，不要求 Display；键的业务有效性归调用方。tok-execution 不依赖 prost、Tonic 或生成协议。
 
-protobuf 正文编解码位于 tok-message::protobuf，基于同一个通用分发表实现。它的消息键仍是泛型；具体游戏线协议选择 u32 并在边界施加非零约束。普通业务 RPC 适配负责 CallContext 与业务状态转换、构造协议回应及错误到 Status 的映射，本地与 RPC 可共用同一业务注册器。
+正文编解码契约位于 tok-core::codec，tok-protobuf 提供可选 prost 实现；tok-message::codec 基于同一个通用分发表组合任意正文编解码器。消息键仍是泛型；具体游戏线协议选择 u32 并在边界施加非零约束。普通业务 RPC 负责 CallContext 与业务状态转换、构造协议回应及错误到 Status 的映射，本地与 RPC 可共用同一业务注册器。
 
 玩家请求、timer 与服务器事件组合的后续校正仍单独推进。事件继续使用 tok-events，统一的是 Request / Tower 协议，不强行合并所有分发表；通用请求锁的取键泛化已完成，通知归属迁移仍待推进。不提供独立的 tok-dispatch crate 或门面别名。
 
@@ -212,7 +213,7 @@ registry 注册错误定名为 Error<K>，运行失败定名为 DispatchError<K,
 
 ## protobuf、编号消息与 gRPC 边界（2026-10-21）
 
-tok-proto 仅提供生成协议；tok-message::protobuf 在 tok-execution 上适配泛型键的正文编解码；模块本身不使用生成游戏协议或 Tonic，所属 crate 为普通业务 RPC 依赖这些设施，但不依赖玩家。tok-message::Registry 在其上施加 u32 非零编号规则，保留调用状态、附加结果和业务错误，支持直接本地调用。
+tok-proto 仅提供生成协议；tok-message::codec 在 tok-execution 上适配泛型键的正文编解码；tok-protobuf 提供 prost 编解码及按 feature 启用的便捷扩展。tok-message::Registry 在其上施加 u32 非零编号规则，保留调用状态、附加结果和业务错误，支持直接本地调用。
 
 tok-message::rpc 承载普通业务 CallContext、客户端、Service、绑定槽与请求锁适配。tok-session::logic::rpc 承载 logic CallContext、客户端、Service、绑定槽和 timer/事件转换；其 HandlerRegistry 复用公共消息 Registry。普通业务入口拒绝逻辑 session 与 timer 字段。tok-grpc 明确限于 Tonic/gRPC 的连接、监听、调用预算、取消和追踪，不理解编号消息或 logic 协议。
 
@@ -288,4 +289,4 @@ protobuf 派发直接借用消息键，不将默认表或注册回应键的 Clon
 
 ## 玩家与公共消息边界的后续校正
 
-tok-session 聚合逻辑会话契约和适配，包括所有权、timer 与 logic RPC；tok-message 负责公共编号消息及普通业务 RPC，提供默认 protobuf 适配。logic 适配依赖公共消息，公共消息不依赖 session。连接、session 生命周期和状态机仍由 tok-gateway 管理。目前编号消息注册以 protobuf 为默认实现，其他编码尚需扩展对应的接入边界。
+tok-session 聚合逻辑会话契约和适配，包括所有权、timer 与 logic RPC；tok-message 负责公共编号消息及普通业务 RPC，正文编码通过通用 codec 接入。logic 适配依赖公共消息，公共消息不依赖 session。连接、session 生命周期和状态机仍由 tok-gateway 管理。编号消息注册支持自定义 codec；protobuf 便捷注册由 tok-protobuf 提供。

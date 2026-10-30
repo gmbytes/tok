@@ -68,3 +68,4 @@ pub fn locked_handler(
     let layer = lock::Layer::new(backend, namespace, tok::execution::lock::Config::default())?;
     Ok(layer.layer(adapter))
 }
+use tok::protobuf::message::RegistryExt as _;

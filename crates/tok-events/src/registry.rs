@@ -65,6 +65,9 @@ pub enum DispatchError<F> {
     /// 事件参数、解码或类型注册失败。
     #[error(transparent)]
     Invalid(Error),
+    /// 正文解码器返回的具体错误。
+    #[error("事件正文解码失败：{0}")]
+    Decode(#[source] Box<dyn std::error::Error + Send + Sync>),
     /// 没有匹配的事件注册或远程解码器。
     #[error("事件尚未注册或未安装解码器")]
     Unknown,
@@ -85,7 +88,11 @@ impl<F> From<tok_execution::Error<F>> for DispatchError<F> {
 }
 
 type Erased = dyn Any + Send + Sync;
-type Decoder = Box<dyn Fn(&Message) -> Result<Box<Erased>, Error> + Send + Sync>;
+type Decoder = Box<dyn Fn(&Message) -> Result<Box<Erased>, DecodeFailure> + Send + Sync>;
+enum DecodeFailure {
+    Invalid(Error),
+    Codec(Box<dyn std::error::Error + Send + Sync>),
+}
 trait Route<C, O, F>: Send + Sync {
     fn call<'a>(
         &'a self,
@@ -200,17 +207,30 @@ impl<C: Send, O, F> Registry<C, O, F> {
         self.count += 1;
         Ok(())
     }
-    /// 为已注册类型安装 protobuf 解码适配；本地事件不需要 prost 或此操作。
-    #[cfg(feature = "protobuf")]
-    pub fn enable_protobuf<E: Event + prost::Message + Default>(&mut self) -> Result<(), Error> {
-        self.enable_decoder::<E>(|body| {
-            E::decode(body).map_err(|_| Error::InvalidInput("事件正文解码失败"))
+    /// 为已注册类型安装通用解码器；保留具体解码错误作为来源。
+    pub fn enable_codec<E: Event, D: tok_core::codec::Decode<E> + Send + Sync + 'static>(
+        &mut self,
+        codec: D,
+    ) -> Result<(), Error>
+    where
+        D::Error: std::error::Error + Send + Sync + 'static,
+    {
+        self.install_decoder::<E>(move |body| {
+            codec
+                .decode(body)
+                .map_err(|error| DecodeFailure::Codec(Box::new(error)))
         })
     }
     /// 为已注册事件安装自定义正文解码器；解码后仍校验事件 topic 契约。
     pub fn enable_decoder<E: Event>(
         &mut self,
         decode: fn(&[u8]) -> Result<E, Error>,
+    ) -> Result<(), Error> {
+        self.install_decoder::<E>(move |body| decode(body).map_err(DecodeFailure::Invalid))
+    }
+    fn install_decoder<E: Event>(
+        &mut self,
+        decode: impl Fn(&[u8]) -> Result<E, DecodeFailure> + Send + Sync + 'static,
     ) -> Result<(), Error> {
         let entry = self
             .entries
@@ -225,7 +245,7 @@ impl<C: Send, O, F> Registry<C, O, F> {
                 payload,
                 trace_context: message.trace_context.clone(),
             };
-            envelope.validate()?;
+            envelope.validate().map_err(DecodeFailure::Invalid)?;
             Ok(Box::new(envelope))
         }));
         Ok(())
@@ -278,7 +298,10 @@ impl<C: Send, O, F> Registry<C, O, F> {
             .get(&request.input.event_type)
             .ok_or(DispatchError::Unknown)?;
         let decoder = entry.decoder.as_ref().ok_or(DispatchError::Unknown)?;
-        let event = decoder(&request.input).map_err(DispatchError::Invalid)?;
+        let event = decoder(&request.input).map_err(|error| match error {
+            DecodeFailure::Invalid(error) => DispatchError::Invalid(error),
+            DecodeFailure::Codec(error) => DispatchError::Decode(error),
+        })?;
         execution.extensions_mut().insert(request.input);
         Self::execute(entry, state, execution, event.as_ref()).await
     }
@@ -332,6 +355,7 @@ impl Handler for Registry {
                 Ok(results) => Ok(results.map(Outcome::combine)),
                 Err(DispatchError::Unknown) => Ok(Response::new(Outcome::Ignored)),
                 Err(DispatchError::Invalid(error) | DispatchError::Handler(error)) => Err(error),
+                Err(DispatchError::Decode(_)) => Err(Error::InvalidInput("事件正文解码失败")),
                 Err(DispatchError::Stopped(reason)) => Err(Error::Stopped(reason)),
             }
         })

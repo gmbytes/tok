@@ -1,4 +1,12 @@
 //! 同一 logic 服务的服务级事件与 session 事件各自建立执行范围。
+#[path = "../../../tests/support_codec/codec.rs"]
+mod test_codec;
+#[path = "../../../tests/support_codec/events.rs"]
+mod test_events;
+#[path = "../../../tests/support_codec/nats.rs"]
+mod test_nats;
+#[path = "../../../tests/support_codec/session.rs"]
+mod test_session;
 use prost::Message as _;
 use std::{
     sync::{
@@ -7,6 +15,8 @@ use std::{
     },
     time::Duration,
 };
+use test_nats::PublisherExt as _;
+use test_session::EventRegistryExt as _;
 use tok_events::{Event, EventId, Message, Outcome};
 use tok_execution::{Request, Response};
 use tok_lifecycle::{Builder, Init, InitFuture, task::Task};

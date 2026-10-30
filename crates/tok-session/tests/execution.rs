@@ -1,4 +1,10 @@
 //! RPC、本地/远程事件与 timer 共用中间件及入口预算。
+#[path = "../../../tests/support_codec/codec.rs"]
+mod test_codec;
+#[path = "../../../tests/support_codec/events.rs"]
+mod test_events;
+#[path = "../../../tests/support_codec/session.rs"]
+mod test_session;
 use std::{
     sync::{
         Arc,
@@ -7,6 +13,8 @@ use std::{
     task::{Context as TaskContext, Poll},
     time::Duration,
 };
+use test_events::RegistryExt as _;
+use test_session::RegistryExt as _;
 use tok_core::service::Identity;
 use tok_events::{Envelope, Event, EventId, Input};
 use tok_execution::{Context, Request};
@@ -166,7 +174,7 @@ async fn one_layer_and_one_event_registration_serve_rpc_timer_local_and_encoded_
         panic!("计时结果类型错误")
     };
     assert!(response.payload.is_none());
-    let event = Arc::new(tok_events::Message::new(&envelope).unwrap());
+    let event = Arc::new(test_events::immediate(&envelope).unwrap());
     let response = service
         .call(request(LogicInput::Event(call(), event)))
         .await
@@ -383,3 +391,4 @@ fn request<T>(input: T) -> Request<T> {
     request.extensions_mut().insert(42u32);
     request
 }
+use test_session::TimerRegistryExt as _;

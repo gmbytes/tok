@@ -1,9 +1,5 @@
-#[cfg(feature = "protobuf")]
-use crate::{DeliveryPolicy, Envelope, Event};
-use crate::{Error, EventId, TraceContext, validate_name};
-#[cfg(feature = "protobuf")]
+use crate::{Envelope, Error, Event, EventId, TraceContext, validate_name};
 use prost::Message as _;
-#[cfg(feature = "protobuf")]
 use tok_proto::internal::v1::EventEnvelope;
 
 /// 服务器事件的正文与来源，携带通用 topic，不解释客户端请求或玩家归属。
@@ -15,10 +11,20 @@ pub struct Message {
     pub event_id: EventId,
     /// 显式事件名称。
     pub event_type: String,
-    /// 业务 protobuf 编码正文。
+    /// 由业务选择编码方式的正文。
     pub body: Vec<u8>,
     /// 标准追踪头载体。
     pub trace_context: TraceContext,
+}
+/// 构造编码事件时的契约或具体正文编码错误。
+#[derive(Debug, thiserror::Error)]
+pub enum EncodeError<E> {
+    /// 事件契约无效。
+    #[error(transparent)]
+    Event(#[from] Error),
+    /// 正文编码失败。
+    #[error("事件正文编码失败：{0}")]
+    Body(E),
 }
 impl Message {
     /// 校验事件名称、正文上限和追踪载体。
@@ -30,22 +36,12 @@ impl Message {
         self.trace_context.validate()
     }
 
-    /// 编码强类型即时事件；不支持的持久化策略直接拒绝。
-    #[cfg(feature = "protobuf")]
-    pub fn new<E: Event + prost::Message>(envelope: &Envelope<E>) -> Result<Self, Error> {
-        if E::DELIVERY != DeliveryPolicy::Immediate {
-            return Err(Error::Unsupported("Core NATS 不支持持久化"));
-        }
-        Self::from_protobuf(envelope)
-    }
-
-    /// 将强类型事件编码为传输消息；投递策略由传输适配器执行并检查。
-    #[cfg(feature = "protobuf")]
-    pub fn from_protobuf<E: Event + prost::Message>(envelope: &Envelope<E>) -> Result<Self, Error> {
+    /// 使用指定编码器构造消息；保留具体编码错误，不选择投递后端。
+    pub fn from_codec<E: Event, C: tok_core::codec::Encode<E>>(
+        envelope: &Envelope<E>,
+        codec: &C,
+    ) -> Result<Self, EncodeError<C::Error>> {
         envelope.validate()?;
-        if envelope.payload.encoded_len() > 1_048_576 {
-            return Err(Error::InvalidInput("事件正文超出上限"));
-        }
         let trace_context = if envelope.trace_context == TraceContext::default() {
             TraceContext::capture()
         } else {
@@ -55,14 +51,13 @@ impl Message {
             topic: envelope.topic.clone(),
             event_id: envelope.event_id.clone(),
             event_type: E::NAME.into(),
-            body: envelope.payload.encode_to_vec(),
+            body: codec.encode(&envelope.payload).map_err(EncodeError::Body)?,
             trace_context,
         };
         result.validate(1_048_576)?;
         Ok(result)
     }
     /// 检查完整长度后编码；追踪上下文由 NATS headers 承载。
-    #[cfg(feature = "protobuf")]
     pub fn encode(&self, max_bytes: usize) -> Result<Vec<u8>, Error> {
         self.validate(max_bytes)?;
         let wire = EventEnvelope {
@@ -78,7 +73,6 @@ impl Message {
         Ok(wire.encode_to_vec())
     }
     /// 在解码前检查总字节数和协议版本。
-    #[cfg(feature = "protobuf")]
     pub fn decode(bytes: &[u8], max_bytes: usize) -> Result<Self, Error> {
         if bytes.len() > max_bytes {
             return Err(Error::InvalidInput("事件线协议超出上限"));

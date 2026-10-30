@@ -17,7 +17,7 @@ type ContextFactory<C> = dyn Fn(&CallContext) -> Result<C, Status> + Send + Sync
 pub struct RegistryHandler<
     C,
     E,
-    G: tok_execution::Registry + ?Sized = crate::protobuf::Table<u32, C, (), E>,
+    G: tok_execution::Registry + ?Sized = crate::codec::Table<u32, C, (), E>,
 > {
     registry: Arc<crate::Registry<C, (), E, G>>,
     context: Arc<ContextFactory<C>>,
@@ -73,8 +73,8 @@ where
     G: tok_execution::Registry<
             Key = u32,
             Input = (C, Vec<u8>),
-            Output = crate::protobuf::Reply<crate::protobuf::Message<u32>>,
-            HandlerError = crate::protobuf::Error<E>,
+            Output = crate::codec::Reply<crate::codec::Message<u32>>,
+            HandlerError = crate::codec::Error<E>,
         > + 'static,
     G::DispatchError: Send + 'static,
 {
@@ -105,7 +105,7 @@ where
                     context,
                     (
                         state,
-                        crate::protobuf::Message {
+                        crate::codec::Message {
                             key: payload.message_id,
                             body: payload.body,
                         },

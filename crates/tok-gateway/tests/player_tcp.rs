@@ -1,5 +1,6 @@
 //! 真实 TCP 上的认证、玩家串行、容量、会话接管与异常边界集成测试。
 
+mod codec;
 use prost::Message;
 use std::{
     collections::BTreeMap,
@@ -21,6 +22,7 @@ use tok_gateway::{
     protocol::{self, Frame, frame::Content},
 };
 use tok_infra::ownership::MemoryOwnership;
+
 use tok_session::{
     LogicalMessage, MessageKind,
     ownership::{Record as SessionOwnership, Store as OwnershipStore},
@@ -1546,6 +1548,65 @@ impl tok_events::Event for GameEvent {
         )
     }
 }
+struct PlainEvent(u8);
+impl tok_events::Event for PlainEvent {
+    const NAME: &'static str = "test.plain.event";
+}
+#[derive(Clone)]
+struct PlainCodec;
+impl tok_core::codec::Encode<PlainEvent> for PlainCodec {
+    type Error = std::convert::Infallible;
+    fn encode(&self, event: &PlainEvent) -> Result<Vec<u8>, Self::Error> {
+        Ok(vec![event.0])
+    }
+}
+impl tok_core::codec::Decode<PlainEvent> for PlainCodec {
+    type Error = std::io::Error;
+    fn decode(&self, body: &[u8]) -> Result<PlainEvent, Self::Error> {
+        match body {
+            [value] => Ok(PlainEvent(*value)),
+            _ => Err(std::io::Error::other("无效正文")),
+        }
+    }
+}
+#[tokio::test]
+async fn built_in_event_handlers_accept_non_protobuf_codec() {
+    use tok_events::{Handler, Outcome};
+    use tok_gateway::logic::events::{Target, forward, notify};
+    let fixture = Fixture::new(config()).await;
+    let mut client = fixture.connect().await;
+    assert_eq!(client.login(1, "1").await.error_code, 0);
+    let envelope =
+        tok_events::Envelope::new(tok_events::EventId::generate(), PlainEvent(7)).unwrap();
+    let message = Arc::new(tok_events::Message::from_codec(&envelope, &PlainCodec).unwrap());
+    let forwarding =
+        forward::<PlainEvent, _, _>(fixture.sessions.clone(), PlainCodec, |_| Ok(Target::All))
+            .unwrap();
+    let notifying = notify::<PlainEvent, _, _>(fixture.sessions.clone(), 12, PlainCodec, |event| {
+        Ok((Target::All, vec![event.payload.0]))
+    })
+    .unwrap();
+    assert_eq!(
+        forwarding
+            .handle(event_request(Arc::clone(&message)))
+            .await
+            .unwrap()
+            .output,
+        Outcome::Handled
+    );
+    assert_eq!(
+        notifying
+            .handle(event_request(message))
+            .await
+            .unwrap()
+            .output,
+        Outcome::Handled
+    );
+    assert!(
+        matches!(client.read().await, Content::Notify(notice) if notice.message_id == 12 && notice.body == [7])
+    );
+    fixture.finish().await;
+}
 fn publication(delivery: tok_gateway::logic::events::Delivery) -> tok_events::Message {
     use tok_gateway::logic::events::{Action, Target};
     let (notify, body) = match delivery.action {
@@ -1563,10 +1624,8 @@ fn publication(delivery: tok_gateway::logic::events::Delivery) -> tok_events::Me
         Target::Subjects(players) => game.players = players,
         Target::Topic(topic) => game.topic = Some(topic),
     }
-    tok_events::Message::new(
-        &tok_events::Envelope::new(tok_events::EventId::generate(), game).unwrap(),
-    )
-    .unwrap()
+    codec::message(&tok_events::Envelope::new(tok_events::EventId::generate(), game).unwrap())
+        .unwrap()
 }
 fn game_subscriber(sessions: SessionManager) -> tok_events::Registry {
     let mut handlers = tok_events::Registry::new(1).unwrap();
@@ -1599,7 +1658,7 @@ fn game_subscriber(sessions: SessionManager) -> tok_events::Registry {
             })
         })
         .unwrap();
-    handlers.enable_protobuf::<GameEvent>().unwrap();
+    handlers.enable_codec::<GameEvent, _>(codec::Codec).unwrap();
     handlers
 }
 
@@ -2004,10 +2063,12 @@ async fn built_in_event_handlers_and_custom_components_compose_independently() {
         TestKind::Forward,
         b"value",
     )));
-    let forwarding =
-        Arc::new(forward::<GameEvent, _>(fixture.sessions.clone(), |_| Ok(Target::All)).unwrap());
+    let forwarding = Arc::new(
+        forward::<GameEvent, _, _>(fixture.sessions.clone(), codec::Codec, |_| Ok(Target::All))
+            .unwrap(),
+    );
     let notifying = Arc::new(
-        notify::<GameEvent, _>(fixture.sessions.clone(), 12, |event| {
+        notify::<GameEvent, _, _>(fixture.sessions.clone(), 12, codec::Codec, |event| {
             Ok((Target::All, event.payload.body.clone()))
         })
         .unwrap(),
@@ -2089,7 +2150,7 @@ async fn built_in_event_handlers_and_custom_components_compose_independently() {
             Box::pin(async { Ok(tok_execution::Response::new(Outcome::Handled)) })
         })
         .unwrap();
-    custom.enable_protobuf::<GameEvent>().unwrap();
+    custom.enable_codec::<GameEvent, _>(codec::Codec).unwrap();
     assert_eq!(
         custom.handle(event_request(message)).await.unwrap().output,
         Outcome::Handled

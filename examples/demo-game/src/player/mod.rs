@@ -1,5 +1,7 @@
 //! 显式注册 player 业务消息，身份来自网关调用上下文。
 
+use tok::protobuf::session::EventRegistryExt as _;
+use tok::protobuf::session::RegistryExt as _;
 mod production;
 
 use crate::protocol::GameMessage;
@@ -299,3 +301,4 @@ pub fn handlers(
     )?;
     Ok(registry)
 }
+use tok::protobuf::session::TimerRegistryExt as _;

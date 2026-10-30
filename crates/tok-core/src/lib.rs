@@ -1,6 +1,6 @@
 //! 通用服务基础契约，不依赖玩家运行时、具体游戏业务或基础设施实现。
 //!
-//! [`discovery`]、[`lock`]、[`routing`]、[`service`] 提供功能命名空间。
+//! [`codec`]、[`discovery`]、[`lock`]、[`routing`]、[`service`] 提供功能命名空间。
 //! 常用服务身份、发现与路由契约同时从根导出，便于使用者导入；双路径指向同一定义。
 //! 发现、锁和路由接口各自提供领域错误和结果类型，不聚合根错误。
 //! [`Extensions`] 和 [`BoxFuture`] 直接作为根入口，
@@ -8,6 +8,8 @@
 
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
 
+/// 与业务类型和传输协议无关的正文编解码契约。
+pub mod codec;
 pub mod discovery;
 mod extensions;
 pub mod lock;

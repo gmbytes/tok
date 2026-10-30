@@ -1,4 +1,10 @@
 //! 同一业务分发表由本地和真实 RPC 调用，业务错误仅在线协议边界转换。
+#[path = "../../../tests/support_codec/codec.rs"]
+mod test_codec;
+#[path = "../../../tests/support_codec/message.rs"]
+mod test_message;
+#[path = "../../../tests/support_codec/session.rs"]
+mod test_session;
 use prost::Message as _;
 use std::{
     sync::{
@@ -7,11 +13,13 @@ use std::{
     },
     time::Duration,
 };
+use test_message::RegistryExt as _;
+use test_session::RegistryExt as _;
 use tok_core::{Extensions, Identity, ServiceDescriptor};
 use tok_execution::registry::DispatchError;
 use tok_execution::{Context, Request};
 use tok_grpc::{Client, Listener};
-use tok_message::protobuf;
+use tok_message::codec as protobuf;
 use tok_message::rpc::{Client as BusinessClient, RegistryHandler, Service as RpcService};
 use tok_message::{Message, Registry, Reply};
 use tok_proto::internal::v1::Payload;
@@ -607,3 +615,4 @@ async fn player_adapter_can_replace_message_registry_without_routing_timers_thro
     assert!(result.payload.is_none());
     assert_eq!(backend.calls.load(Ordering::SeqCst), before_timer);
 }
+use test_session::TimerRegistryExt as _;

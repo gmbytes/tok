@@ -113,6 +113,9 @@ impl tower::Service<Request<Arc<Message>>> for RegistryService {
                 Err(crate::DispatchError::Unknown) => {
                     Err(EventError::InvalidInput("事件未注册或未安装解码器"))
                 }
+                Err(crate::DispatchError::Decode(_)) => {
+                    Err(EventError::InvalidInput("事件正文解码失败"))
+                }
                 Err(
                     crate::DispatchError::Invalid(error) | crate::DispatchError::Handler(error),
                 ) => Err(error),

@@ -47,7 +47,7 @@ pub fn player_forwarder(
     group: Option<&str>,
 ) -> Result<tok::events::Subscriber, tok::events::Error> {
     use tok::gateway::logic::events::{Target, forward};
-    let handler = forward::<AddValue, _>(sessions, |event| {
+    let handler = forward::<AddValue, _, _>(sessions, tok::protobuf::Codec, |event| {
         Ok(Target::Subjects(vec![event.payload.player_id.clone()]))
     })?;
     tok::events::Subscriber::new(identity, std::sync::Arc::new(handler), topics, group)
@@ -61,15 +61,20 @@ pub fn value_notifier(
     group: Option<&str>,
 ) -> Result<tok::events::Subscriber, tok::events::Error> {
     use tok::gateway::logic::events::{Target, notify};
-    let handler = notify::<ValueChanged, _>(sessions, v1::ValueNotice::MESSAGE_ID, |event| {
-        Ok((
-            Target::Subjects(vec![event.payload.player_id.clone()]),
-            v1::ValueNotice {
-                value: event.payload.value,
-            }
-            .encode_to_vec(),
-        ))
-    })?;
+    let handler = notify::<ValueChanged, _, _>(
+        sessions,
+        v1::ValueNotice::MESSAGE_ID,
+        tok::protobuf::Codec,
+        |event| {
+            Ok((
+                Target::Subjects(vec![event.payload.player_id.clone()]),
+                v1::ValueNotice {
+                    value: event.payload.value,
+                }
+                .encode_to_vec(),
+            ))
+        },
+    )?;
     tok::events::Subscriber::new(identity, std::sync::Arc::new(handler), topics, group)
 }
 
@@ -78,7 +83,7 @@ pub async fn smoke(
     address: std::net::SocketAddr,
     config: tok::nats::Config,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    use tok::events::{Envelope, EventId, Message as EventMessage};
+    use tok::events::{Envelope, EventId};
     use tok::gateway::{
         codec::{FrameCodec, VERSION},
         protocol::{self, Frame, frame::Content},
@@ -110,7 +115,7 @@ pub async fn smoke(
     if login.error_code != 0 {
         return Err(std::io::Error::other("登录失败").into());
     }
-    bus.publish(&EventMessage::new(&Envelope::new(
+    bus.publish(&tok::protobuf::events::immediate(&Envelope::new(
         EventId::generate(),
         AddValue {
             delta: 7,
@@ -149,7 +154,7 @@ pub async fn smoke(
         }
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
-    bus.publish(&EventMessage::new(&Envelope::new(
+    bus.publish(&tok::protobuf::events::immediate(&Envelope::new(
         EventId::generate(),
         ValueChanged {
             player_id: "4242".into(),

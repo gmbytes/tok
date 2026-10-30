@@ -44,7 +44,7 @@ tok-gateway 是这套基础设施的内置扩展，增加连接、认证、sessi
 | [`lifecycle`] / tok-lifecycle | 服务工厂、生命周期编排和有界任务监督 |
 | [`session`] / tok-session | SessionIdentity、LogicalMessage、TimerSpec / TimerTrigger / TimerUpdate、所有权与恢复凭证契约 |
 | [`grpc`] / tok-grpc | 通用 Channel 缓存、共享端点、追踪、期限及类型化执行，不理解游戏正文 |
-| [`message::protobuf`] | 泛型键 protobuf 正文编解码；不依赖生成协议，本模块属于 tok-message |
+| [`message::codec`] | 泛型键 protobuf 正文编解码；不依赖生成协议，本模块属于 tok-message |
 | [`message`] / tok-message | 非零编号消息注册与本地处理；message::rpc 提供远程协议适配 |
 | [`gateway`] / tok-gateway | 连接、session FIFO、计时调度、下行和恢复的运行实现 |
 
@@ -428,9 +428,10 @@ assert_eq!(service.oneshot(Request::new(context, Command {
 Registry 可以改变选链、拦截或委托规则，而编解码继续由上层适配器负责。以下实现将请求编号 7 重定向到已注册的 1：
 
 ```rust
+use tok::protobuf::message::RegistryExt as _;
 use std::{convert::Infallible, time::Duration};
 use prost::Message as _;
-use tok::{core::{BoxFuture, Identity}, execution::{Context, Registry, Request, Response, registry::Handler}, message::protobuf};
+use tok::{core::{BoxFuture, Identity}, execution::{Context, Registry, Request, Response, registry::Handler}, message::codec};
 use tok::application::CancellationToken;
 
 #[derive(Clone)]
@@ -453,14 +454,14 @@ impl<G: Registry<Key = u32>> Registry for Redirect<G> {
 struct Value { #[prost(uint32, tag = "1")] value: u32 }
 # #[tokio::main]
 # async fn main() -> Result<(), Box<dyn std::error::Error>> {
-let backend = Redirect(protobuf::Table::<u32>::new());
-let mut routes = protobuf::Registry::<u32, (), (), Infallible, _>::from_registry(backend);
+let backend = Redirect(codec::Table::<u32>::new());
+let mut routes = codec::Registry::<u32, (), (), Infallible, _>::from_registry(backend);
 routes.register(1, 2, |request: Request<((), Value)>| async move {
-    Ok(Response::new(protobuf::Reply { message: Value { value: request.input.1.value + 1 }, output: () }))
+    Ok(Response::new(codec::Reply { message: Value { value: request.input.1.value + 1 }, output: () }))
 })?;
 let context = Context::new(Identity { node_id: "local".into(), service_name: "custom".into() },
     "redirect", Duration::from_secs(1), CancellationToken::new())?;
-let result = routes.dispatch(Request::new(context, ((), protobuf::Message {
+let result = routes.dispatch(Request::new(context, ((), codec::Message {
     key: 7, body: Value { value: 41 }.encode_to_vec(),
 }))).await?;
 assert_eq!(result.output.message.key, 2);
@@ -471,25 +472,28 @@ assert_eq!(Value::decode(result.output.message.body.as_slice())?.value, 42);
 
 `registry::Handler` 擦除具体 Service 类型，每次调用仅克隆一次 Service，并通过 Call::new 保护就绪等待与执行。new 接入原始业务错误；[`from_execution_service`](execution::registry::Handler::from_execution_service) 接入已返回共同执行错误的链，保留 Stopped / Inner 的单层结构。自定义派发须接续 Request / Response、原期限、取消和追踪；`registry::Service::new(Arc<G>, key)` 同时保护取键与整个自定义派发过程，允许 G 为 dyn Registry。注册错误保留实现自己的类型，不能通过包装静默放大预算或自动重试。
 
-protobuf::Registry / message::Registry 的最后一个泛型参数 G 是底层 Registry，默认值仍使用静态 Table；from_registry 注入自有实现，from_shared_registry 接受共享实现或 trait 对象。调用时不要求 G 可克隆；通过这两个适配器注册新路由时要求 G: Clone，以便在共享状态下明确按实现的克隆语义更新。普通业务 RPC 的 RegistryHandler 和玩家 HandlerRegistry 同样支持自定义底层注册器；自定义构造使用 RegistryHandler::from_registry 或 HandlerRegistry::from_registry / from_shared_registry，并显式注入 G::DispatchError 到 Status 的映射；默认 new 保留默认表的映射。timer 和服务器事件继续走各自隔离入口。
+codec::Registry / message::Registry 的最后一个泛型参数 G 是底层 Registry，默认值仍使用静态 Table；from_registry 注入自有实现，from_shared_registry 接受共享实现或 trait 对象。调用时不要求 G 可克隆；通过这两个适配器注册新路由时要求 G: Clone，以便在共享状态下明确按实现的克隆语义更新。普通业务 RPC 的 RegistryHandler 和玩家 HandlerRegistry 同样支持自定义底层注册器；自定义构造使用 RegistryHandler::from_registry 或 HandlerRegistry::from_registry / from_shared_registry，并显式注入 G::DispatchError 到 Status 的映射；默认 new 保留默认表的映射。timer 和服务器事件继续走各自隔离入口。
 
-这次抽象的是通用按键消息注册与派发。protobuf / message 的 Registry 是其协议适配器；events::Registry 仍负责借用状态的事件 fan-out，不强行纳入单目标消息表，也不新增内建热更新管理或远端路由功能。
+这次抽象的是通用按键消息注册与派发。codec / message 的 Registry 是其协议适配器；events::Registry 仍负责借用状态的事件 fan-out，不强行纳入单目标消息表，也不新增内建热更新管理或远端路由功能。
 
 ### protobuf、编号消息与 RPC 适配
 
-[`message::protobuf`] 提供正文编解码适配，封装上述通用分发表；消息键 K 仍为泛型，不把 protobuf 放入执行核心。
-`protobuf::Registry<K, C, O, E>` 的 C 是业务状态，O 是附加结果；`message::Reply` 包含回应消息和附加结果，`message::Message<K>` 包含键和编码正文，类型不指定编码格式，默认键为 u32。protobuf 模块同时重导出这两个类型。
+[`message::codec`] 提供正文编解码适配，封装上述通用分发表；消息键 K 仍为泛型，不把 protobuf 放入执行核心。
+`codec::Registry<K, C, O, E>` 的 C 是业务状态，O 是附加结果；`message::Reply` 包含回应消息和附加结果，`message::Message<K>` 包含键和编码正文，类型不指定编码格式，默认键为 u32。codec 模块同时重导出这两个类型。
 [`message::Registry<C, O, E>`] 在其上限定 u32 非零请求与回应编号，Message 是编号消息，Reply 仍保留泛型附加结果。以下示例使用该编号消息表；本地调用不依赖 Tonic 类型。
 
-`message::Registry` 当前的注册 API 使用 protobuf 正文编解码，非零检查发生在注册请求及回应编号时；注入自定义底层注册器后，其直接派发行为由该实现定义。`message::Error` 表达注册配置错误，派发失败保留底层派发错误与执行停止原因。
+`message::Registry` 的 `register_service_with_codec` 接受独立的请求解码器与回应编码器；导入 `tok::protobuf::message::RegistryExt` 后，`register` / `register_service` 使用 `tok::protobuf::Codec` 提供便捷入口。非零检查发生在注册请求及回应编号时；注入自定义底层注册器后，其直接派发行为由该实现定义。`message::Error` 表达注册配置错误，派发失败保留底层派发错误与执行停止原因。
+
+正文契约由 [`core::codec::Encode`] 和 [`core::codec::Decode`] 分别定义，错误类型由实现决定。`tok-protobuf` 提供 prost 正文适配及可选扩展：`events`、`message`、`nats`、`session` feature 分别启用对应便捷入口；不选择扩展时只依赖基本编解码契约。事件可用 `Publication::with_codec` 编码，通过 `events::Registry::enable_codec` 注册解码器。`tok-events` 固定负责框架事件信封的 protobuf 编解码；`tok-nats` 使用该信封，但不要求业务正文使用 protobuf。Cargo feature 会在依赖图中合并。
 
 protobuf 派发路径直接借用 Message.key 调用底层 Registry，不要求键实现 Clone；自定义底层实现和 trait 对象可以使用不可克隆的键。注册回应键与默认静态 Table 的 Clone 约束保持不变，不代表默认表也支持不可克隆的键。
 
-protobuf::Registry 和 message::Registry 的输入已含消息键，可直接作为 `Service<Request<(C, Message<K>)>>` / `Service<Request<(C, message::Message)>>` 交给 ServiceBuilder，不需要额外 service_fn。克隆共享路由快照，后续注册采用写时复制，不改变旧克隆；每条路由的可变限额仍由其 Layer 显式共享。dispatch 复用该 Service 路径。
+codec::Registry 和 message::Registry 的输入已含消息键，可直接作为 `Service<Request<(C, Message<K>)>>` / `Service<Request<(C, message::Message)>>` 交给 ServiceBuilder，不需要额外 service_fn。克隆共享路由快照，后续注册采用写时复制，不改变旧克隆；每条路由的可变限额仍由其 Layer 显式共享。dispatch 复用该 Service 路径。
 
-编解码和内层 Service 的就绪等待也计入原执行范围。解码后的强类型 Service 同样通过 Call::new 驱动，就绪成功后复查原取消与期限；停止直接保留在 execution::Error::Stopped，不转换为 protobuf 业务错误。编解码闭包以 Arc 共享处理器和回应键，每次有效调用只克隆一次具体 Service；解码失败不克隆该 Service。默认表的解码错误通过 `execution::Error::Inner(registry::DispatchError::Handler(protobuf::Error::Decode(...)))` 返回，业务错误保留在 `protobuf::Error::Handler` 中；RPC 边界再映射为 Status。
+编解码和内层 Service 的就绪等待也计入原执行范围。解码后的强类型 Service 同样通过 Call::new 驱动，就绪成功后复查原取消与期限；停止直接保留在 execution::Error::Stopped，不转换为业务错误。编解码闭包以 Arc 共享处理器和回应键，每次有效调用只克隆一次具体 Service；解码失败不克隆该 Service。默认表用 `codec::Error::Decode` / `Encode` 保留具体来源，业务错误保留在 `codec::Error::Handler` 中；RPC 边界再映射为 Status。
 
 ```rust
+use tok::protobuf::message::RegistryExt as _;
 use std::{sync::Arc, time::Duration};
 use prost::Message as _;
 use tok::{core::Identity, execution::{Context, Request}, message::{self, Registry, Reply, Message}};
@@ -605,6 +609,7 @@ assert_eq!(response.output, "42");
 实际运行会监听 127.0.0.1:7001，并在收到进程退出信号后清理资源。
 
 ```rust,no_run
+use tok::protobuf::message::RegistryExt as _;
 use std::sync::Arc;
 use tok::{AppConfig, message::{Registry, Reply, rpc::{RegistryHandler, Service}}, application::{Application, shutdown_signal}, lifecycle::{Init, InitFuture, task::Task}};
 
@@ -1287,13 +1292,15 @@ just run examples/demo-game/config/redis-handoff-b.toml
 timerSpec 由服务端业务逻辑生成，不作为客户端调度接口。客户端只发起“开始生产”等业务动作，
 耗时、执行消息、参数与产出均由服务端规则决定。
 
-业务请求通过 [`session::logic::rpc::HandlerRegistry::register_with_timers`] 返回 [`session::logic::rpc::HandlerReply`]，
+业务请求通过 [`protobuf::session::RegistryExt::register_with_timers`] 返回 [`session::logic::rpc::HandlerReply`]，
 其 `timers` 使用 [`session::TimerUpdate`]。`None` 保持原集合，`ReplaceAll` 全量替换，空集合清空；
 `Patch` 可增改或取消指定 ID。timer ID 必须非空且不超过 256 字节，消息 ID 非零，周期必须大于零；
 同一次更新不能重复操作同一 ID。数量和 ID、正文总字节数受 `max_timers`、`max_timer_bytes` 限制，
 默认分别为 128 和 1048576。更新先完整校验再替换；非法或超容量的更新会终止 session，避免继续驱动旧集合。
 
 ```rust
+use tok::protobuf::session::TimerRegistryExt as _;
+use tok::protobuf::session::RegistryExt as _;
 use prost::Message;
 use tok::session::{TimerSpec, TimerUpdate, logic::rpc::{HandlerRegistry, HandlerReply}};
 
@@ -1326,7 +1333,7 @@ handlers.register_timer(3, |request: tok::execution::Request<(tok::session::logi
 # }
 ```
 
-[`session::logic::rpc::HandlerRegistry::register_timer`] 独立于客户端请求分发表；`CallContext.timer` 由内部 RPC 信封传递，
+[`protobuf::session::TimerRegistryExt::register_timer`] 独立于客户端请求分发表；`CallContext.timer` 由内部 RPC 信封传递，
 客户端不能通过填写 timer 的消息 ID 进入该处理函数。它包含 ID、预定与实际触发时刻，仍需遵循部署侧的内部调用身份约定。
 业务正文只包含游戏参数，timer 更新和触发来源不直接发送客户端。
 直接构造 [`session::logic::rpc::CallContext`] 的普通调用需填写 `timer: None`；统一 logic Tower 输入通过不同变体区分消息、事件与 timer 来源。
@@ -1418,7 +1425,7 @@ assert_eq!(value, 3);
 零订阅者返回 output 为空数组的 Response。多个处理者的输出扩展按注册顺序合并，同类型以后者覆盖；每个处理者的输入容器各自克隆，不把前一个输出隐式注入后一个输入。已执行的状态修改不回滚，不自动重试或去重，也不截获 panic。
 异步回调可以借用 `&mut` 状态，调用方必须保障状态的串行访问；不应持有标准互斥锁跨 await。
 
-远程接收通过 `enable_protobuf::<E>()` 给同一类型安装解码器，再调用 `receive(...).await` 执行同一组处理者。
+导入 `tok::protobuf::events::RegistryExt` 后，远程接收通过 `enable_protobuf::<E>()` 给同一类型安装解码器，再调用 `receive(...).await` 执行同一组处理者。
 正文只解码一次，原始 `Arc<Message>` 保留在执行扩展中；本地 `dispatch` 清除继承的原始编码，避免把父事件误当成当前事件转发。
 `just events-smoke` 演示同一回调在本地和解码接收时执行。示例 player 的生产完成处理也已使用此注册表，timer 入口派生原执行上下文后 await 分发。
 事件结果只用于当前服务端处理，不单独生成客户端 Response。
@@ -1466,9 +1473,9 @@ fn factory(bus: Arc<tok::nats::Bus>) -> impl Fn(Init) -> InitFuture + Send + Syn
 
 `extensions` 只安装明确选择的本服务能力；不自动继承发布方或 session 能力。传输为每次消费建立独立预算和追踪范围，业务结果不返回发布者。`group: None` 表示各实例独立接收；同名 group 的订阅者分担匹配事件。初始化失败、取消或超时不会发布部分就绪服务；服务停止时通知消费任务退出，整体收束受服务关闭期限约束。
 
-调用链内使用 [`nats::Bus::publish_request`] 传入 `Request<Envelope<E>>`，或使用 [`nats::Bus::publisher`] 组合 `Service<Request<Message>>`；保留本地期限、取消与追踪，Extensions 不进入网络。原生 [`nats::Bus::publish_event`] / publish 仍供显式独立传输出口使用。任何服务都可以发布，用 [`events::Registry`] 订阅自己关心的类型。
+调用链内使用 [`nats::Bus::publish_request_with`] 传入 `Request<Envelope<E>>`，或使用 [`nats::Bus::publisher`] 组合 `Service<Request<Message>>`；保留本地期限、取消与追踪，Extensions 不进入网络。原生 [`nats::Bus::publish_event_with`] / publish 仍供显式独立传输出口使用。任何服务都可以发布，用 [`events::Registry`] 订阅自己关心的类型。
 
-使用 [`events::Publisher`] 可以对传输编程：[`events::Publication`] 携带编码消息和即时或持久投递要求，NATS Bus 实现该接口；不支持的后端必须拒绝持久投递。protobuf 是 `tok-events` 的默认可选功能，不使用默认功能时可只使用本地事件和自定义编码。`Publication::protobuf` 在调用前编码，编码所占资源由调用方约束；需要 NATS 发布容量覆盖编码时，使用 `Bus::publish_request`。
+使用 [`events::Publisher`] 可以对传输编程：[`events::Publication`] 携带编码消息和即时或持久投递要求，NATS Bus 实现该接口；不支持的后端必须拒绝持久投递。`tok::protobuf::events::publication` 在调用前编码，编码所占资源由调用方约束；导入 `tok::protobuf::nats::PublisherExt` 后，`publish_request` 在 NATS 发布容量保护内编码。使用其他编码时可调用 `Bus::publish_request_with`。
 
 [`events::PublisherService`] 将发布器接入 Tower 并保护原执行预算；[`events::Registry::enable_decoder`] 允许注册自定义正文解码器。当前 `tok-nats` 的事件信封仍采用框架的 protobuf 线格式；正文可以由业务选择编码方式，不暗示所有后端都使用此线格式。
 目标由业务正文表达，订阅者自行解释；总线不要求 player、session 或 RPC。
@@ -1476,6 +1483,8 @@ fn factory(bus: Arc<tok::nats::Bus>) -> impl Fn(Init) -> InitFuture + Send + Syn
 处理函数可捕获状态与发布连接，也可以实现 [`events::Handler`] 自定义分发。
 
 ```rust,no_run
+use tok::protobuf::events::RegistryExt as _;
+use tok::protobuf::nats::PublisherExt as _;
 use std::sync::Arc;
 use tok::events::{self, Envelope, Event, EventId};
 use tokio_util::sync::CancellationToken;
@@ -1539,6 +1548,7 @@ handler 有有限等待期限，退出或超时会取消在途 future，已产�
 持久订阅使用 [`nats::jetstream::Consumer`] 实现同一个 `interest::Transport` 接口，通过 `events::service::install` 安装。其配置显式指定 stream、稳定 durable 名称、确认等待时间、最大投递次数和失败重投延迟；相同 durable 的实例共享进度，同名 group 必须与 durable 名称一致。需要各实例独立消费时，须为每个实例配置稳定且不同的 durable。已有消费者配置与所需过滤条件不一致时，安装失败而不修改已有消费者。
 
 ```rust,no_run
+use tok::protobuf::nats::PublisherExt as _;
 use std::{sync::Arc, time::Duration};
 use tok::{events::{self, DeliveryPolicy, Event, Envelope, EventId, Message, Outcome, TopicFilter}, execution::{Request, Response}, lifecycle::Init};
 #[derive(Clone, PartialEq, prost::Message)]
@@ -1604,7 +1614,7 @@ Ingress 不依赖 NATS，也不限制只能安装一个事件消费任务；可�
 
 需要会话内定制处理时，注入自己的 [`gateway::logic::Executor`]，实现 execute_event 并委托其他来源给 RpcExecutor。
 事件仍先进入会话 FIFO，续租并检查所有权后执行；默认 RPC 适配调用 LogicRpc.HandleEvent，返回独立 EventResponse（序号、错误、timer 更新），类型上没有客户端 payload。
-[`session::logic::rpc::HandlerRegistry::register_event`] 与普通请求、timer 表隔离；注册器通过 `into_service` 提供统一 Tower 入口，事件路由通过同一事件 Registry 安装 Layer。
+[`protobuf::session::EventRegistryExt::register_event`] 与普通请求、timer 表隔离；注册器通过 `into_service` 提供统一 Tower 入口，事件路由通过同一事件 Registry 安装 Layer。
 GatewayIngress、Handler、SessionManager 服务器 API、Executor 分别覆盖接入、网关事件编排、会话筛选和串行执行扩展。
 游戏附加内存状态不会自动迁移，若需跨网关恢复，应另外设计快照与恢复规则。
 
@@ -1673,7 +1683,7 @@ impl Event for ChatMessage {
 let ingress = ingress.with_topic_policy(|_request| Ok(vec!["chat:7".into()]));
 let sessions = ingress.sessions();
 let capabilities = sessions.extensions();
-let handlers = notify::<ChatMessage, _>(sessions, chat_message_id, |event| {
+let handlers = notify::<ChatMessage, _, _>(sessions, chat_message_id, tok::protobuf::Codec, |event| {
     let topic = event.topic.as_str().ok_or(events::Error::InvalidInput("聊天缺少 topic"))?;
     Ok((Target::Topic(topic.into()), event.payload.body.clone()))
 })?;

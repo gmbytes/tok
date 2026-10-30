@@ -1,5 +1,9 @@
 //! 计时更新、调用来源与强类型分发的真实 RPC 验证。
 
+#[path = "../../../tests/support_codec/codec.rs"]
+mod test_codec;
+#[path = "../../../tests/support_codec/session.rs"]
+mod test_session;
 use prost::Message;
 use std::{
     sync::{
@@ -8,6 +12,7 @@ use std::{
     },
     time::Duration,
 };
+use test_session::RegistryExt as _;
 use tok_core::ServiceDescriptor;
 use tok_grpc::{Client, Listener};
 use tok_session::TimerTrigger;
@@ -26,6 +31,16 @@ use tonic::Code;
 struct Data {
     #[prost(uint64, tag = "1")]
     value: u64,
+}
+struct NumberDecoder;
+impl tok_core::codec::Decode<u64> for NumberDecoder {
+    type Error = std::io::Error;
+    fn decode(&self, body: &[u8]) -> Result<u64, Self::Error> {
+        std::str::from_utf8(body)
+            .ok()
+            .and_then(|text| text.parse().ok())
+            .ok_or_else(|| std::io::Error::other("无效数字"))
+    }
 }
 fn spec() -> TimerSpec {
     TimerSpec {
@@ -64,6 +79,18 @@ fn timer_updates_round_trip_and_missing_operation_is_rejected() {
 async fn internal_trigger_is_propagated_and_cannot_be_selected_by_client_message_id() {
     let calls = Arc::new(AtomicUsize::new(0));
     let mut registry = HandlerRegistry::new();
+    registry
+        .register_timer_service_with_codec(
+            4,
+            NumberDecoder,
+            tower::service_fn(
+                |request: tok_execution::Request<(CallContext, u64)>| async move {
+                    assert_eq!(request.input.1, 42);
+                    Ok::<_, tonic::Status>(tok_execution::Response::new(None))
+                },
+            ),
+        )
+        .unwrap();
     registry
         .register_with_timers(
             1,
@@ -218,6 +245,37 @@ async fn internal_trigger_is_propagated_and_cannot_be_selected_by_client_message
         }
     );
     assert_eq!(calls.load(Ordering::SeqCst), 1);
+    let custom = Payload {
+        message_id: 4,
+        body: b"42".to_vec(),
+    };
+    assert!(
+        player_client
+            .call(
+                &target,
+                root((context.clone(), custom), tracing::Span::current())
+            )
+            .await
+            .unwrap()
+            .output
+            .payload
+            .is_none()
+    );
+    let invalid = Payload {
+        message_id: 4,
+        body: b"invalid".to_vec(),
+    };
+    assert_eq!(
+        player_client
+            .call(
+                &target,
+                root((context.clone(), invalid), tracing::Span::current())
+            )
+            .await
+            .unwrap_err()
+            .code(),
+        Code::InvalidArgument
+    );
     context.timer.as_mut().unwrap().fired_at_ms = 500;
     assert_eq!(
         player_client
@@ -248,3 +306,4 @@ fn root<T>(input: T, span: tracing::Span) -> tok_execution::Request<T> {
         input,
     )
 }
+use test_session::TimerRegistryExt as _;

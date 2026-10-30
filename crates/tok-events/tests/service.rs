@@ -1,5 +1,4 @@
 //! 服务级事件订阅的初始化和生命周期。
-#![cfg(feature = "protobuf")]
 use std::{
     sync::{
         Arc, Mutex,
@@ -142,7 +141,7 @@ fn chain() -> impl tower::Service<
     tower::service_fn(|_: Request<Arc<Message>>| async { Ok(Response::new(Outcome::Handled)) })
 }
 
-#[derive(Clone, PartialEq, prost::Message)]
+#[derive(Clone, PartialEq)]
 struct Registered {}
 impl tok_events::Event for Registered {
     const NAME: &'static str = "config.registered";
@@ -166,7 +165,9 @@ async fn registry_install_rejects_mismatched_types_before_subscribing() {
     registry
         .register::<Registered, _>(|_| Box::pin(async { Ok(Response::new(Outcome::Handled)) }))
         .unwrap();
-    registry.enable_protobuf::<Registered>().unwrap();
+    registry
+        .enable_decoder::<Registered>(|_| Ok(Registered {}))
+        .unwrap();
     let registry = service::RegistryService::new(Arc::new(registry));
     let result =
         service::install_registry(&init, &backend, config(), registry, |service| service).await;

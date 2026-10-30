@@ -78,22 +78,36 @@ impl From<Report> for tok_events::Outcome {
 ///
 /// 此内置实现仅查找本地在线会话，不加载离线主体。订阅的 group 由外部组件组装决定；
 /// 多网关部署若使用同组消费，须另行保证消息路由到拥有目标会话的网关。
-pub fn forward<E, F>(
+pub fn forward<E, C, F>(
     sessions: super::SessionManager,
+    codec: C,
     select: F,
 ) -> Result<tok_events::Registry, Error>
 where
-    E: tok_events::Event + prost::Message + Default,
+    E: tok_events::Event,
+    C: tok_core::codec::Encode<E> + tok_core::codec::Decode<E> + Clone + Send + Sync + 'static,
+    <C as tok_core::codec::Decode<E>>::Error: std::error::Error + Send + Sync + 'static,
     F: Fn(&tok_events::Envelope<E>) -> Result<Target, Error> + Send + Sync + 'static,
 {
     let mut handlers = tok_events::Registry::new(1)?;
+    let encoder = codec.clone();
     handlers.register::<E, _>(move |request| {
         let message = request
             .extensions()
             .get::<Arc<Message>>()
             .cloned()
             .map(Ok)
-            .unwrap_or_else(|| Message::new(request.input.event).map(Arc::new));
+            .unwrap_or_else(|| {
+                if E::DELIVERY != tok_events::DeliveryPolicy::Immediate {
+                    return Err(Error::Unsupported("本地转发不支持持久化事件"));
+                }
+                Message::from_codec(request.input.event, &encoder)
+                    .map(Arc::new)
+                    .map_err(|error| match error {
+                        tok_events::EncodeError::Event(error) => error,
+                        tok_events::EncodeError::Body(_) => Error::InvalidInput("事件正文编码失败"),
+                    })
+            });
         let target = select(request.input.event);
         let sessions = sessions.clone();
         Box::pin(async move {
@@ -109,7 +123,7 @@ where
             Ok(report.map(Into::into))
         })
     })?;
-    handlers.enable_protobuf::<E>()?;
+    handlers.enable_codec::<E, _>(codec)?;
     Ok(handlers)
 }
 
@@ -117,13 +131,16 @@ where
 ///
 /// 可选择全部会话、主题或指定主体。此处理者只发送 Notify，不执行 logic；
 /// 消费组由外部组件组装决定，不隐含全局广播或跨网关路由。
-pub fn notify<E, F>(
+pub fn notify<E, D, F>(
     sessions: super::SessionManager,
     message_id: u32,
+    decoder: D,
     map: F,
 ) -> Result<tok_events::Registry, Error>
 where
-    E: tok_events::Event + prost::Message + Default,
+    E: tok_events::Event,
+    D: tok_core::codec::Decode<E> + Send + Sync + 'static,
+    D::Error: std::error::Error + Send + Sync + 'static,
     F: Fn(&tok_events::Envelope<E>) -> Result<(Target, Vec<u8>), Error> + Send + Sync + 'static,
 {
     if message_id == 0 {
@@ -145,6 +162,6 @@ where
             Ok(report.map(Into::into))
         })
     })?;
-    handlers.enable_protobuf::<E>()?;
+    handlers.enable_codec::<E, _>(decoder)?;
     Ok(handlers)
 }

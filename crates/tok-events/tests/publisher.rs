@@ -1,12 +1,20 @@
 //! 不依赖具体传输的事件发布契约。
-#![cfg(feature = "protobuf")]
 use std::time::Duration;
+mod codec_support;
 use tok_events::{DeliveryPolicy, Envelope, Event, EventId, Publication, Publisher, Task};
 use tok_execution::{Context, Request, Response};
 use tokio_util::sync::CancellationToken;
 
-#[derive(Clone, PartialEq, prost::Message)]
+#[derive(Clone, PartialEq)]
 struct Saved {}
+impl codec_support::Body for Saved {
+    fn encode_body(&self) -> Vec<u8> {
+        Vec::new()
+    }
+    fn decode_body(_: &[u8]) -> Result<Self, std::io::Error> {
+        Ok(Self {})
+    }
+}
 impl Event for Saved {
     const NAME: &'static str = "test.saved";
     const DELIVERY: DeliveryPolicy = DeliveryPolicy::Persistent;
@@ -26,7 +34,7 @@ impl Publisher for Fake {
 #[tokio::test]
 async fn transport_independent_publication_keeps_delivery_and_context() {
     let event = Envelope::new(EventId::generate(), Saved {}).unwrap();
-    let publication = Publication::protobuf(&event).unwrap();
+    let publication = Publication::with_codec(&event, &codec_support::Codec).unwrap();
     let context = Context::new(
         tok_core::Identity {
             node_id: "node".into(),

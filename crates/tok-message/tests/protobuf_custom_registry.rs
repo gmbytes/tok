@@ -13,7 +13,7 @@ use tok_execution::{
     Context, Registry as _, Request, Response, StopReason,
     registry::{self, DispatchError},
 };
-use tok_message::protobuf::{self, Message, Reply};
+use tok_message::codec::{self as protobuf, Message, Reply};
 use tokio_util::sync::CancellationToken;
 use tower::ServiceExt as _;
 
@@ -40,8 +40,8 @@ impl Backend {
             .register(1, |request| async move {
                 assert_eq!(request.context.operation(), "custom");
                 assert_eq!(request.extensions().get::<u64>(), Some(&42));
-                let value =
-                    Value::decode(request.input.1.as_slice()).map_err(CodecError::Decode)?;
+                let value = Value::decode(request.input.1.as_slice())
+                    .map_err(|error| CodecError::Decode(Box::new(error)))?;
                 let mut response = Response::new(Reply {
                     message: Message {
                         key: Key(2),

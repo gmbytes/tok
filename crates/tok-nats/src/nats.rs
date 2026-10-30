@@ -263,16 +263,21 @@ impl Bus {
         })
     }
     /// 在当前调用范围内编码并发布强类型事件；本地能力不进入事件正文。
-    pub async fn publish_request<E: events::Event + prost::Message>(
+    pub async fn publish_request_with<E: events::Event, F>(
         &self,
         request: tok_execution::Request<events::Envelope<E>>,
-    ) -> Result<tok_execution::Response<()>, Error> {
+        encode: F,
+    ) -> Result<tok_execution::Response<()>, Error>
+    where
+        F: Fn(&events::Envelope<E>) -> Result<Message, Error> + Clone + Send + Sync + 'static,
+    {
         use tower::{Layer as _, ServiceExt as _};
         let bus = self.clone();
         tok_execution::Layer
             .layer(tower::service_fn(
                 move |request: tok_execution::Request<events::Envelope<E>>| {
                     let bus = bus.clone();
+                    let encode = encode.clone();
                     async move {
                         bus.healthy()?;
                         let _permit = bus
@@ -280,7 +285,7 @@ impl Bus {
                             .try_acquire()
                             .map_err(|_| Error::CapacityExceeded)?;
                         let explicit_trace = request.input.trace_context.clone();
-                        let mut message = Message::from_protobuf(&request.input)?;
+                        let mut message = encode(&request.input)?;
                         // 本次调用使用显式载体或请求 span，不能沿用当前任务的隐式 span。
                         message.trace_context = explicit_trace;
                         let mut trace = events::TraceContext::default();
@@ -312,16 +317,17 @@ impl Bus {
     /// 发布强类型事件；先占用发布容量再编码。
     /// Immediate 成功表示客户端接受；Persistent 成功表示 JetStream 确认存储。
     /// 两者均不表示业务消费完成，持久发布超时后结果可能未知。
-    pub async fn publish_event<E: events::Event + prost::Message>(
+    pub async fn publish_event_with<E: events::Event>(
         &self,
         envelope: events::Envelope<E>,
+        encode: impl FnOnce(&events::Envelope<E>) -> Result<Message, Error>,
     ) -> Result<(), Error> {
         self.healthy()?;
         let _permit = self
             .publishing
             .try_acquire()
             .map_err(|_| Error::CapacityExceeded)?;
-        let message = Message::from_protobuf(&envelope)?;
+        let message = encode(&envelope)?;
         match E::DELIVERY {
             events::DeliveryPolicy::Immediate => self.send(&message).await,
             events::DeliveryPolicy::Persistent => self.send_persistent(&message).await,

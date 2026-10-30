@@ -1,4 +1,5 @@
 //! 完整接入路径验证能力、异步中间件、生命周期及下行补发边界。
+mod codec;
 #[path = "support/topics.rs"]
 mod topic_support;
 use std::{
@@ -656,7 +657,7 @@ async fn request_event_and_timer_share_layers_and_session_capabilities_without_e
     assert!(matches!(client.read().await, Content::Response(_)));
     assert!(matches!(client.read().await,Content::Notify(notice) if notice.body==b"tick	"));
     let original = Arc::new(
-        tok_events::Message::new(
+        codec::message(
             &tok_events::Envelope::new(tok_events::EventId::generate(), Added {}).unwrap(),
         )
         .unwrap(),
@@ -978,7 +979,7 @@ async fn independent_event_keeps_selected_metadata_after_source_cancellation() {
     let context = delivery_context();
     let source_stop = context.cancellation();
     let event = Arc::new(
-        tok_events::Message::new(
+        codec::message(
             &tok_events::Envelope::new(tok_events::EventId::generate(), Added {}).unwrap(),
         )
         .unwrap(),

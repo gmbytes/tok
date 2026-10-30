@@ -251,3 +251,4 @@ fn root<T>(
         input,
     ))
 }
+use tok::protobuf::message::RegistryExt as _;

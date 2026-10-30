@@ -1,5 +1,5 @@
 //! 通用服务订阅：类型隔离、状态捕获、异步处理和容量，不依赖网关。
-#![cfg(feature = "protobuf")]
+mod codec_support;
 mod support;
 use std::sync::{
     Arc,
@@ -7,16 +7,37 @@ use std::sync::{
 };
 use tok_events::{Envelope, Event, EventId, Handler, Message, Outcome, Registry};
 
-#[derive(Clone, PartialEq, prost::Message)]
+#[derive(Clone, PartialEq)]
 struct GuildChanged {
-    #[prost(uint32, tag = "1")]
     amount: u32,
+}
+impl codec_support::Body for GuildChanged {
+    fn encode_body(&self) -> Vec<u8> {
+        self.amount.to_le_bytes().to_vec()
+    }
+    fn decode_body(body: &[u8]) -> Result<Self, std::io::Error> {
+        let bytes: [u8; 4] = body
+            .get(..4)
+            .and_then(|s| s.try_into().ok())
+            .ok_or_else(|| std::io::Error::other("无效正文"))?;
+        Ok(Self {
+            amount: u32::from_le_bytes(bytes),
+        })
+    }
 }
 impl Event for GuildChanged {
     const NAME: &'static str = "game.guild.changed";
 }
-#[derive(Clone, PartialEq, prost::Message)]
+#[derive(Clone, PartialEq)]
 struct MailSent {}
+impl codec_support::Body for MailSent {
+    fn encode_body(&self) -> Vec<u8> {
+        Vec::new()
+    }
+    fn decode_body(_: &[u8]) -> Result<Self, std::io::Error> {
+        Ok(Self {})
+    }
+}
 impl Event for MailSent {
     const NAME: &'static str = "game.mail.sent";
 }
@@ -25,7 +46,8 @@ impl Event for MailSent {
 async fn independent_services_subscribe_to_same_type_and_keep_their_own_state() {
     let id = EventId::generate();
     let message =
-        Message::new(&Envelope::new(id.clone(), GuildChanged { amount: 3 }).unwrap()).unwrap();
+        codec_support::message(&Envelope::new(id.clone(), GuildChanged { amount: 3 }).unwrap())
+            .unwrap();
     let mut services = vec![];
     for _ in 0..2 {
         let state = Arc::new(AtomicUsize::new(0));
@@ -45,7 +67,9 @@ async fn independent_services_subscribe_to_same_type_and_keep_their_own_state() 
                 })
             })
             .unwrap();
-        handlers.enable_protobuf::<GuildChanged>().unwrap();
+        handlers
+            .enable_codec::<GuildChanged, _>(codec_support::Codec)
+            .unwrap();
         services.push((handlers, state));
     }
     for (handlers, state) in &services {
@@ -73,7 +97,9 @@ async fn registry_rejects_bad_known_payloads_and_ignores_unsubscribed_types() {
             Box::pin(async { Err(tok_events::Error::Unavailable("业务失败")) })
         })
         .unwrap();
-    handlers.enable_protobuf::<GuildChanged>().unwrap();
+    handlers
+        .enable_codec::<GuildChanged, _>(codec_support::Codec)
+        .unwrap();
     assert!(
         handlers
             .register::<GuildChanged, _>(|_| Box::pin(async {
@@ -87,7 +113,8 @@ async fn registry_rejects_bad_known_payloads_and_ignores_unsubscribed_types() {
         })),
         Err(tok_events::Error::CapacityExceeded)
     ));
-    let unknown = Message::new(&Envelope::new(EventId::generate(), MailSent {}).unwrap()).unwrap();
+    let unknown =
+        codec_support::message(&Envelope::new(EventId::generate(), MailSent {}).unwrap()).unwrap();
     assert_eq!(
         handlers
             .handle(support::request(Arc::new(unknown)))
@@ -96,9 +123,10 @@ async fn registry_rejects_bad_known_payloads_and_ignores_unsubscribed_types() {
             .output,
         Outcome::Ignored
     );
-    let mut known =
-        Message::new(&Envelope::new(EventId::generate(), GuildChanged { amount: 1 }).unwrap())
-            .unwrap();
+    let mut known = codec_support::message(
+        &Envelope::new(EventId::generate(), GuildChanged { amount: 1 }).unwrap(),
+    )
+    .unwrap();
     assert!(
         handlers
             .handle(support::request(Arc::new(known.clone())))
@@ -118,9 +146,10 @@ async fn registry_rejects_bad_known_payloads_and_ignores_unsubscribed_types() {
 
 #[tokio::test]
 async fn typed_handler_receives_the_original_shared_encoding_without_reencoding() {
-    let mut encoded =
-        Message::new(&Envelope::new(EventId::generate(), GuildChanged { amount: 3 }).unwrap())
-            .unwrap();
+    let mut encoded = codec_support::message(
+        &Envelope::new(EventId::generate(), GuildChanged { amount: 3 }).unwrap(),
+    )
+    .unwrap();
     encoded.body.extend_from_slice(&[0xa0, 0x06, 0x01]);
     let original = Arc::new(encoded);
     let expected = Arc::clone(&original);
@@ -135,7 +164,9 @@ async fn typed_handler_receives_the_original_shared_encoding_without_reencoding(
             Box::pin(async { Ok(tok_execution::Response::new(Outcome::Handled)) })
         })
         .unwrap();
-    registry.enable_protobuf::<GuildChanged>().unwrap();
+    registry
+        .enable_codec::<GuildChanged, _>(codec_support::Codec)
+        .unwrap();
     assert_eq!(registry.event_types(), vec![GuildChanged::NAME]);
     assert_eq!(
         registry
@@ -184,7 +215,7 @@ async fn local_and_remote_execute_same_handlers_and_wire_metadata_does_not_leak_
         })
         .unwrap();
     let envelope = Envelope::new(EventId::generate(), GuildChanged { amount: 3 }).unwrap();
-    let message = Arc::new(Message::new(&envelope.clone()).unwrap());
+    let message = Arc::new(codec_support::message(&envelope.clone()).unwrap());
     let mut state = 0;
     let mut context = tok_execution::Request::new(support::context(), ());
     let deadline = context.context.deadline();
@@ -195,9 +226,12 @@ async fn local_and_remote_execute_same_handlers_and_wire_metadata_does_not_leak_
             .await,
         Err(tok_events::DispatchError::Unknown)
     ));
-    registry.enable_protobuf::<GuildChanged>().unwrap();
-    let inherited =
-        Arc::new(Message::new(&Envelope::new(EventId::generate(), MailSent {}).unwrap()).unwrap());
+    registry
+        .enable_codec::<GuildChanged, _>(codec_support::Codec)
+        .unwrap();
+    let inherited = Arc::new(
+        codec_support::message(&Envelope::new(EventId::generate(), MailSent {}).unwrap()).unwrap(),
+    );
     context.extensions_mut().insert(Arc::clone(&inherited));
     context.extensions_mut().insert(inherited.event_id.clone());
     context
@@ -261,10 +295,14 @@ async fn multiple_remote_handlers_run_in_order_and_stop_at_original_business_err
     registry
         .register::<GuildChanged, _>(|_| panic!("首错后不能执行"))
         .unwrap();
-    registry.enable_protobuf::<GuildChanged>().unwrap();
+    registry
+        .enable_codec::<GuildChanged, _>(codec_support::Codec)
+        .unwrap();
     let message = Arc::new(
-        Message::new(&Envelope::new(EventId::generate(), GuildChanged { amount: 7 }).unwrap())
-            .unwrap(),
+        codec_support::message(
+            &Envelope::new(EventId::generate(), GuildChanged { amount: 7 }).unwrap(),
+        )
+        .unwrap(),
     );
     let mut state = vec![];
     let result = registry
@@ -285,7 +323,9 @@ async fn subscriber_requires_its_own_identity_and_exposes_only_explicit_remote_c
         })
         .unwrap();
     assert!(registry.event_types().is_empty());
-    registry.enable_protobuf::<GuildChanged>().unwrap();
+    registry
+        .enable_codec::<GuildChanged, _>(codec_support::Codec)
+        .unwrap();
     let handler = Arc::new(registry);
     assert!(
         Subscriber::new(
@@ -313,12 +353,34 @@ async fn subscriber_requires_its_own_identity_and_exposes_only_explicit_remote_c
     );
 }
 
-#[derive(Clone, PartialEq, prost::Message)]
+#[derive(Clone, PartialEq)]
 struct Routed {
-    #[prost(int64, tag = "1")]
     value: i64,
-    #[prost(string, optional, tag = "2")]
     route: Option<String>,
+}
+impl codec_support::Body for Routed {
+    fn encode_body(&self) -> Vec<u8> {
+        let mut result = self.value.to_le_bytes().to_vec();
+        if let Some(route) = &self.route {
+            result.extend_from_slice(route.as_bytes());
+        }
+        result
+    }
+    fn decode_body(body: &[u8]) -> Result<Self, std::io::Error> {
+        let bytes: [u8; 8] = body
+            .get(..8)
+            .and_then(|s| s.try_into().ok())
+            .ok_or_else(|| std::io::Error::other("无效正文"))?;
+        let route = std::str::from_utf8(&body[8..]).map_err(std::io::Error::other)?;
+        Ok(Self {
+            value: i64::from_le_bytes(bytes),
+            route: if route.is_empty() {
+                None
+            } else {
+                Some(route.to_owned())
+            },
+        })
+    }
 }
 impl Event for Routed {
     const NAME: &'static str = "test.routed.v1";
@@ -341,7 +403,9 @@ async fn local_and_remote_paths_expose_the_same_topic_without_inheriting_parent_
             })
         })
         .unwrap();
-    handlers.enable_protobuf::<Routed>().unwrap();
+    handlers
+        .enable_codec::<Routed, _>(codec_support::Codec)
+        .unwrap();
     let topic = tok_events::Topic::named("chat:7/测试").unwrap();
     let envelope = Envelope::new(
         EventId::generate(),
@@ -351,7 +415,7 @@ async fn local_and_remote_paths_expose_the_same_topic_without_inheriting_parent_
         },
     )
     .unwrap();
-    let message = Arc::new(Message::new(&envelope).unwrap());
+    let message = Arc::new(codec_support::message(&envelope).unwrap());
     let mut seen = vec![];
     handlers
         .dispatch(&mut seen, support::request(&envelope))
@@ -387,7 +451,9 @@ async fn decoded_route_must_match_event_fields_before_any_handler_runs() {
     handlers
         .register::<Routed, _>(|_| Box::pin(async { panic!("错误路由不能进入业务") }))
         .unwrap();
-    handlers.enable_protobuf::<Routed>().unwrap();
+    handlers
+        .enable_codec::<Routed, _>(codec_support::Codec)
+        .unwrap();
     let envelope = Envelope::new(
         EventId::generate(),
         Routed {
@@ -396,7 +462,7 @@ async fn decoded_route_must_match_event_fields_before_any_handler_runs() {
         },
     )
     .unwrap();
-    let mut message = Message::new(&envelope).unwrap();
+    let mut message = codec_support::message(&envelope).unwrap();
     message.topic = tok_events::Topic::named("chat:8").unwrap();
     assert!(matches!(
         handlers

@@ -33,7 +33,7 @@ where
             Key = u32,
             Input = (super::CallContext, Vec<u8>),
             Output = tok_message::Reply<tok_message::Message<u32>, Option<crate::TimerUpdate>>,
-            HandlerError = tok_message::protobuf::Error<Status>,
+            HandlerError = tok_message::codec::Error<Status>,
         > + 'static,
     G::DispatchError: Send + 'static,
 {

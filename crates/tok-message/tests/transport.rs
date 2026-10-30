@@ -1,5 +1,9 @@
 //! RPC 分发、就绪检查、用户中间件与超时不重试的集成测试。
 
+#[path = "../../../tests/support_codec/codec.rs"]
+mod test_codec;
+#[path = "../../../tests/support_codec/session.rs"]
+mod test_session;
 use prost::Message;
 use std::{
     sync::{
@@ -8,6 +12,7 @@ use std::{
     },
     time::Duration,
 };
+use test_session::RegistryExt as _;
 use tok_core::ServiceDescriptor;
 use tok_grpc::{Client, Listener};
 use tok_proto::internal::v1::{

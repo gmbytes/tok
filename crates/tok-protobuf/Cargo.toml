@@ -1,0 +1,32 @@
+[package]
+name = "tok-protobuf"
+description = "tok 正文编解码的 protobuf 适配"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+tok-core.workspace = true
+prost.workspace = true
+tok-events = { workspace = true, optional = true }
+tok-message = { workspace = true, optional = true }
+tok-execution = { workspace = true, optional = true }
+tower = { workspace = true, optional = true }
+tok-nats = { workspace = true, optional = true }
+tok-session = { workspace = true, optional = true }
+tonic = { workspace = true, optional = true }
+
+[features]
+events = ["dep:tok-events"]
+message = ["dep:tok-message", "dep:tok-execution", "dep:tower"]
+nats = ["events", "dep:tok-nats", "dep:tok-execution"]
+session = ["message", "events", "dep:tok-session", "dep:tonic"]
+
+[dev-dependencies]
+tok-execution.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+
+[lints]
+workspace = true

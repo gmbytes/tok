@@ -1,9 +1,11 @@
 //! 通用正文适配不依赖消息编号、游戏协议或 Tonic。
+#![cfg(feature = "message")]
 use prost::Message as _;
 use std::time::Duration;
 use tok_core::Identity;
 use tok_execution::{Context, Request, registry::DispatchError};
-use tok_message::protobuf;
+use tok_message::codec as protobuf;
+use tok_protobuf::message::RegistryExt as _;
 use tokio_util::sync::CancellationToken;
 #[derive(Clone, PartialEq, prost::Message)]
 struct Value {

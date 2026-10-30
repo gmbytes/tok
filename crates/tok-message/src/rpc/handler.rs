@@ -21,15 +21,18 @@ pub(super) fn dispatch_status<E>(
     }
 }
 pub(super) fn table_status<E>(
-    error: tok_execution::registry::DispatchError<u32, crate::protobuf::Error<E>>,
+    error: tok_execution::registry::DispatchError<u32, crate::codec::Error<E>>,
     map_error: impl FnOnce(E) -> Status,
 ) -> Status {
     use tok_execution::registry::DispatchError;
     match error {
         DispatchError::Unknown(_) => Status::unimplemented("游戏消息尚未注册"),
-        DispatchError::Handler(crate::protobuf::Error::Decode(_)) => {
+        DispatchError::Handler(crate::codec::Error::Decode(_)) => {
             Status::invalid_argument("游戏消息解码失败")
         }
-        DispatchError::Handler(crate::protobuf::Error::Handler(error)) => map_error(error),
+        DispatchError::Handler(crate::codec::Error::Encode(_)) => {
+            Status::internal("游戏消息编码失败")
+        }
+        DispatchError::Handler(crate::codec::Error::Handler(error)) => map_error(error),
     }
 }

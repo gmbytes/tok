@@ -13,6 +13,7 @@ use tok::{
     lifecycle::{Builder, Init, InitFuture, task::Task},
     message::rpc::{self, protocol::internal::v1 as proto, tonic},
 };
+use tok_protobuf::nats::PublisherExt as _;
 use tokio_util::sync::CancellationToken;
 
 #[derive(Clone, PartialEq, prost::Message)]

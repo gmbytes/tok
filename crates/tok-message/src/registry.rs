@@ -1,4 +1,4 @@
-use std::{future::Future, sync::Arc};
+use std::sync::Arc;
 use tok_execution::{Request, Response};
 use tower::{Service, ServiceExt};
 
@@ -13,7 +13,7 @@ pub enum Error<E = tok_execution::registry::Error<u32>> {
     Registration(#[from] E),
 }
 
-/// 编号业务消息的 protobuf 分发表。
+/// 编号业务消息的正文分发表。
 ///
 /// C 是调用状态，O 是附加结果，E 是业务错误。请求和回应编号必须非零；
 /// 编解码、就绪等待和处理链执行共用原始执行预算，不构造 RPC 信封。
@@ -24,14 +24,14 @@ pub struct Registry<
     C = (),
     O = (),
     E = std::convert::Infallible,
-    G: ?Sized = crate::protobuf::Table<u32, C, O, E>,
+    G: ?Sized = crate::codec::Table<u32, C, O, E>,
 > {
-    inner: crate::protobuf::Registry<u32, C, O, E, G>,
+    inner: crate::codec::Registry<u32, C, O, E, G>,
 }
 impl<C, O, E> Default for Registry<C, O, E> {
     fn default() -> Self {
         Self {
-            inner: crate::protobuf::Registry::default(),
+            inner: crate::codec::Registry::default(),
         }
     }
 }
@@ -52,15 +52,15 @@ impl<C, O, E, G: ?Sized> Registry<C, O, E, G> {
     /// 注入共享自定义注册器；允许使用运行时选择的 dyn Registry。
     pub fn from_shared_registry(registry: Arc<G>) -> Self {
         Self {
-            inner: crate::protobuf::Registry::from_shared_registry(registry),
+            inner: crate::codec::Registry::from_shared_registry(registry),
         }
     }
 }
 impl<C, O, E, G> Registry<C, O, E, G> {
-    /// 注入底层自定义注册器，仍保留非零消息编号及 protobuf 编解码规则。
+    /// 注入底层自定义注册器，仍保留非零消息编号及所选正文编解码规则。
     pub fn from_registry(registry: G) -> Self {
         Self {
-            inner: crate::protobuf::Registry::from_registry(registry),
+            inner: crate::codec::Registry::from_registry(registry),
         }
     }
 }
@@ -72,49 +72,29 @@ where
     G: tok_execution::Registry<
             Key = u32,
             Input = (C, Vec<u8>),
-            Output = crate::protobuf::Reply<crate::protobuf::Message<u32>, O>,
-            HandlerError = crate::protobuf::Error<E>,
+            Output = crate::codec::Reply<crate::codec::Message<u32>, O>,
+            HandlerError = crate::codec::Error<E>,
         > + Clone
         + 'static,
 {
-    /// 注册强类型请求和回应；原始业务错误保持不变。
-    pub fn register<Req, Resp, F, Fut>(
+    /// 使用指定请求解码器及回应编码器安装强类型处理链。
+    pub fn register_service_with_codec<Req, Resp, D, A, S>(
         &mut self,
         request_id: u32,
         response_id: u32,
-        handler: F,
-    ) -> Result<(), Error<G::RegistrationError>>
-    where
-        Req: prost::Message + Default + Send + 'static,
-        Resp: prost::Message + Send + 'static,
-        F: Fn(Request<(C, Req)>) -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = Result<Response<crate::protobuf::Reply<Resp, O>>, E>> + Send + 'static,
-    {
-        let handler = Arc::new(handler);
-        self.register_service(
-            request_id,
-            response_id,
-            tower::service_fn(move |request: Request<(C, Req)>| {
-                let handler = Arc::clone(&handler);
-                async move { handler(request).await }
-            }),
-        )
-    }
-    /// 安装强类型 Tower 处理链。
-    pub fn register_service<Req, Resp, S>(
-        &mut self,
-        request_id: u32,
-        response_id: u32,
+        decoder: D,
+        encoder: A,
         service: S,
     ) -> Result<(), Error<G::RegistrationError>>
     where
-        Req: prost::Message + Default + Send + 'static,
-        Resp: prost::Message + Send + 'static,
-        S: Service<
-                Request<(C, Req)>,
-                Response = Response<crate::protobuf::Reply<Resp, O>>,
-                Error = E,
-            > + Clone
+        Req: Send + 'static,
+        Resp: Send + 'static,
+        D: tok_core::codec::Decode<Req> + Send + Sync + 'static,
+        D::Error: std::error::Error + Send + Sync + 'static,
+        A: tok_core::codec::Encode<Resp> + Send + Sync + 'static,
+        A::Error: std::error::Error + Send + Sync + 'static,
+        S: Service<Request<(C, Req)>, Response = Response<crate::codec::Reply<Resp, O>>, Error = E>
+            + Clone
             + Send
             + Sync
             + 'static,
@@ -124,7 +104,7 @@ where
             return Err(Error::Invalid("请求和回应消息编号必须非零".into()));
         }
         self.inner
-            .register_service(request_id, response_id, service)
+            .register_service_with_codec(request_id, response_id, decoder, encoder, service)
             .map_err(Error::Registration)
     }
 }
@@ -136,25 +116,24 @@ where
     G: tok_execution::Registry<
             Key = u32,
             Input = (C, Vec<u8>),
-            Output = crate::protobuf::Reply<crate::protobuf::Message<u32>, O>,
-            HandlerError = crate::protobuf::Error<E>,
+            Output = crate::codec::Reply<crate::codec::Message<u32>, O>,
+            HandlerError = crate::codec::Error<E>,
         > + 'static,
     G::DispatchError: Send + 'static,
 {
     /// 本地分发编号消息；不将业务错误转换为传输状态码。
     pub async fn dispatch(
         &self,
-        request: Request<(C, crate::protobuf::Message<u32>)>,
+        request: Request<(C, crate::codec::Message<u32>)>,
     ) -> Result<
-        Response<crate::protobuf::Reply<crate::protobuf::Message<u32>, O>>,
+        Response<crate::codec::Reply<crate::codec::Message<u32>, O>>,
         tok_execution::Error<G::DispatchError>,
     > {
         self.clone().oneshot(request).await
     }
 }
 
-impl<C, O, E, G: ?Sized> Service<Request<(C, crate::protobuf::Message<u32>)>>
-    for Registry<C, O, E, G>
+impl<C, O, E, G: ?Sized> Service<Request<(C, crate::codec::Message<u32>)>> for Registry<C, O, E, G>
 where
     C: Send + 'static,
     O: Send + 'static,
@@ -162,15 +141,15 @@ where
     G: tok_execution::Registry<
             Key = u32,
             Input = (C, Vec<u8>),
-            Output = crate::protobuf::Reply<crate::protobuf::Message<u32>, O>,
-            HandlerError = crate::protobuf::Error<E>,
+            Output = crate::codec::Reply<crate::codec::Message<u32>, O>,
+            HandlerError = crate::codec::Error<E>,
         > + 'static,
     G::DispatchError: Send + 'static,
 {
-    type Response = Response<crate::protobuf::Reply<crate::protobuf::Message<u32>, O>>;
+    type Response = Response<crate::codec::Reply<crate::codec::Message<u32>, O>>;
     type Error = tok_execution::Error<G::DispatchError>;
-    type Future = <crate::protobuf::Registry<u32, C, O, E, G> as Service<
-        Request<(C, crate::protobuf::Message<u32>)>,
+    type Future = <crate::codec::Registry<u32, C, O, E, G> as Service<
+        Request<(C, crate::codec::Message<u32>)>,
     >>::Future;
     fn poll_ready(
         &mut self,
@@ -178,7 +157,7 @@ where
     ) -> std::task::Poll<Result<(), Self::Error>> {
         self.inner.poll_ready(cx)
     }
-    fn call(&mut self, request: Request<(C, crate::protobuf::Message<u32>)>) -> Self::Future {
+    fn call(&mut self, request: Request<(C, crate::codec::Message<u32>)>) -> Self::Future {
         self.inner.call(request)
     }
 }

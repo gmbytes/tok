@@ -2055,6 +2055,7 @@ dependencies = [
  "tok-message",
  "tok-nats",
  "tok-observability",
+ "tok-protobuf",
  "tok-session",
  "tokio",
  "tokio-util",
@@ -2258,6 +2259,23 @@ dependencies = [
  "tonic",
  "tonic-prost",
  "tonic-prost-build",
+]
+
+[[package]]
+name = "tok-protobuf"
+version = "0.1.0"
+dependencies = [
+ "prost",
+ "tok-core",
+ "tok-events",
+ "tok-execution",
+ "tok-message",
+ "tok-nats",
+ "tok-session",
+ "tokio",
+ "tokio-util",
+ "tonic",
+ "tower",
 ]
 
 [[package]]

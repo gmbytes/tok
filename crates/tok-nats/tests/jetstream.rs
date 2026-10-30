@@ -1,4 +1,10 @@
 //! 真实 JetStream 的持久发布、离线补收及失败重投。
+#[path = "../../../tests/support_codec/codec.rs"]
+mod test_codec;
+#[path = "../../../tests/support_codec/events.rs"]
+mod test_events;
+#[path = "../../../tests/support_codec/nats.rs"]
+mod test_nats;
 use futures_util::StreamExt;
 use std::{
     sync::{
@@ -7,6 +13,7 @@ use std::{
     },
     time::Duration,
 };
+use test_nats::PublisherExt as _;
 use tok_events::{DeliveryPolicy, Envelope, Event, EventId, Outcome, TopicFilter, service};
 use tok_execution::{Request, Response};
 use tok_lifecycle::{Builder, Init, InitFuture, task::Task};
@@ -93,7 +100,7 @@ async fn persistent_events_survive_offline_and_retry_failed_processing() {
     .unwrap();
     tok_events::Publisher::publish(
         &bus,
-        Request::new(context, tok_events::Publication::protobuf(&event).unwrap()),
+        Request::new(context, test_events::publication(&event).unwrap()),
     )
     .await
     .unwrap();

@@ -1,8 +1,8 @@
-//! protobuf 正文编解码适配；分发键 K 由调用方定义，不包含 RPC 信封。
+//! 可替换正文编解码适配；分发键 K 由调用方定义，不包含 RPC 信封。
 //! Registry 可直接作为 Tower Service，公共策略包住分发表，路由策略保留在注册项内。
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
 
-use std::{future::Future, sync::Arc};
+use std::sync::Arc;
 use tok_execution::registry;
 use tok_execution::{Request, Response};
 use tower::{Service, ServiceExt};
@@ -14,17 +14,20 @@ pub use crate::{Message, Reply};
 pub enum Error<E> {
     /// 正文不符合注册的请求类型。
     #[error("消息正文解码失败：{0}")]
-    Decode(#[source] prost::DecodeError),
+    Decode(#[source] Box<dyn std::error::Error + Send + Sync>),
+    /// 回应正文编码失败。
+    #[error("消息正文编码失败：{0}")]
+    Encode(#[source] Box<dyn std::error::Error + Send + Sync>),
     /// 处理链返回的业务错误。
     #[error("消息处理失败：{0}")]
     Handler(#[source] E),
 }
 
-/// protobuf 注册器使用的默认静态底层表；存储解码前的正文处理链。
+/// 正文注册器使用的默认静态底层表；存储解码前的正文处理链。
 pub type Table<K, C = (), O = (), E = std::convert::Infallible> =
     tok_execution::Table<K, (C, Vec<u8>), Reply<Message<K>, O>, Error<E>>;
 
-/// 在通用分发表上增加 protobuf 编解码，C 是调用状态，O 是附加结果，E 是业务错误。
+/// 在通用分发表上增加正文编解码，C 是调用状态，O 是附加结果，E 是业务错误。
 ///
 /// K 可以是数字、字符串或枚举。本适配器不规定零或空字符串是否有效，
 /// 编解码、内层就绪等待和业务执行均在原 Context 约束内，不创建后台任务。
@@ -87,40 +90,22 @@ where
         > + Clone
         + 'static,
 {
-    /// 注册异步业务函数；业务错误不转换为传输状态码。
-    pub fn register<Req, Resp, F, Fut>(
+    /// 使用独立的请求解码器和回应编码器安装强类型 Tower 链。
+    pub fn register_service_with_codec<Req, Resp, D, A, S>(
         &mut self,
         request_key: K,
         response_key: K,
-        handler: F,
-    ) -> Result<(), G::RegistrationError>
-    where
-        Req: prost::Message + Default + Send + 'static,
-        Resp: prost::Message + Send + 'static,
-        F: Fn(Request<(C, Req)>) -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = Result<Response<Reply<Resp, O>>, E>> + Send + 'static,
-    {
-        let handler = Arc::new(handler);
-        self.register_service(
-            request_key,
-            response_key,
-            tower::service_fn(move |request: Request<(C, Req)>| {
-                let handler = Arc::clone(&handler);
-                async move { handler(request).await }
-            }),
-        )
-    }
-    /// 在正文编解码之间安装强类型 Tower 链；编解码和强类型就绪等待均受原执行范围保护。
-    /// 每次调用仅克隆一次具体 Service；停止使用共同错误的外层 Stopped。
-    pub fn register_service<Req, Resp, S>(
-        &mut self,
-        request_key: K,
-        response_key: K,
+        decoder: D,
+        encoder: A,
         service: S,
     ) -> Result<(), G::RegistrationError>
     where
-        Req: prost::Message + Default + Send + 'static,
-        Resp: prost::Message + Send + 'static,
+        Req: Send + 'static,
+        Resp: Send + 'static,
+        D: tok_core::codec::Decode<Req> + Send + Sync + 'static,
+        D::Error: std::error::Error + Send + Sync + 'static,
+        A: tok_core::codec::Encode<Resp> + Send + Sync + 'static,
+        A::Error: std::error::Error + Send + Sync + 'static,
         S: Service<Request<(C, Req)>, Response = Response<Reply<Resp, O>>, Error = E>
             + Clone
             + Send
@@ -130,26 +115,35 @@ where
     {
         let service = Arc::new(service);
         let response_key = Arc::new(response_key);
+        let decoder = Arc::new(decoder);
+        let encoder = Arc::new(encoder);
         let codec = tower::service_fn(move |request: Request<(C, Vec<u8>)>| {
             let service = Arc::clone(&service);
             let response_key = Arc::clone(&response_key);
+            let decoder = Arc::clone(&decoder);
+            let encoder = Arc::clone(&encoder);
             async move {
                 let (context, (state, body), extensions) = request.into_parts();
-                let input = Req::decode(body.as_slice())
-                    .map_err(|error| tok_execution::Error::Inner(Error::Decode(error)))?;
+                let input = decoder
+                    .decode(body.as_slice())
+                    .map_err(|error| tok_execution::Error::Inner(Error::Decode(Box::new(error))))?;
                 let reply = tok_execution::Call::new(
                     service.as_ref().clone(),
                     Request::from_parts(context, (state, input), extensions),
                 )
                 .await
                 .map_err(|error| error.map_inner(Error::Handler))?;
-                Ok(reply.map(|reply| Reply {
-                    message: Message {
-                        key: response_key.as_ref().clone(),
-                        body: reply.message.encode_to_vec(),
-                    },
-                    output: reply.output,
-                }))
+                reply.try_map(|reply| {
+                    Ok(Reply {
+                        message: Message {
+                            key: response_key.as_ref().clone(),
+                            body: encoder.encode(&reply.message).map_err(|error| {
+                                tok_execution::Error::Inner(Error::Encode(Box::new(error)))
+                            })?,
+                        },
+                        output: reply.output,
+                    })
+                })
             }
         });
         Arc::make_mut(&mut self.inner).register_handler(

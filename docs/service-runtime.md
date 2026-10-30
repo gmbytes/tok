@@ -64,7 +64,7 @@ session 驱动的目标事件有不同的目标和生命周期：gateway 订阅�
 
 服务级订阅的 topic 与 group 均由组装者决定。所有服务实例需要各自收到配置更新时，采用让每个匹配实例独立接收的订阅方式；同一个竞争消费 group 在成员之间分担，不能保证每个实例都收到。Core NATS 即时投递不保证离线补收、每个实例必达或处理完成确认；配置一致性应由游戏选择权威配置读取与版本校验 / 重载等机制。JetStream 另用稳定 durable 保存进度并重投；持久确认仅表示该消费者的处理职责完成，不提供事务性去重或离线玩家加载。
 
-`tok-events` 提供事件契约、注册及传输无关的发布与订阅接口；`tok-nats` 实现 Core NATS 与 JetStream 传输；`tok-message` 提供消息与普通 RPC，`tok-session` 提供 session 驱动的 logic 适配。事件 crate 不依赖 NATS，可关闭默认 protobuf 功能使用本地事件；应用可通过 `Publisher` 携带投递策略发布已编码事件。`tok_events::service::install` 提供服务工厂内的 Tower 订阅装配，`RegistryService` 适配现有注册表；普通服务、logic 服务及仅事件服务的组合和已验证环境见[实施计划](implementation-plan.md#服务入口与事件统一专项计划)。
+`tok-events` 提供事件契约、注册及传输无关的发布与订阅接口；`tok-nats` 实现 Core NATS 与 JetStream 传输；`tok-message` 提供消息与普通 RPC，`tok-session` 提供 session 驱动的 logic 适配。事件 crate 不依赖 NATS 或 protobuf 正文适配；应用可通过 `Publisher` 携带投递策略发布已编码事件。`tok_events::service::install` 提供服务工厂内的 Tower 订阅装配，`RegistryService` 适配现有注册表；普通服务、logic 服务及仅事件服务的组合和已验证环境见[实施计划](implementation-plan.md#服务入口与事件统一专项计划)。
 
 ```text
 RPC / 客户端业务消息 / 本地或 NATS 事件 / timer
@@ -383,7 +383,7 @@ Client::with_endpoint_factory 接收从 ServiceDescriptor 创建 Tonic Endpoint 
 
 tok-execution::Registry 定义按键派发契约，默认 Table<K, T, R, E> 根据 K 选择 Tower Service<Request<T>, Response=Response<R>, Error=E>，就绪等待和执行共用原 Context。默认 Table 的 K 需 Ord + Clone；枚举、字符串和自定义键均可用，不限定 u32、数字非零或 Display。注册错误 registry::Error 保留重复键，运行错误 registry::DispatchError 区分 Unknown / Handler，执行停止使用外层 execution::Error::Stopped 并保留原始业务错误，不生成协议状态码。
 
-protobuf 正文适配现位于 tok-message::protobuf，包装上述通用表，不让 tok-execution 依赖 prost。适配器 Registry<K, C, O, E> 根据键解码请求、执行强类型处理链、编码回应；编解码也处于原预算内。业务状态和附加结果为自有 Send + static 类型，借用调用仍可直接使用 execution 或事件处理。
+正文适配位于 tok-message::codec，包装上述通用表；请求解码器与回应编码器使用 tok-core::codec 契约。tok-protobuf 是可选的 prost 实现，tok-execution 不依赖 prost。Registry<K, C, O, E> 根据键解码请求、执行强类型处理链、编码回应；编解码也处于原预算内。业务状态和附加结果为自有 Send + static 类型，借用调用仍可直接使用 execution 或事件处理。
 
 游戏 RPC 明确选择 u32 消息 ID：编号消息注册器注册时校验请求与回应 ID 非零，rpc::RegistryHandler 拒绝零请求消息 ID 或零回应消息 ID。上下文转换、request_id 回应关联、计时来源隔离和 Status 映射均留在游戏协议边界。公会处理函数使用自身错误和业务目标，同一表可被本地和真实 RPC 调用。
 
@@ -403,7 +403,7 @@ registry 注册错误定名为 Error<K>，运行失败定名为 DispatchError<K,
 
 ## 消息与传输边界校正（2026-10-21）
 
-tok-game-rpc 已调整为 tok-message，tok-rpc 更名为 tok-grpc；通用 protobuf 正文适配现集成于 tok-message::protobuf。生成协议仍在 tok-proto，不依赖执行层。门面提供 tok::message 与 tok::grpc，不再提供独立 tok::protobuf。
+tok-game-rpc 已调整为 tok-message，tok-rpc 更名为 tok-grpc；通用正文注册和派发由 tok-message::codec 提供，prost 正文适配归独立的 tok-protobuf。生成协议仍在 tok-proto，不依赖执行层；门面提供 tok::message、tok::protobuf 与 tok::grpc。
 
 tok-message 根 Registry 提供非零编号注册、本地分发与原始业务错误；普通业务 RPC 位于 message::rpc，玩家身份及事件/timer RPC 适配位于 session::logic::rpc。公会示例和本地/RPC 共用处理链采用根 Registry。通用 protobuf 表继续允许字符串及零键，RPC 不自动添加锁或重试，事件与 timer 仍只能由可信服务器触发。
 
@@ -448,7 +448,7 @@ SessionHandle::notify_request 继承当前范围；notify / submit / post_event 
 
 GatewayRpcService 四个交接入口从 metadata 建立执行范围、安装目标 manager 能力并复用 Server 执行。prepare 的 budget_ms 被传入范围剩余预算进一步限制；快照回调接续该范围。协调端的 prepare / commit / complete 共享原接管期限并使用通用 gRPC 执行；取消补偿使用独立、有界范围，既有冻结/条件所有权转移/恢复和监督清理保持原语义。
 
-Bus::publisher 提供 Service<Request<Message>>，Bus::publish_request 接收 Request<Envelope<E>>；从 Context.span 提取追踪，本地发布受原期限和取消约束。原生 publish / publish_event 保留为底层出口；订阅者消费仍独立建立本地能力与处理预算。不新增 broker 确认、业务重试或远端取消保证。
+Bus::publisher 提供 Service<Request<Message>>，tok-protobuf 的 NATS 扩展 publish_request 接收 Request<Envelope<E>>；从 Context.span 提取追踪，本地发布受原期限和取消约束。原生 publish / publish_event 保留为底层出口；订阅者消费仍独立建立本地能力与处理预算。不新增 broker 确认、业务重试或远端取消保证。
 
 
 ## Registry 的 Tower 路由入口（2026-10-21）
@@ -457,7 +457,7 @@ execution::Registry::into_service(Fn(&Request<T>) -> K) 消费已组装分发表
 
 路由 Service 的取键、查表及目标调用进入共同执行保护，已停止调用不执行取键；非协作式取键迟到后不继续业务或接受迟到结果。直接 dispatch 也先检查 Context 停止条件，再查询键。Unknown / Handler，执行停止使用外层 execution::Error::Stopped 的分类和原错误保留，不转换为协议状态。
 
-protobuf::Registry 和 message::Registry 直接实现 Service<Request<(C, Message<K>)>> / Service<Request<(C, message::Message)>>。编码适配移交原 Context，dispatch 复用同一 Service 路径，不新增执行循环。protobuf 表以 Arc 共享快照，注册时写时复制，旧克隆和已开始的调用保持原路由视图；路由内部策略状态仍按各自 Clone/共享约定工作。
+message::codec::Registry 和 message::Registry 直接实现 Service<Request<(C, Message<K>)>> / Service<Request<(C, message::Message)>>。编码适配移交原 Context，dispatch 复用同一 Service 路径，不新增执行循环。表以 Arc 共享快照，注册时写时复制，旧克隆和已开始的调用保持原路由视图；路由内部策略状态仍按各自 Clone/共享约定工作。
 
 所有入口的 poll_ready 仅表示分发器可接受调用，不预留尚未选定路由的资源，也不探测远端健康。目标就绪等待计入调用期限；公共 Layer 的外层等待由外层执行范围保护。普通业务 RPC 适配和本地公会示例已直接使用 Service，不需为 Registry 手写 service_fn；事件借用分发与 fan-out 契约不变。
 

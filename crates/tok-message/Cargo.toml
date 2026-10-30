@@ -15,12 +15,12 @@ tok-core.workspace = true
 tok-proto.workspace = true
 tonic.workspace = true
 tower.workspace = true
-prost.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+prost.workspace = true
 tok-session.workspace = true
 tok-events.workspace = true
 tracing-opentelemetry.workspace = true

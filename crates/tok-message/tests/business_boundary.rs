@@ -1,5 +1,4 @@
 //! 普通业务 RPC 独立于玩家上下文，保留执行范围与传输校验。
-use prost::Message as _;
 use std::{sync::Arc, time::Duration};
 use tok_core::{Extensions, Identity, ServiceDescriptor};
 use tok_execution::{Context, Request, Response};
@@ -13,25 +12,46 @@ use tok_proto::internal::v1::{
 use tokio_util::sync::CancellationToken;
 use tonic::Code;
 
-#[derive(Clone, PartialEq, prost::Message)]
+#[derive(Clone, PartialEq)]
 struct Value {
-    #[prost(uint32, tag = "1")]
     number: u32,
+}
+struct TestCodec;
+impl tok_core::codec::Encode<Value> for TestCodec {
+    type Error = std::convert::Infallible;
+    fn encode(&self, value: &Value) -> Result<Vec<u8>, Self::Error> {
+        Ok(value.number.to_le_bytes().to_vec())
+    }
+}
+impl tok_core::codec::Decode<Value> for TestCodec {
+    type Error = std::io::Error;
+    fn decode(&self, body: &[u8]) -> Result<Value, Self::Error> {
+        let bytes: [u8; 4] = body.try_into().map_err(std::io::Error::other)?;
+        Ok(Value {
+            number: u32::from_le_bytes(bytes),
+        })
+    }
 }
 
 #[tokio::test]
 async fn business_rpc_preserves_extensions_and_rejects_timer() {
     let mut registry = Registry::<u32, (), std::convert::Infallible>::new();
     registry
-        .register(1, 2, |request: Request<(u32, Value)>| async move {
-            assert_eq!(request.extensions().get::<u64>(), Some(&42));
-            Ok(Response::new(Reply {
-                message: Value {
-                    number: request.input.0 + request.input.1.number,
-                },
-                output: (),
-            }))
-        })
+        .register_service_with_codec(
+            1,
+            2,
+            TestCodec,
+            TestCodec,
+            tower::service_fn(|request: Request<(u32, Value)>| async move {
+                assert_eq!(request.extensions().get::<u64>(), Some(&42));
+                Ok(Response::new(Reply {
+                    message: Value {
+                        number: request.input.0 + request.input.1.number,
+                    },
+                    output: (),
+                }))
+            }),
+        )
         .unwrap();
     let handler = RegistryHandler::new(
         Arc::new(registry),
@@ -91,7 +111,7 @@ async fn business_rpc_preserves_extensions_and_rejects_timer() {
                     call,
                     Payload {
                         message_id: 1,
-                        body: Value { number: 5 }.encode_to_vec(),
+                        body: 5_u32.to_le_bytes().to_vec(),
                     },
                 ),
             ),
@@ -102,7 +122,12 @@ async fn business_rpc_preserves_extensions_and_rejects_timer() {
     assert_eq!(response.request_id, 3);
     let payload = response.payload.unwrap();
     assert_eq!(payload.message_id, 2);
-    assert_eq!(Value::decode(payload.body.as_slice()).unwrap().number, 12);
+    assert_eq!(
+        tok_core::codec::Decode::<Value>::decode(&TestCodec, &payload.body)
+            .unwrap()
+            .number,
+        12
+    );
     let mut raw = BusinessRpcClient::connect(format!("http://{address}"))
         .await
         .unwrap();

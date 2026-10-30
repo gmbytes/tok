@@ -1,4 +1,10 @@
 //! 独立事件 RPC：来源隔离、身份校验、稳定 ID 与 timer 更新。
+#[path = "../../../tests/support_codec/codec.rs"]
+mod test_codec;
+#[path = "../../../tests/support_codec/events.rs"]
+mod test_events;
+#[path = "../../../tests/support_codec/session.rs"]
+mod test_session;
 use std::{
     sync::{
         Arc,
@@ -6,6 +12,7 @@ use std::{
     },
     time::Duration,
 };
+use test_session::EventRegistryExt as _;
 use tok_core::ServiceDescriptor;
 use tok_events::{Event, EventId};
 use tok_grpc::{Client, Listener};
@@ -285,7 +292,7 @@ async fn ordered_event_handlers_compose_timer_effects_without_client_payloads() 
         }
         let id = EventId::generate();
         let event = Arc::new(
-            tok_events::Message::new(
+            test_events::immediate(
                 &tok_events::Envelope::new(id.clone(), Update { value: 7 }).unwrap(),
             )
             .unwrap(),

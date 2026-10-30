@@ -35,6 +35,7 @@ AGENTS.md 已记录有官方依据的 API 组织规则：功能命名空间公�
 | 应用组装 | [Application](../crates/tok/src/application.rs) 复用共同 Factory / Builder，配置驱动共享监听、发现、就绪与退出；[RPC 组装](../crates/tok/src/application/rpc.rs) 自动注入初始化绑定 | 自定义 protobuf 可逐服务绑定，或显式注册完整端点；同一端点不混用两种方式 |
 | 无端点服务 | ServiceConfig.endpoint 可省略，纯事件/后台服务使用同一生命周期 | 不发布网络地址，不注入 application::Binding；需要发现查询时由组装层注入 |
 | 执行与中间件 | [execution::Context](../crates/tok-execution/src/context.rs)、[Request / Tower Layer](../crates/tok-execution/src/lib.rs) 用于 RPC、事件、timer 与网关消息链 | 保留具体协议、输入/结果类型、可信入口校验和调度边界，无通用路由器/熔断器 |
+| 正文编解码 | [codec](../crates/tok-core/src/codec.rs) 定义 Encode / Decode；[tok-protobuf](../crates/tok-protobuf/src/lib.rs) 是可选 prost 适配，消息和事件均支持自定义正文编码 | 框架事件信封固定使用 protobuf；具体编解码错误在本地作为来源保留，协议边界映射为协议错误 |
 | 服务生命周期 | Factory / Init 初始化，Builder → Prepared → Running 消费式编排；task::Supervisor 驱动有界工作 | 主任务、后台故障及退出期限由所有者监督，不创建隐藏的任务运行时 |
 | RPC | [tok-grpc](../crates/tok-grpc/src/lib.rs) 提供连接、端点和通用执行；[tok-message](../crates/tok-message/src/lib.rs) 提供普通业务 RPC 与可选请求锁；[tok-session](../crates/tok-session/src/lib.rs) 提供 logic RPC、事件与 timer 适配 | RPC 工厂初始化必须安装处理链，未安装不发布；同一端点不能覆盖同名 protobuf 服务 |
 | 事件 | [Registry](../crates/tok-events/src/registry.rs) 本地借用及远程解码共用处理表，有序多处理者、原始错误及 Arc 保留 | 本地 dispatch 显式等待；远程发布不等待业务结果，不提供事务或隐式去重 |
@@ -46,7 +47,11 @@ AGENTS.md 已记录有官方依据的 API 组织规则：功能命名空间公�
 | 发现与协调 | Memory / Redis 发现、会话所有权、请求级锁；发现缓存和路由分离 | Memory 仅单进程；租约与超时是尽力保护，不保证严格 fencing 或恰好一次 |
 | 工程与文档 | 框架 crate、demo、构建期 protobuf/消息 ID 生成、中文 rustdoc、workspace lint、LF、Windows/Linux CI | CI 配置不等于本地已执行 Linux 验证；真实外部服务与 release 结果分别记录 |
 
-`tok-events` 不依赖 NATS，默认 protobuf 编解码可通过关闭默认功能移除；通用 `Publisher` 接收带投递策略的 `Publication`，`tok-nats::Bus` 实现发布接口并通过订阅传输契约接入相同处理链。
+`tok-events` 不依赖 NATS 或 protobuf 正文适配；通用 `Publisher` 接收带投递策略的 `Publication`，`tok-nats::Bus` 实现发布接口并通过订阅传输契约接入相同处理链。
+
+正文 Protobuf 便捷入口集中在 `tok-protobuf`：`events`、`message`、`nats` 和 `session` feature 分别提供事件、消息、NATS 发布与逻辑会话扩展；基础 `Codec` 不依赖这些扩展。`tok-message`、`tok-events`、`tok-nats`、`tok-session` 和 `tok-gateway` 不反向依赖正文适配。gateway 的事件转发与通知使用调用方提供的 codec；逻辑会话 timer 参数也使用通用解码器。框架协议和 NATS 事件信封仍使用各自的 Protobuf 线格式。
+
+测试依赖按验证范围收紧：通用 crate 使用测试 codec 验证其协议和处理链；Protobuf 适配专项测试位于 `tok-protobuf`。NATS、session 和 gateway 的部分真实协议组合测试使用测试用 prost codec，不反向依赖 `tok-protobuf`。
 
 ## 使用与失败边界
 
@@ -142,7 +147,7 @@ Client::with_endpoint_factory 接收从 ServiceDescriptor 创建 Tonic Endpoint 
 
 分发能力合并入 tok-execution::registry，不新增独立 crate 或 tok::dispatch 门面路径。Registry<K, T, R, E> 只负责按键选择并执行处理链，输入/结果/业务错误均泛型，不限定消息 ID、正文或编解码。K 采用 Ord + Clone 约束，不要求 Display；零或空键的合法性由业务/协议决定。
 
-当时正文 protobuf 适配位于 tok-protobuf（现为 tok-message::protobuf），复用通用表，提供 Registry<K, C, O, E> / Message<K> / Reply / Error，编解码与内层就绪等待也计入原预算。tok-execution 不依赖 prost、Tonic、生成协议、玩家或生命周期。message::rpc::HandlerRegistry 的普通请求表委托该适配器；business::Handler 显式转换业务状态与错误，仅在 RPC 边界构造 CallResponse / Status，并保留线协议 u32 非零规则。
+当时正文 protobuf 适配位于 tok-protobuf（现为 tok-message::codec），复用通用表，提供 Registry<K, C, O, E> / Message<K> / Reply / Error，编解码与内层就绪等待也计入原预算。tok-execution 不依赖 prost、Tonic、生成协议、玩家或生命周期。message::rpc::HandlerRegistry 的普通请求表委托该适配器；business::Handler 显式转换业务状态与错误，仅在 RPC 边界构造 CallResponse / Status，并保留线协议 u32 非零规则。
 
 公会示例用自身错误与 u64 目标，本地及 RPC 共用相同处理链；just dispatch-smoke 演示本地直接调用。当前存储的处理链与输入要求自有 Send + static 类型，共享业务状态可以 Arc 传入；借用执行继续使用直接 Tower 或事件接口。
 
@@ -172,7 +177,7 @@ registry 注册错误定名为 Error<K>，运行失败定名为 DispatchError<K,
 
 ## 消息与传输边界校正（2026-10-21）
 
-当时 tok-game-rpc 调整为 tok-message，通用正文适配独立为 tok-protobuf（现已并入 tok-message::protobuf），tok-rpc 更名为 tok-grpc。生成协议仍在 tok-proto，不依赖执行层。当时门面提供 tok::protobuf、tok::message 与 tok::grpc；现改为 tok::message::protobuf 与 tok::grpc。
+当时 tok-game-rpc 调整为 tok-message，通用正文适配曾独立为 tok-protobuf，随后并入 tok-message，现重新拆出正文编解码适配，tok-rpc 更名为 tok-grpc。生成协议仍在 tok-proto，不依赖执行层。当时门面提供 tok::protobuf、tok::message 与 tok::grpc；现提供 tok::protobuf（正文编解码适配）、tok::message 与 tok::grpc。
 
 tok-message 根 Registry 提供不依赖 Tonic 的非零编号注册、本地分发与原始业务错误；玩家身份、事件/timer RPC 组合、线协议结果与 Status 映射集中于 message::rpc。公会示例和本地/RPC 共用处理链采用根 Registry。通用 protobuf 表继续允许字符串及零键，RPC 不自动添加锁或重试，事件与 timer 仍只能由可信服务器触发。
 
@@ -231,7 +236,7 @@ Listener::from_server 已支持带 Tower Layer 的 Tonic Server。内部改为 R
 
 ### 已符合或不应机械迁移的部分
 
-- [Context::child](../crates/tok-execution/src/context.rs) 保留当前服务、原截止点、父子取消关系与 Span；输入扩展由 Request 转换与显式拆装保留；[通用分发表](../crates/tok-execution/src/registry.rs)、[protobuf 适配](../crates/tok-message/src/protobuf.rs)、[游戏处理适配](../crates/tok-message/src/rpc/handler.rs) 转换输入时移交原 context。无需因文件拆分重建另一套上下文。
+- [Context::child](../crates/tok-execution/src/context.rs) 保留当前服务、原截止点、父子取消关系与 Span；输入扩展由 Request 转换与显式拆装保留；[通用分发表](../crates/tok-execution/src/registry.rs)、[protobuf 适配](../crates/tok-message/src/codec.rs)、[游戏处理适配](../crates/tok-message/src/rpc/handler.rs) 转换输入时移交原 context。无需因文件拆分重建另一套上下文。
 - [本地事件 Registry](../crates/tok-events/src/registry.rs) 从父范围派生事件操作，保留自定义扩展，显式覆盖事件头并清除不适用于新事件的原编码；这是有意的扩展作用域处理，不是任意丢失。
 - [普通 RPC 接收端](../crates/tok-message/src/rpc/service.rs) 经 Server::request 重建本地范围，注入本地请求能力和可信协议关联，再进入共同执行链。远端重建本身符合规范，不要求恢复源进程的 Extensions。
 - [NATS 消费](../crates/tok-nats/src/nats.rs) 使用订阅服务身份、消费预算、停止信号与 [Subscriber 本地扩展](../crates/tok-events/src/subscriber.rs) 建立独立执行范围，随后提交 Request。无需复制发布者的本地能力或执行期限。
@@ -410,7 +415,7 @@ TLS 导出器初始化与关闭；保留真实 HTTP Collector 导出回归。
 
 ### protobuf 集成与玩家边界方向（2026-10-29）
 
-泛型键 protobuf 适配由独立 tok-protobuf 移至 tok-message::protobuf，保留非 Clone 键、自定义注册器、执行保护与回归测试；Message<K> / Reply 移至 message 公共入口，本身不限定正文编码，protobuf 模块重导出相同类型；门面通过 tok::message::protobuf 使用，不保留旧 crate 或 tok::protobuf 路径。tok-execution 仍编码无关。目前编号消息 Registry 的注册入口仍以 protobuf 为默认实现，未来其他编码须继续校正编号约束与编解码边界，当前没有声称已提供通用 codec。
+当时泛型键 protobuf 分发适配迁入 tok-message，保留非 Clone 键、自定义注册器与执行保护。后续正文编解码已校正：tok-message::codec 接收 tok-core::codec 的通用编解码器，tok-protobuf 提供独立 prost 实现；Message<K> / Reply 不限定正文编码，编号消息注册器仍负责 u32 非零约束。
 
 目标方向：tok-player 承担玩家会话、所有权、timer、玩家 RPC 转发及协议适配；tok-message 承担公共编号消息与通用消息协议。现有 message::rpc 同时依赖玩家和普通业务上下文，玩家协议尚未迁移；应先拆分公共/玩家调用上下文及处理入口、消除公共消息对玩家的反向依赖，再迁移玩家专属实现，避免依赖循环。网关继续负责连接、会话调度及其状态机；不因玩家协议归属把网关实现全部移入 tok-player。
 

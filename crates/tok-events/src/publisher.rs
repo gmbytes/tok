@@ -1,6 +1,4 @@
-use crate::{DeliveryPolicy, Message, Task};
-#[cfg(feature = "protobuf")]
-use crate::{Envelope, Error, Event};
+use crate::{DeliveryPolicy, EncodeError, Envelope, Event, Message, Task};
 use tok_execution::{Request, Response};
 
 /// 传输无关的已编码发布，投递要求不因编码而丢失。
@@ -12,10 +10,12 @@ pub struct Publication {
     pub delivery: DeliveryPolicy,
 }
 impl Publication {
-    /// 使用 protobuf 编码强类型事件；不自动采集当前任务的隐式 span。
-    #[cfg(feature = "protobuf")]
-    pub fn protobuf<E: Event + prost::Message>(event: &Envelope<E>) -> Result<Self, Error> {
-        let mut message = Message::from_protobuf(event)?;
+    /// 使用业务选择的编码器构造发布，并保留具体编码错误。
+    pub fn with_codec<E: Event, C: tok_core::codec::Encode<E>>(
+        event: &Envelope<E>,
+        codec: &C,
+    ) -> Result<Self, EncodeError<C::Error>> {
+        let mut message = Message::from_codec(event, codec)?;
         message.trace_context = event.trace_context.clone();
         Ok(Self {
             message,

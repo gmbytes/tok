@@ -10,7 +10,7 @@
 | [tok-core](../crates/tok-core/src/lib.rs) | 2026-10-29 | 已确认模块划分、命名、导出、错误与执行上下文边界；此前与 tok-execution、tok-grpc 一起复审并修复。 |
 | [tok-execution](../crates/tok-execution/src/lib.rs) | 2026-10-29 | 已确认请求与响应、扩展、派发、执行停止与追踪等此前审查结果；共同执行驱动与 gRPC 的修复见[实现状态](status.md#execution--grpc-审查问题修复2026-10-21)。 |
 | [tok-proto](../crates/tok-proto/src/lib.rs) | 2026-10-29 | 使用者确认列入已确认清单；现有记录说明其承载生成协议，不依赖执行层，见[实现状态](status.md)。现有记录未单独列出针对该 crate 的完整审查范围。 |
-| [原 tok-protobuf，现为 tok-message::protobuf](../crates/tok-message/src/protobuf.rs) | 2026-10-29 | 原独立 crate 的类型化处理链、编解码与派发边界曾获确认，最后相关提交为 `becafb0`；现已并入 tok-message，迁移后的整体边界需要重新审查；详见[实现状态](status.md#protobuf-派发键约束校正2026-10-21)。 |
+| [原 protobuf 分发适配，现为 tok-message::codec](../crates/tok-message/src/codec.rs) | 2026-10-29 | 原独立 crate 的类型化处理链、编解码与派发边界曾获确认，最后相关提交为 `becafb0`；现为可替换编码的消息分发，迁移后的整体边界需要重新审查。 |
 | [tok-observability](../crates/tok-observability/src/lib.rs) | 2026-10-29 | 已确认日志与追踪关联、采样、过滤和 OTLP HTTPS 的多次复审结果，最后相关提交为 `2041fed`。HTTPS 初始化已测试，真实 TLS 握手和证书失败场景尚未覆盖；详见[实现状态](status.md#otlp-https-支持校正2026-10-21)。 |
 
 | [tok-lifecycle](../crates/tok-lifecycle/src/lib.rs) | 2026-10-29 | 已确认生命周期、任务监督、取消和回收的审查结果；审查时未发现确定性缺陷，详见[实现状态](status.md#可观测事件父级与采样边界校正2026-10-21)。 |
@@ -24,5 +24,6 @@
 | [tok-session（原 tok-player）](../crates/tok-session/src/lib.rs) | 模块划分、命名、导出和错误 | 使用者曾明确要求审查，随后要求修复并提交；相关提交为 `18ea656`。近期玩家 RPC 已迁入该 crate，迁移后的整体边界尚未最终确认。 |
 | [tok-events](../crates/tok-events/src/lib.rs) | 事件契约、传输抽象、模块与可靠性 | 已审查并修复部分问题；NATS 拆分和通用发布接口属于后续变更，整体尚未重新确认。 |
 | [tok-nats](../crates/tok-nats/src/lib.rs) | 新拆出的 NATS 与 JetStream 适配 | 新 crate 尚未经过独立审查确认。 |
+| [tok-protobuf](../crates/tok-protobuf/src/lib.rs) | 新拆出的正文编解码适配 | 新实现仅提供 prost 编解码，尚未经过独立审查确认。 |
 
 未列出的 crate 不代表已经或尚未审查；本表只记录有明确依据的确认和上述审查。新增确认时记录日期、范围及对应提交或文档依据，涉及重大后续变更时重新核对。

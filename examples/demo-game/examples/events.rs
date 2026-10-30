@@ -1,8 +1,9 @@
 //! 同一事件注册链的本地借用和远程解码适配，不需要启动 NATS。
 use std::{sync::Arc, time::Duration};
+use tok::protobuf::events::RegistryExt as _;
 use tok::{
     core::service::Identity,
-    events::{Envelope, Event, EventId, Message, Outcome, Registry},
+    events::{Envelope, Event, EventId, Outcome, Registry},
     execution::{Context, Request},
 };
 use tokio_util::sync::CancellationToken;
@@ -43,7 +44,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .dispatch(&mut state, Request::new(context()?, &event))
         .await?;
     // 仅传输适配需要编码，本地分发不会执行这一步。
-    let encoded = Arc::new(Message::new(&event)?);
+    let encoded = Arc::new(tok::protobuf::events::immediate(&event)?);
     events
         .receive(&mut state, Request::new(context()?, encoded))
         .await?;
